@@ -16,6 +16,7 @@ dataq [--emit-pipeline] <command> [options]
 - `profile`: フィールド統計を決定的JSONで出力
 - `merge`: base + overlays をポリシーマージ
 - `doctor`: `jq` / `yq` / `mlr` の実行前診断
+- `recipe run`: 宣言的レシピを定義順に実行
 
 ## `profile` 出力契約
 
@@ -113,6 +114,7 @@ pipeline JSON schema:
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
 - `deterministic_guards`: 適用した決定性ガード
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
+- `recipe run` では `steps` に `load_recipe_file`, `validate_recipe_schema`, `execute_step_<index>_<kind>` が入る
 
 ```bash
 cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.json
@@ -122,6 +124,20 @@ cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.jso
 
 - `dataq` は外部ツールを運用上の依存として扱い、CLI契約（JSON/終了コード）をRust層で統一する
 - ユーザー入力はシェル文字列展開せず、外部ツール連携時も明示的な引数配列で扱う
+
+## `recipe run` MVP スキーマ
+
+- 実行形式: `dataq recipe run --file <path>`
+- レシピファイル形式: 拡張子解決で JSON / YAML をサポート
+- `version`: `dataq.recipe.v1` 固定
+- `steps`: 実行順配列（定義順で処理）
+- `steps[*].kind`: `canon | assert | profile | sdiff`
+- `steps[*].args`: 各 step の引数オブジェクト
+- step 間データ受け渡し: in-memory
+- サマリ出力: stdout JSON に `matched`, `exit_code`, `steps`
+- 異常時契約:
+  - スキーマ不正 / 未知step / 引数不正は exit `3`
+  - `assert` / `sdiff` の不一致は exit `2`
 
 ## 関連ドキュメント
 

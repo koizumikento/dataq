@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Deterministic profile report for `profile` command output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -40,6 +41,24 @@ pub struct ProfileTypeDistribution {
     pub string: usize,
     pub array: usize,
     pub object: usize,
+}
+
+/// Deterministic report for `recipe run` command output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeRunReport {
+    pub matched: bool,
+    pub exit_code: i32,
+    pub steps: Vec<RecipeStepReport>,
+}
+
+/// Per-step result summary in recipe execution order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeStepReport {
+    pub index: usize,
+    pub kind: String,
+    pub matched: bool,
+    pub exit_code: i32,
+    pub summary: Value,
 }
 
 /// Diagnostics report emitted when `--emit-pipeline` is enabled.

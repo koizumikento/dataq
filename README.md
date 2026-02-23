@@ -68,6 +68,7 @@ dataq [--emit-pipeline] <command> [options]
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` |
 | `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
+| `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
 
 グローバルオプション:
 
@@ -284,6 +285,37 @@ dataq assert \
   - `3`: 1つ以上が欠如または起動不可
   - `1`: 予期しない内部エラー
 - `--emit-pipeline` 指定時は stderr に診断ステップ (`doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`) を追加出力
+
+### 7. `recipe run`
+
+レシピファイル（YAML/JSON）を読み込み、`steps` を定義順で実行します。
+
+- 実行コマンド: `dataq recipe run --file <path>`
+- レシピスキーマ（MVP）:
+  - `version`: `dataq.recipe.v1`
+  - `steps[*].kind`: `canon | assert | profile | sdiff`
+  - `steps[*].args`: 各 step の引数オブジェクト
+- step 間データは in-memory で受け渡し
+- stdout は実行サマリ JSON（`matched`, `exit_code`, `steps`）を返す
+- `--emit-pipeline` 有効時は recipe 全体と step 実行トレースを stderr JSON へ出力
+
+例:
+
+```yaml
+version: dataq.recipe.v1
+steps:
+  - kind: canon
+    args:
+      input: ./input.json
+      from: json
+  - kind: assert
+    args:
+      rules:
+        required_keys: [id]
+        fields:
+          id:
+            type: integer
+```
 
 ## 設計ドキュメント
 

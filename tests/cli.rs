@@ -10,5 +10,7 @@ mod entry_cli;
 mod merge_cli;
 #[path = "cli/profile_cli.rs"]
 mod profile_cli;
+#[path = "cli/recipe_cli.rs"]
+mod recipe_cli;
 #[path = "cli/sdiff_cli.rs"]
 mod sdiff_cli;
