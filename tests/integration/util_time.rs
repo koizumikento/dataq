@@ -13,6 +13,13 @@ fn keeps_utc_datetime() {
 }
 
 #[test]
+fn preserves_fractional_seconds() {
+    let normalized =
+        normalize_rfc3339_utc("2026-02-23T20:15:30.123456+09:00").expect("valid datetime");
+    assert_eq!(normalized, "2026-02-23T11:15:30.123456Z");
+}
+
+#[test]
 fn invalid_datetime_returns_none() {
     let normalized = normalize_rfc3339_utc("not-a-datetime");
     assert!(normalized.is_none());

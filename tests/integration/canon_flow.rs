@@ -55,3 +55,37 @@ fn canon_flow_is_idempotent() {
 
     assert_eq!(first, second);
 }
+
+#[test]
+fn canon_flow_preserves_fractional_seconds_and_precision_sensitive_numbers() {
+    let input = br#"{"ts":"2026-02-23T20:15:30.123456+09:00","safe":"3.5","precise":"0.10000000000000001","large":"18446744073709551616"}
+"#;
+    let mut output = Vec::new();
+    run(
+        Cursor::new(input),
+        &mut output,
+        Format::Jsonl,
+        Format::Jsonl,
+        CanonCommandOptions {
+            sort_keys: true,
+            normalize_time: true,
+        },
+    )
+    .expect("canon flow should succeed");
+
+    let out = String::from_utf8(output).expect("valid utf8");
+    let mut lines = out.lines();
+    let first = lines.next().expect("one output line expected");
+    assert!(lines.next().is_none(), "expected exactly one output line");
+
+    let parsed: serde_json::Value = serde_json::from_str(first).expect("line should be valid json");
+    assert_eq!(
+        parsed,
+        serde_json::json!({
+            "large": "18446744073709551616",
+            "precise": "0.10000000000000001",
+            "safe": 3.5,
+            "ts": "2026-02-23T11:15:30.123456Z"
+        })
+    );
+}
