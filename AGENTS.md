@@ -26,8 +26,13 @@ Core goals:
 
 ## Skill usage
 
-- Skill path: `.agents/skills/feat-add/`
-- Invoke explicitly with `$feat-add` (implicit invocation is disabled).
+- Skill paths:
+  - `.agents/skills/feat-add/`
+  - `.agents/skills/rev-pass/`
+- Invoke explicitly:
+  - `$feat-add`
+  - `$rev-pass`
+  - (both have implicit invocation disabled)
 - Run `$feat-add` as a sub-agent workflow:
   - use `explorer` to map impact first
   - use `worker` to implement the feature and tests
@@ -37,8 +42,18 @@ Core goals:
   - extending existing command options/output schema
   - adding validation/normalization/diff behavior in `src/engine/`
   - implementing feature work that also needs tests + README update
+- Run `$rev-pass` after implementation:
+  - `$rev-pass` is one review pass only (no auto-loop inside the skill)
+  - spawn a review sub-agent with `$rev-pass`
+  - receive findings and fix required issues
+  - run the review sub-agent again
+  - repeat fix + review until no required fixes remain
+- Required default process:
+  - do not finish implementation after first review pass
+  - continue iterations until the review result indicates no required fixes
 - Prefer normal editing (without the skill) for tiny typo/docs-only changes.
 - Example prompt: `Use $feat-add as a sub-agent to add --strict mode to assert and update tests.`
+- Example prompt: `Use $rev-pass as a sub-agent to review this implementation; fix findings and re-run review until clean.`
 
 ## Rust baseline
 

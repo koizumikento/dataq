@@ -1,0 +1,7 @@
+interface:
+  display_name: "Review Pass"
+  short_description: "Single review pass sub-agent"
+  default_prompt: "Use $rev-pass as a sub-agent for one review pass and return severity-ordered findings with file and line references."
+
+policy:
+  allow_implicit_invocation: false
