@@ -7,7 +7,9 @@ use crate::io::{Format, reader, writer};
 /// Command-level options for canonicalization execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonCommandOptions {
+    /// Sort object keys lexicographically. If `false`, preserve input key order.
     pub sort_keys: bool,
+    /// Normalize RFC3339 timestamps to UTC (`Z`) when enabled.
     pub normalize_time: bool,
 }
 
@@ -109,5 +111,25 @@ mod tests {
         .expect("second run should succeed");
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn preserves_input_key_order_when_sorting_disabled() {
+        let input = br#"{"z":"false","a":{"n":"42","m":"1"}}"#;
+        let mut output = Vec::new();
+        run(
+            Cursor::new(input),
+            &mut output,
+            Format::Json,
+            Format::Json,
+            CanonCommandOptions {
+                sort_keys: false,
+                normalize_time: false,
+            },
+        )
+        .expect("canon run should succeed");
+
+        let out = String::from_utf8(output).expect("output should be utf8");
+        assert_eq!(out, r#"{"z":false,"a":{"n":42,"m":1}}"#);
     }
 }

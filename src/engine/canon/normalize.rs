@@ -1,6 +1,9 @@
 use serde_json::{Map, Value};
 
 /// Recursively normalize JSON values for deterministic output.
+///
+/// When `sort_keys` is `true`, object keys are sorted lexicographically.
+/// When `sort_keys` is `false`, existing object insertion order is preserved.
 pub fn normalize_value(value: Value, sort_keys: bool) -> Value {
     match value {
         Value::Object(map) => normalize_object(map, sort_keys),
@@ -57,5 +60,14 @@ mod tests {
         let once = normalize_value(input, true);
         let twice = normalize_value(once.clone(), true);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn preserves_insertion_order_when_sorting_disabled() {
+        let input: serde_json::Value =
+            serde_json::from_str(r#"{"z":{"d":4,"a":1},"a":[{"c":3,"a":1}]}"#).expect("parse json");
+        let actual = normalize_value(input, false);
+        let as_json = serde_json::to_string(&actual).expect("serialize normalized json");
+        assert_eq!(as_json, r#"{"z":{"d":4,"a":1},"a":[{"c":3,"a":1}]}"#);
     }
 }

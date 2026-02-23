@@ -6,7 +6,9 @@ use serde_json::Value;
 /// Canonicalization options shared by `canon` command and engine layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonOptions {
+    /// Sort object keys lexicographically. If `false`, preserve input key order.
     pub sort_keys: bool,
+    /// Normalize RFC3339 timestamps to UTC (`Z`) when enabled.
     pub normalize_time: bool,
 }
 

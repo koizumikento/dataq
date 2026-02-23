@@ -129,10 +129,10 @@ fn parse_decimal_rational(input: &str) -> Option<(BigInt, BigInt)> {
         return None;
     }
 
-    let mut exponent: i32 = 0;
+    let mut exponent_abs: i32 = 0;
+    let mut exponent_negative = false;
     if matches!(bytes.get(index), Some(b'e' | b'E')) {
         index += 1;
-        let mut exponent_negative = false;
         if matches!(bytes.get(index), Some(b'+' | b'-')) {
             exponent_negative = bytes[index] == b'-';
             index += 1;
@@ -140,7 +140,7 @@ fn parse_decimal_rational(input: &str) -> Option<(BigInt, BigInt)> {
         let exponent_start = index;
         while let Some(byte) = bytes.get(index) {
             if byte.is_ascii_digit() {
-                exponent = exponent
+                exponent_abs = exponent_abs
                     .checked_mul(10)?
                     .checked_add(i32::from(*byte - b'0'))?;
                 index += 1;
@@ -151,17 +151,19 @@ fn parse_decimal_rational(input: &str) -> Option<(BigInt, BigInt)> {
         if exponent_start == index {
             return None;
         }
-        if exponent_negative {
-            exponent = -exponent;
-        }
     }
 
     if index != bytes.len() {
         return None;
     }
 
+    let exponent = if exponent_negative {
+        exponent_abs.checked_neg()?
+    } else {
+        exponent_abs
+    };
     let exponent10 = exponent.checked_sub(fractional_digits)?;
-    if exponent10.abs() > MAX_SAFE_DECIMAL_EXPONENT {
+    if !(-MAX_SAFE_DECIMAL_EXPONENT..=MAX_SAFE_DECIMAL_EXPONENT).contains(&exponent10) {
         return None;
     }
 
@@ -285,5 +287,12 @@ mod tests {
         let input = json!("2026-02-23T20:15:30.123456+09:00");
         let actual = coerce_value(input, true);
         assert_eq!(actual, json!("2026-02-23T11:15:30.123456Z"));
+    }
+
+    #[test]
+    fn rejects_min_i32_effective_exponent_without_panicking() {
+        let input = json!("1.0e-2147483647");
+        let actual = coerce_value(input.clone(), false);
+        assert_eq!(actual, input);
     }
 }
