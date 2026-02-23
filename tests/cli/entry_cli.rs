@@ -361,6 +361,38 @@ fn emit_pipeline_fingerprint_hashes_are_stable_for_same_args_and_input() {
     assert!(first["fingerprint"]["input_hash"].is_string());
 }
 
+#[cfg(unix)]
+#[test]
+fn emit_pipeline_fingerprint_hashes_consumed_bytes_for_dev_stdin_input_path() {
+    let run_once = |payload: &str| {
+        let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+            .args([
+                "--emit-pipeline",
+                "canon",
+                "--from",
+                "json",
+                "--input",
+                "/dev/stdin",
+            ])
+            .write_stdin(payload)
+            .output()
+            .expect("run command");
+
+        assert_eq!(output.status.code(), Some(0));
+        parse_last_stderr_json(&output.stderr)
+    };
+
+    let first = run_once(r#"{"z":"2","a":"true"}"#);
+    let second = run_once(r#"{"z":"9","a":"false"}"#);
+
+    assert!(first["fingerprint"]["input_hash"].is_string());
+    assert!(second["fingerprint"]["input_hash"].is_string());
+    assert_ne!(
+        first["fingerprint"]["input_hash"],
+        second["fingerprint"]["input_hash"]
+    );
+}
+
 #[test]
 fn emit_pipeline_preserves_assert_exit_code_contract() {
     let dir = tempdir().expect("temp dir");
