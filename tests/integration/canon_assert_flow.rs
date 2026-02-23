@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use dataq::domain::rules::{AssertRules, CountRule, NumericRangeRule, RuleType};
 use dataq::engine::r#assert::execute_assert;
 use dataq::util::sort::sort_value_keys;
-use serde_json::json;
+use serde_json::{Number, json};
 
 #[test]
 fn canon_then_assert_success_flow() {
@@ -21,8 +21,8 @@ fn canon_then_assert_success_flow() {
     ranges.insert(
         "score".to_string(),
         NumericRangeRule {
-            min: Some(1.0),
-            max: Some(3.0),
+            min: Some(float_number(1.0)),
+            max: Some(float_number(3.0)),
         },
     );
 
@@ -53,8 +53,8 @@ fn mismatch_report_order_is_deterministic() {
     ranges.insert(
         "score".to_string(),
         NumericRangeRule {
-            min: Some(0.0),
-            max: Some(5.0),
+            min: Some(float_number(0.0)),
+            max: Some(float_number(5.0)),
         },
     );
 
@@ -73,4 +73,8 @@ fn mismatch_report_order_is_deterministic() {
         as_json,
         r#"{"matched":false,"mismatch_count":5,"mismatches":[{"path":"$[0].id","reason":"type_mismatch","actual":"string","expected":"integer"},{"path":"$[0].score","reason":"above_max","actual":10,"expected":5.0},{"path":"$[1].id","reason":"missing_key","actual":null,"expected":"integer"},{"path":"$[1].id","reason":"missing_key","actual":null,"expected":"present"},{"path":"$[1].score","reason":"below_min","actual":-1,"expected":0.0}]}"#
     );
+}
+
+fn float_number(value: f64) -> Number {
+    Number::from_f64(value).expect("finite float")
 }

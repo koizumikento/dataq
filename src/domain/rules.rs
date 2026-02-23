@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Number, Value};
 
 /// Rule schema for the `assert` command MVP.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AssertRules {
     #[serde(default)]
     pub required_keys: Vec<String>,
@@ -18,6 +19,7 @@ pub struct AssertRules {
 
 /// Record count boundaries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct CountRule {
     pub min: Option<usize>,
     pub max: Option<usize>,
@@ -64,9 +66,10 @@ impl RuleType {
 
 /// Numeric range boundaries for a field.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct NumericRangeRule {
-    pub min: Option<f64>,
-    pub max: Option<f64>,
+    pub min: Option<Number>,
+    pub max: Option<Number>,
 }
 
 /// Single mismatch in assert output.

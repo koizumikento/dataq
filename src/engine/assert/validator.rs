@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
@@ -60,7 +61,7 @@ pub fn validate(
         for (path, range) in &rules.ranges {
             match get_value_at_path(row, path) {
                 Some(actual) => {
-                    let Some(number) = actual.as_f64() else {
+                    let Some(number) = actual.as_number() else {
                         mismatches.push(MismatchEntry {
                             path: row_path(index, path),
                             reason: "not_numeric".to_string(),
@@ -74,23 +75,23 @@ pub fn validate(
                         continue;
                     };
 
-                    if let Some(min) = range.min {
-                        if number < min {
+                    if let Some(min) = &range.min {
+                        if compare_numbers(number, min) == Ordering::Less {
                             mismatches.push(MismatchEntry {
                                 path: row_path(index, path),
                                 reason: "below_min".to_string(),
                                 actual: actual.clone(),
-                                expected: json!(min),
+                                expected: Value::Number(min.clone()),
                             });
                         }
                     }
-                    if let Some(max) = range.max {
-                        if number > max {
+                    if let Some(max) = &range.max {
+                        if compare_numbers(number, max) == Ordering::Greater {
                             mismatches.push(MismatchEntry {
                                 path: row_path(index, path),
                                 reason: "above_max".to_string(),
                                 actual: actual.clone(),
-                                expected: json!(max),
+                                expected: Value::Number(max.clone()),
                             });
                         }
                     }
@@ -136,8 +137,8 @@ fn validate_rules(rules: &AssertRules) -> Result<(), AssertValidationError> {
 
     for (path, range) in &rules.ranges {
         validate_path(path)?;
-        if let (Some(min), Some(max)) = (range.min, range.max)
-            && min > max
+        if let (Some(min), Some(max)) = (&range.min, &range.max)
+            && compare_numbers(min, max) == Ordering::Greater
         {
             return Err(AssertValidationError::InputUsage(format!(
                 "ranges.{path}.min must be <= ranges.{path}.max"
@@ -220,6 +221,38 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
+fn compare_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Ordering {
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+        return left.cmp(&right);
+    }
+
+    if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
+        return left.cmp(&right);
+    }
+
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_u64()) {
+        return if left.is_negative() {
+            Ordering::Less
+        } else {
+            u64::try_from(left)
+                .expect("non-negative i64 always fits into u64")
+                .cmp(&right)
+        };
+    }
+
+    if let (Some(left), Some(right)) = (left.as_u64(), right.as_i64()) {
+        return if right.is_negative() {
+            Ordering::Greater
+        } else {
+            left.cmp(&u64::try_from(right).expect("non-negative i64 always fits into u64"))
+        };
+    }
+
+    left.as_f64()
+        .and_then(|left| right.as_f64().and_then(|right| left.partial_cmp(&right)))
+        .expect("serde_json::Number is always finite")
+}
+
 fn sort_mismatches(mismatches: &mut [MismatchEntry]) {
     mismatches.sort_by(|left, right| {
         let left_key = (
@@ -246,7 +279,7 @@ fn stable_value_key(value: &Value) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use serde_json::json;
+    use serde_json::{Number, json};
 
     use crate::domain::rules::{AssertRules, CountRule, NumericRangeRule, RuleType};
 
@@ -261,8 +294,8 @@ mod tests {
         ranges.insert(
             "score".to_string(),
             NumericRangeRule {
-                min: Some(1.0),
-                max: Some(2.0),
+                min: Some(float_number(1.0)),
+                max: Some(float_number(2.0)),
             },
         );
         let rules = AssertRules {
@@ -289,8 +322,8 @@ mod tests {
         ranges.insert(
             "score".to_string(),
             NumericRangeRule {
-                min: Some(1.0),
-                max: Some(3.0),
+                min: Some(float_number(1.0)),
+                max: Some(float_number(3.0)),
             },
         );
         let rules = AssertRules {
@@ -326,5 +359,34 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn compares_large_integer_ranges_exactly() {
+        let values = vec![json!({"value": 9_007_199_254_740_993u64})];
+        let mut ranges = BTreeMap::new();
+        ranges.insert(
+            "value".to_string(),
+            NumericRangeRule {
+                min: None,
+                max: Some(Number::from(9_007_199_254_740_992u64)),
+            },
+        );
+        let rules = AssertRules {
+            required_keys: vec![],
+            types: BTreeMap::new(),
+            count: CountRule::default(),
+            ranges,
+        };
+
+        let report = validate(&values, &rules).expect("validation report");
+        assert!(!report.matched);
+        assert_eq!(report.mismatch_count, 1);
+        assert_eq!(report.mismatches[0].reason, "above_max");
+        assert_eq!(report.mismatches[0].path, "$[0].value");
+    }
+
+    fn float_number(value: f64) -> Number {
+        Number::from_f64(value).expect("finite float")
     }
 }
