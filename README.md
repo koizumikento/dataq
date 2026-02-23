@@ -257,15 +257,6 @@ dataq assert \
 - [CLI仕様・I/O契約](docs/command-spec.md)
 - [assert ルールスキーマ](docs/rules-schema.md)
 
-## ロードマップ
-
-1. MVP (`canon`, `assert`, `sdiff`)
-2. `profile`（欠損率、ユニーク数、型分布）
-3. `merge`（YAML/JSONのポリシーマージ、実装済み）
-4. 外部ツール前提の環境診断（`doctor`）
-5. 複合パイプライン定義の簡素化（レシピ実行）
-6. スナップショットテスト拡充
-
 ## 想定ユースケース
 
 - CIでのデータ品質ゲート
