@@ -414,7 +414,8 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
                         3,
                     );
                     if emit_pipeline {
-                        let pipeline_report = build_canon_pipeline_report(&args, input_format, options);
+                        let pipeline_report =
+                            build_canon_pipeline_report(&args, input_format, options);
                         emit_pipeline_report_with_context(&pipeline_report, &fingerprint_context);
                     }
                     return 3;
