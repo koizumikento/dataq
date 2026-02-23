@@ -21,6 +21,7 @@ dataq assert --schema-help
 
 | キー | 型 | 目的 |
 | --- | --- | --- |
+| `extends` | `string \| string[]` | 親ルールファイルを再利用（親から順にマージ） |
 | `required_keys` | `string[]` | 各レコードで必須にするキー（パス） |
 | `forbid_keys` | `string[]` | 各レコードで禁止するキー（パス） |
 | `fields` | `object<string, object>` | パスごとの検証ルール集約 |
@@ -31,6 +32,7 @@ dataq assert --schema-help
 ## 例
 
 ```yaml
+extends: [./base.rules.yaml]
 required_keys: [id, status]
 forbid_keys: [debug, meta.blocked]
 fields:
@@ -59,6 +61,17 @@ count:
 - ミスマッチ出力ではレコード位置が先頭に付き、`$[0].meta.blocked` のような形式になります。
 
 ## キー別リファレンス
+
+### `extends`
+
+- 型: `string` または `string[]`
+- 意味: 参照先ルールを先に読み込み、最後に現在ファイルを適用します（現在ファイル優先）。
+- パス解決: 現在ファイルの親ディレクトリ基準の相対パス。
+- マージ規則:
+  - `required_keys`: 和集合（重複排除・決定的順序）
+  - `forbid_keys`: 和集合（重複排除・決定的順序）
+  - `fields`: パス単位で後勝ち上書き
+  - `count`: 最後に `count` を定義したファイルを採用
 
 ### `required_keys`
 
@@ -139,6 +152,9 @@ count:
 - 未知キーが含まれる（トップレベル、`count`、`fields.<path>`、`fields.<path>.range` すべて厳密）
 - 旧トップレベルキー（`types` / `nullable` / `enum` / `pattern` / `ranges`）を指定する
 - パスが不正（空文字、空セグメント）
+- `extends` が循環参照している
+- `extends` の参照先が存在しない
+- `extends` の形式が不正（`string` / `string[]` 以外）
 - `count.min > count.max`
 - `fields.<path>.range.min > fields.<path>.range.max`
 - `pattern` の正規表現が無効
