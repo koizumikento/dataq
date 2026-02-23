@@ -250,7 +250,18 @@ dataq assert \
 
 - `record_count`: レコード件数
 - `field_count`: フィールドパス件数
-- `fields`: canonical path ごとの集計（`null_ratio`（0.0-1.0）, `unique_count`, `type_distribution`（`null|boolean|number|string|array|object`））
+- `fields`: canonical path ごとの集計
+  - `null_ratio`（0.0-1.0）
+  - `unique_count`
+  - `type_distribution`（`null|boolean|number|string|array|object`）
+  - `numeric_stats`（数値サンプルが1件以上ある場合のみ）
+    - `count`, `min`, `max`, `mean`, `p50`, `p95`
+
+`numeric_stats` の決定性ルール:
+
+- 数値サンプルは JSON number 型のみを対象（null/文字列/真偽値などは対象外）
+- `p50` / `p95` は nearest-rank 方式（`rank = ceil(p * n)`、`index = rank - 1`、0始まり配列で評価）
+- `numeric_stats` の浮動小数は小数点以下6桁へ丸め（`round half away from zero` 相当）
 
 ### 5. `merge`
 

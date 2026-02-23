@@ -2,8 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-use crate::domain::report::{ProfileFieldReport, ProfileReport, ProfileTypeDistribution};
+use crate::domain::report::{
+    ProfileFieldReport, ProfileNumericStats, ProfileReport, ProfileTypeDistribution,
+};
 use crate::util::sort::sort_value_keys;
+
+const NUMERIC_STAT_SCALE: f64 = 1_000_000.0;
 
 /// Builds deterministic profile statistics for a dataset.
 pub fn profile_values(values: &[Value]) -> ProfileReport {
@@ -69,6 +73,7 @@ fn summarize_field_path(
     let mut null_count = 0usize;
     let mut unique_values = BTreeSet::new();
     let mut type_distribution = ProfileTypeDistribution::default();
+    let mut numeric_samples = Vec::new();
 
     for samples in per_record_samples {
         if let Some(values) = samples.get(path) {
@@ -79,6 +84,7 @@ fn summarize_field_path(
                     &mut null_count,
                     &mut unique_values,
                     &mut type_distribution,
+                    &mut numeric_samples,
                 );
             }
         } else {
@@ -88,6 +94,7 @@ fn summarize_field_path(
                 &mut null_count,
                 &mut unique_values,
                 &mut type_distribution,
+                &mut numeric_samples,
             );
         }
     }
@@ -102,6 +109,7 @@ fn summarize_field_path(
         null_ratio,
         unique_count: unique_values.len(),
         type_distribution,
+        numeric_stats: compute_numeric_stats(&numeric_samples),
     }
 }
 
@@ -111,6 +119,7 @@ fn observe_value(
     null_count: &mut usize,
     unique_values: &mut BTreeSet<String>,
     type_distribution: &mut ProfileTypeDistribution,
+    numeric_samples: &mut Vec<f64>,
 ) {
     *observed += 1;
 
@@ -120,7 +129,12 @@ fn observe_value(
             *null_count += 1;
         }
         Value::Bool(_) => type_distribution.boolean += 1,
-        Value::Number(_) => type_distribution.number += 1,
+        Value::Number(number) => {
+            type_distribution.number += 1;
+            if let Some(sample) = number.as_f64() {
+                numeric_samples.push(sample);
+            }
+        }
         Value::String(_) => type_distribution.string += 1,
         Value::Array(_) => type_distribution.array += 1,
         Value::Object(_) => type_distribution.object += 1,
@@ -130,6 +144,41 @@ fn observe_value(
     let signature =
         serde_json::to_string(&normalized).expect("serializing normalized value should succeed");
     unique_values.insert(signature);
+}
+
+fn compute_numeric_stats(samples: &[f64]) -> Option<ProfileNumericStats> {
+    if samples.is_empty() {
+        return None;
+    }
+
+    let mut sorted_samples = samples.to_vec();
+    sorted_samples.sort_by(f64::total_cmp);
+
+    let count = sorted_samples.len();
+    let mean = sorted_samples.iter().sum::<f64>() / count as f64;
+    let p50 = nearest_rank_percentile(&sorted_samples, 50);
+    let p95 = nearest_rank_percentile(&sorted_samples, 95);
+
+    Some(ProfileNumericStats {
+        count,
+        min: round_numeric_stat(sorted_samples[0]),
+        max: round_numeric_stat(sorted_samples[count - 1]),
+        mean: round_numeric_stat(mean),
+        p50: round_numeric_stat(p50),
+        p95: round_numeric_stat(p95),
+    })
+}
+
+fn nearest_rank_percentile(sorted_samples: &[f64], percentile: usize) -> f64 {
+    let len = sorted_samples.len();
+    let rank = ((percentile as f64 / 100.0) * len as f64).ceil() as usize;
+    let index = rank.saturating_sub(1).min(len - 1);
+    sorted_samples[index]
+}
+
+fn round_numeric_stat(value: f64) -> f64 {
+    let rounded = (value * NUMERIC_STAT_SCALE).round() / NUMERIC_STAT_SCALE;
+    if rounded == 0.0 { 0.0 } else { rounded }
 }
 
 fn append_object_key_path(path: &str, key: &str) -> String {
@@ -160,12 +209,15 @@ mod tests {
         assert_eq!(id.unique_count, 2);
         assert_eq!(id.type_distribution.null, 1);
         assert_eq!(id.type_distribution.number, 2);
+        assert_eq!(id.numeric_stats.as_ref().expect("numeric stats").count, 2);
+        assert_eq!(id.numeric_stats.as_ref().expect("numeric stats").mean, 1.0);
 
         let active = report.fields.get("$[\"active\"]").expect("active profile");
         assert_eq!(active.null_ratio, 1.0 / 3.0);
         assert_eq!(active.unique_count, 3);
         assert_eq!(active.type_distribution.null, 1);
         assert_eq!(active.type_distribution.boolean, 2);
+        assert!(active.numeric_stats.is_none());
     }
 
     #[test]
@@ -204,5 +256,27 @@ mod tests {
         let first_json = serde_json::to_string(&first).expect("serialize first");
         let second_json = serde_json::to_string(&second).expect("serialize second");
         assert_eq!(first_json, second_json);
+    }
+
+    #[test]
+    fn profiles_numeric_stats_with_nearest_rank_percentiles_and_rounding() {
+        let values = vec![
+            json!({"score": 1.0}),
+            json!({"score": 2.0}),
+            json!({"score": 3.3333339}),
+            json!({"score": 100.0}),
+            json!({"score": null}),
+        ];
+
+        let report = profile_values(&values);
+        let score = report.fields.get("$[\"score\"]").expect("score profile");
+        let numeric = score.numeric_stats.as_ref().expect("numeric stats");
+
+        assert_eq!(numeric.count, 4);
+        assert_eq!(numeric.min, 1.0);
+        assert_eq!(numeric.max, 100.0);
+        assert_eq!(numeric.mean, 26.583333);
+        assert_eq!(numeric.p50, 2.0);
+        assert_eq!(numeric.p95, 100.0);
     }
 }

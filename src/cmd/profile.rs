@@ -122,6 +122,14 @@ mod tests {
             response.payload["fields"]["$[\"id\"]"]["null_ratio"],
             json!(0.5)
         );
+        assert_eq!(
+            response.payload["fields"]["$[\"id\"]"]["numeric_stats"]["count"],
+            json!(1)
+        );
+        assert_eq!(
+            response.payload["fields"]["$[\"active\"]"]["numeric_stats"],
+            json!(null)
+        );
     }
 
     #[test]
