@@ -36,6 +36,8 @@ pub struct PipelineReport {
     pub input: PipelineInput,
     pub steps: Vec<String>,
     pub external_tools: Vec<ExternalToolUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_diagnostics: Option<Vec<PipelineStageDiagnostic>>,
     pub deterministic_guards: Vec<String>,
 }
 
@@ -51,6 +53,7 @@ impl PipelineReport {
             input,
             steps,
             external_tools: ExternalToolUsage::default_set(),
+            stage_diagnostics: None,
             deterministic_guards,
         }
     }
@@ -62,6 +65,16 @@ impl PipelineReport {
             .find(|tool| tool.name == tool_name)
         {
             tool.used = true;
+        }
+        self
+    }
+
+    pub fn with_stage_diagnostics(
+        mut self,
+        stage_diagnostics: Vec<PipelineStageDiagnostic>,
+    ) -> Self {
+        if !stage_diagnostics.is_empty() {
+            self.stage_diagnostics = Some(stage_diagnostics);
         }
         self
     }
@@ -133,5 +146,51 @@ impl ExternalToolUsage {
                 used: false,
             },
         ]
+    }
+}
+
+/// Per-stage diagnostic information for external-tool pipelines.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PipelineStageDiagnostic {
+    pub order: usize,
+    pub step: String,
+    pub tool: String,
+    pub input_records: usize,
+    pub output_records: usize,
+    pub status: String,
+}
+
+impl PipelineStageDiagnostic {
+    pub fn success(
+        order: usize,
+        stage: impl Into<String>,
+        tool: impl Into<String>,
+        input_records: usize,
+        output_records: usize,
+    ) -> Self {
+        Self {
+            order,
+            step: stage.into(),
+            tool: tool.into(),
+            input_records,
+            output_records,
+            status: "ok".to_string(),
+        }
+    }
+
+    pub fn failure(
+        order: usize,
+        stage: impl Into<String>,
+        tool: impl Into<String>,
+        input_records: usize,
+    ) -> Self {
+        Self {
+            order,
+            step: stage.into(),
+            tool: tool.into(),
+            input_records,
+            output_records: 0,
+            status: "error".to_string(),
+        }
     }
 }

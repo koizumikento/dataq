@@ -303,32 +303,8 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
 }
 
 fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
-    if args.rules_help {
-        if emit_json_stdout(&r#assert::rules_help_payload()) {
-            return 0;
-        }
-        emit_error(
-            "internal_error",
-            "failed to serialize assert rules help".to_string(),
-            json!({"command": "assert"}),
-            1,
-        );
-        return 1;
-    }
-    if args.schema_help {
-        if emit_json_stdout(&r#assert::schema_help_payload()) {
-            return 0;
-        }
-        emit_error(
-            "internal_error",
-            "failed to serialize assert schema help".to_string(),
-            json!({"command": "assert"}),
-            1,
-        );
-        return 1;
-    }
-
     let input = args.input.clone();
+    let normalize_mode = args.normalize.map(Into::into);
     let input_format = input
         .as_deref()
         .map(|path| dataq_io::resolve_input_format(None, Some(path)).ok())
@@ -341,68 +317,124 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         .schema
         .as_deref()
         .and_then(|path| dataq_io::resolve_input_format(None, Some(path)).ok());
-    let pipeline_report =
-        build_assert_pipeline_report(&args, input_format, rules_format, schema_format);
-    let command_args = r#assert::AssertCommandArgs {
-        input: input.clone(),
-        from: if input.is_some() {
-            None
-        } else {
-            Some(Format::Json)
-        },
-        rules: args.rules.clone(),
-        schema: args.schema.clone(),
-    };
+    let mut steps = r#assert::pipeline_steps(normalize_mode);
+    let mut deterministic_guards = r#assert::deterministic_guards(normalize_mode);
+    let mut trace = r#assert::AssertPipelineTrace::default();
 
-    let stdin = io::stdin();
-    let response = r#assert::run_with_stdin_and_normalize(
-        &command_args,
-        stdin.lock(),
-        args.normalize.map(Into::into),
-    );
-
-    let exit_code = match response.exit_code {
-        0 | 2 => {
-            if emit_json_stdout(&response.payload) {
-                response.exit_code
+    let exit_code = if args.rules_help {
+        steps = vec!["emit_assert_rules_help".to_string()];
+        deterministic_guards = vec![
+            "rust_native_execution".to_string(),
+            "assert_help_payload_static_schema".to_string(),
+        ];
+        emit_assert_rules_help()
+    } else if args.schema_help {
+        steps = vec!["emit_assert_schema_help".to_string()];
+        deterministic_guards = vec![
+            "rust_native_execution".to_string(),
+            "assert_help_payload_static_schema".to_string(),
+        ];
+        emit_assert_schema_help()
+    } else {
+        let command_args = r#assert::AssertCommandArgs {
+            input: input.clone(),
+            from: if input.is_some() {
+                None
             } else {
+                Some(Format::Json)
+            },
+            rules: args.rules.clone(),
+            schema: args.schema.clone(),
+        };
+
+        let stdin = io::stdin();
+        let (response, run_trace) = r#assert::run_with_stdin_and_normalize_with_trace(
+            &command_args,
+            stdin.lock(),
+            normalize_mode,
+        );
+        trace = run_trace;
+
+        match response.exit_code {
+            0 | 2 => {
+                if emit_json_stdout(&response.payload) {
+                    response.exit_code
+                } else {
+                    emit_error(
+                        "internal_error",
+                        "failed to serialize assert response".to_string(),
+                        json!({"command": "assert"}),
+                        1,
+                    );
+                    1
+                }
+            }
+            3 | 1 => {
+                if emit_json_stderr(&response.payload) {
+                    response.exit_code
+                } else {
+                    emit_error(
+                        "internal_error",
+                        "failed to serialize assert error".to_string(),
+                        json!({"command": "assert"}),
+                        1,
+                    );
+                    1
+                }
+            }
+            other => {
                 emit_error(
                     "internal_error",
-                    "failed to serialize assert response".to_string(),
+                    format!("unexpected assert exit code: {other}"),
                     json!({"command": "assert"}),
                     1,
                 );
                 1
             }
-        }
-        3 | 1 => {
-            if emit_json_stderr(&response.payload) {
-                response.exit_code
-            } else {
-                emit_error(
-                    "internal_error",
-                    "failed to serialize assert error".to_string(),
-                    json!({"command": "assert"}),
-                    1,
-                );
-                1
-            }
-        }
-        other => {
-            emit_error(
-                "internal_error",
-                format!("unexpected assert exit code: {other}"),
-                json!({"command": "assert"}),
-                1,
-            );
-            1
         }
     };
 
     if emit_pipeline {
+        let pipeline_report = build_assert_pipeline_report(
+            &args,
+            input_format,
+            rules_format,
+            schema_format,
+            steps,
+            deterministic_guards,
+            &trace,
+        );
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
+}
+
+fn emit_assert_rules_help() -> i32 {
+    if emit_json_stdout(&r#assert::rules_help_payload()) {
+        0
+    } else {
+        emit_error(
+            "internal_error",
+            "failed to serialize assert rules help".to_string(),
+            json!({"command": "assert"}),
+            1,
+        );
+        1
+    }
+}
+
+fn emit_assert_schema_help() -> i32 {
+    if emit_json_stdout(&r#assert::schema_help_payload()) {
+        0
+    } else {
+        emit_error(
+            "internal_error",
+            "failed to serialize assert schema help".to_string(),
+            json!({"command": "assert"}),
+            1,
+        );
+        1
+    }
 }
 
 fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
@@ -715,6 +747,9 @@ fn build_assert_pipeline_report(
     input_format: Option<Format>,
     rules_format: Option<Format>,
     schema_format: Option<Format>,
+    steps: Vec<String>,
+    deterministic_guards: Vec<String>,
+    trace: &r#assert::AssertPipelineTrace,
 ) -> PipelineReport {
     let mut sources = Vec::with_capacity(2);
     if let Some(path) = &args.rules {
@@ -731,29 +766,31 @@ fn build_assert_pipeline_report(
             format_label(schema_format),
         ));
     }
-    if let Some(path) = &args.input {
-        sources.push(PipelineInputSource::path(
-            "input",
-            path.display().to_string(),
-            format_label(input_format),
-        ));
-    } else {
-        sources.push(PipelineInputSource::stdin(
-            "input",
-            format_label(input_format),
-        ));
+    if !args.rules_help && !args.schema_help {
+        if let Some(path) = &args.input {
+            sources.push(PipelineInputSource::path(
+                "input",
+                path.display().to_string(),
+                format_label(input_format),
+            ));
+        } else {
+            sources.push(PipelineInputSource::stdin(
+                "input",
+                format_label(input_format),
+            ));
+        }
     }
 
     let mut report = PipelineReport::new(
         "assert",
         PipelineInput::new(sources),
-        r#assert::pipeline_steps(),
-        r#assert::deterministic_guards(args.normalize.map(Into::into)),
+        steps,
+        deterministic_guards,
     );
-    if args.normalize.is_some() {
-        report = report.mark_external_tool_used("jq");
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
     }
-    report
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
 fn build_sdiff_pipeline_report(

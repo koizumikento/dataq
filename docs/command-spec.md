@@ -27,7 +27,7 @@ dataq [--emit-pipeline] <command> [options]
 - `dataq assert --rules-help` で `--rules` 用ルール仕様を機械可読JSONで出力
 - `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
-- `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義をジョブ単位レコードへ正規化してから `--rules` 検証可能（`jq` 必須）
+- `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義を `yq -> jq -> mlr` の固定3段でジョブ単位レコードへ正規化してから `--rules` 検証可能（`yq`/`jq`/`mlr` 必須）
 
 ## 外部ツール多段連携（契約方針）
 
@@ -65,8 +65,9 @@ pipeline JSON schema:
 - `input`: 入力ソース情報（stdin/path, format）
 - `steps`: 実行ステップ配列
 - `external_tools`: `jq|yq|mlr` の使用有無（ツール名順で固定）
+- `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
 - `deterministic_guards`: 適用した決定性ガード
-- （多段連携時）各ステップで使用したツール名・入出力件数・実行順を含める
+- `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
 
 ```bash
 cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.json

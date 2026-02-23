@@ -42,13 +42,13 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - `dataq`:
   同等の処理意図をサブコマンド化し、I/O形式・失敗JSON・終了コードを固定できる
 - 監査性:
-  `--emit-pipeline` で、内部処理ステップと外部ツール使用有無を機械可読で残せる
+  `--emit-pipeline` で、内部処理ステップ・外部ツール使用有無・`stage_diagnostics`（段ごとの順序/件数/状態）を機械可読で残せる
 
 ## 外部ツール多段連携の方針
 
 - `dataq` の一部コマンドは、内部的に複数ツールを段階実行することで価値を成立させます
 - これは「3ツールの代替」ではなく「3ツールの合わせ技を再利用可能な契約として固定する」ための設計です
-- 多段連携コマンドでは、`--emit-pipeline` で各段の利用ツール・ステップ順・件数変化を追跡可能にします
+- 多段連携コマンドでは、`--emit-pipeline` で各段の利用ツール・ステップ順・件数変化・失敗段を追跡可能にします
 
 ## コマンド一覧
 
@@ -152,7 +152,7 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 - 最小/最大件数
 - `--rules <path>`: dataq ルールで検証（ルールスキーマは厳密。未知キーは入力不正）
 - `--schema <path>`: JSON Schema で検証
-- `--normalize <github-actions-jobs|gitlab-ci-jobs>`: 生のCI定義をジョブ単位レコードへ正規化してから検証（`jq` 必須）
+- `--normalize <github-actions-jobs|gitlab-ci-jobs>`: 生のCI定義を `yq -> jq -> mlr` の3段でジョブ単位レコードへ正規化してから検証（`yq`/`jq`/`mlr` 必須）
 - `--rules` と `--schema` は同時指定不可（入力不正として終了コード `3`）
 - `--rules-help`: `--rules` 用ルール仕様を機械可読JSONで出力して終了（終了コード `0`）
 - `--schema-help`: `--schema`（JSON Schema検証）用の使い方と結果契約を機械可読JSONで出力して終了（終了コード `0`）
@@ -201,7 +201,7 @@ dataq assert --schema-help
 - 対象: `cloud-run`, `github-actions`, `gitlab-ci`
 - 方式:
   - `raw.rules.yaml`: 生のYAML構造を検証
-  - `jobs.rules.yaml`: `--normalize` でジョブ単位に正規化して検証（2段方式）
+  - `jobs.rules.yaml`: `--normalize` でジョブ単位に正規化して検証（`yq -> jq -> mlr` の3段方式）
 
 例（Cloud Run の raw 検証）:
 

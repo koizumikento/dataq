@@ -1,5 +1,7 @@
+use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use dataq::cmd::r#assert::{AssertCommandArgs, AssertCommandResponse, run_with_stdin};
 use dataq::io::Format;
@@ -39,6 +41,300 @@ fn has_mismatch(payload: &Value, path: &str, rule_kind: &str, reason: &str) -> b
                 && entry["rule_kind"].as_str() == Some(rule_kind)
                 && entry["reason"].as_str() == Some(reason)
         })
+}
+
+fn parse_stderr_json_lines(stderr: &[u8]) -> Vec<Value> {
+    let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("stderr json line"))
+        .collect()
+}
+
+fn create_normalize_tool_shims() -> Option<(tempfile::TempDir, String, String)> {
+    if Command::new("jq").arg("--version").output().is_err() {
+        return None;
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let yq_path = dir.path().join("fake-yq");
+    let mlr_path = dir.path().join("fake-mlr");
+
+    write_exec_script(
+        &yq_path,
+        r#"#!/bin/sh
+if [ "$1" = "eval" ]; then shift; fi
+if [ "$1" = "-o=json" ]; then shift; fi
+if [ "$1" = "-I=0" ]; then shift; fi
+filter="$1"
+exec jq -c "$filter"
+"#,
+    );
+    write_exec_script(
+        &mlr_path,
+        r#"#!/bin/sh
+key="job_id"
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-f" ]; then
+    key="$2"
+    break
+  fi
+  shift
+done
+exec jq -c --arg key "$key" 'sort_by(.[$key] // "")'
+"#,
+    );
+
+    Some((
+        dir,
+        yq_path.display().to_string(),
+        mlr_path.display().to_string(),
+    ))
+}
+
+fn write_exec_script(path: &PathBuf, body: &str) {
+    fs::write(path, body).expect("write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
+#[test]
+fn assert_normalize_emit_pipeline_reports_three_stage_diagnostics() {
+    let Some((tool_dir, yq_bin, mlr_bin)) = create_normalize_tool_shims() else {
+        return;
+    };
+    let dir = tempdir().expect("tempdir");
+    let workflow_path = dir.path().join("workflow.yml");
+    std::fs::write(
+        &workflow_path,
+        r#"
+name: CI
+on:
+  push: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"#,
+    )
+    .expect("write workflow");
+    let rules_path = sample_rules_path("examples/assert-rules/github-actions/jobs.rules.yaml");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_YQ_BIN", &yq_bin)
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "assert",
+            "--emit-pipeline",
+            "--input",
+            workflow_path.to_str().expect("utf8 path"),
+            "--normalize",
+            "github-actions-jobs",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json_lines = parse_stderr_json_lines(&output.stderr);
+    let pipeline_json = stderr_json_lines.last().expect("pipeline json line");
+    assert_eq!(pipeline_json["command"], Value::from("assert"));
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][0]["step"],
+        Value::from("normalize_yq_extract")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][1]["step"],
+        Value::from("normalize_jq_project")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][2]["step"],
+        Value::from("normalize_mlr_sort")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][0]["tool"],
+        Value::from("yq")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][1]["tool"],
+        Value::from("jq")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][2]["tool"],
+        Value::from("mlr")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][0]["order"],
+        Value::from(1)
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][1]["order"],
+        Value::from(2)
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][2]["order"],
+        Value::from(3)
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][0]["status"],
+        Value::from("ok")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][1]["status"],
+        Value::from("ok")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][2]["status"],
+        Value::from("ok")
+    );
+
+    let tools = pipeline_json["external_tools"]
+        .as_array()
+        .expect("external_tools array");
+    assert_eq!(tools.len(), 3);
+    assert_eq!(tools[0]["name"], Value::from("jq"));
+    assert_eq!(tools[0]["used"], Value::Bool(true));
+    assert_eq!(tools[1]["name"], Value::from("yq"));
+    assert_eq!(tools[1]["used"], Value::Bool(true));
+    assert_eq!(tools[2]["name"], Value::from("mlr"));
+    assert_eq!(tools[2]["used"], Value::Bool(true));
+    drop(tool_dir);
+}
+
+#[test]
+fn assert_normalize_missing_yq_maps_to_input_usage_error() {
+    let dir = tempdir().expect("tempdir");
+    let workflow_path = dir.path().join("workflow.yml");
+    std::fs::write(
+        &workflow_path,
+        r#"
+name: CI
+on:
+  push: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"#,
+    )
+    .expect("write workflow");
+    let rules_path = sample_rules_path("examples/assert-rules/github-actions/jobs.rules.yaml");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_YQ_BIN", "/definitely-missing/yq")
+        .args([
+            "assert",
+            "--emit-pipeline",
+            "--input",
+            workflow_path.to_str().expect("utf8 path"),
+            "--normalize",
+            "github-actions-jobs",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json_lines = parse_stderr_json_lines(&output.stderr);
+    assert!(
+        stderr_json_lines
+            .first()
+            .expect("error json")
+            .get("message")
+            .and_then(Value::as_str)
+            .expect("message")
+            .contains("requires `yq` in PATH")
+    );
+    let pipeline_json = stderr_json_lines.last().expect("pipeline json");
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][0]["step"],
+        Value::from("normalize_yq_extract")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][0]["tool"],
+        Value::from("yq")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][0]["status"],
+        Value::from("error")
+    );
+}
+
+#[test]
+fn assert_normalize_missing_mlr_maps_to_input_usage_error() {
+    let Some((tool_dir, yq_bin, _mlr_bin)) = create_normalize_tool_shims() else {
+        return;
+    };
+    let dir = tempdir().expect("tempdir");
+    let workflow_path = dir.path().join("workflow.yml");
+    std::fs::write(
+        &workflow_path,
+        r#"
+name: CI
+on:
+  push: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"#,
+    )
+    .expect("write workflow");
+    let rules_path = sample_rules_path("examples/assert-rules/github-actions/jobs.rules.yaml");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_YQ_BIN", &yq_bin)
+        .env("DATAQ_MLR_BIN", "/definitely-missing/mlr")
+        .args([
+            "assert",
+            "--emit-pipeline",
+            "--input",
+            workflow_path.to_str().expect("utf8 path"),
+            "--normalize",
+            "github-actions-jobs",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json_lines = parse_stderr_json_lines(&output.stderr);
+    assert!(
+        stderr_json_lines
+            .first()
+            .expect("error json")
+            .get("message")
+            .and_then(Value::as_str)
+            .expect("message")
+            .contains("requires `mlr` in PATH")
+    );
+    let pipeline_json = stderr_json_lines.last().expect("pipeline json");
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][0]["step"],
+        Value::from("normalize_yq_extract")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][1]["step"],
+        Value::from("normalize_jq_project")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][2]["step"],
+        Value::from("normalize_mlr_sort")
+    );
+    assert_eq!(
+        pipeline_json["stage_diagnostics"][2]["status"],
+        Value::from("error")
+    );
+    drop(tool_dir);
 }
 
 #[test]

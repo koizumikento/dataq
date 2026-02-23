@@ -7,26 +7,27 @@ use thiserror::Error;
 const GITHUB_ACTIONS_JOBS_FILTER: &str = r#"
 map(
   if type != "object" then
-    error("normalize mode `github-actions-jobs` expects object input rows")
+    error("normalize mode `github-actions-jobs` expects object rows from yq stage")
   else . end
-  | .jobs as $jobs
-  | if ($jobs | type) != "object" then
-      error("normalize mode `github-actions-jobs` expects `jobs` object")
-    else $jobs end
-  | to_entries
-  | sort_by(.key)
-  | map({
-      job_id: .key,
-      runs_on: ((.value["runs-on"] // "") | tostring),
-      steps_count: (((.value.steps // []) | if type == "array" then . else [] end) | length),
-      uses_unpinned_action: (((.value.steps // []) | if type == "array" then . else [] end)
+  | .job_id as $job_id
+  | if ($job_id | type) != "string" then
+      error("normalize mode `github-actions-jobs` expects `job_id` string from yq stage")
+    else . end
+  | .job as $job
+  | if ($job | type) != "object" then
+      error("normalize mode `github-actions-jobs` expects `job` object from yq stage")
+    else . end
+  | {
+      job_id: $job_id,
+      runs_on: (($job["runs-on"] // "") | tostring),
+      steps_count: ((($job.steps // []) | if type == "array" then . else [] end) | length),
+      uses_unpinned_action: (((($job.steps // []) | if type == "array" then . else [] end)
         | map(.uses? // empty)
         | map(select(type == "string"))
         | map(contains("@") | not)
-        | any)
-    })
+        | any))
+    }
 )
-| add // []
 "#;
 
 const GITLAB_CI_JOBS_FILTER: &str = r#"
@@ -35,29 +36,28 @@ def reserved:
 
 map(
   if type != "object" then
-    error("normalize mode `gitlab-ci-jobs` expects object input rows")
+    error("normalize mode `gitlab-ci-jobs` expects object rows from yq stage")
   else . end
-  | to_entries
-  | sort_by(.key)
-  | map(
-      . as $entry
-      | select(($entry.key | startswith(".")) | not)
-      | select((reserved | index($entry.key)) | not)
-      | select(($entry.value | type) == "object")
-      | {
-          job_name: $entry.key,
-          stage: (($entry.value.stage // "") | tostring),
-          script_count: (
-            $entry.value.script as $script
-            | if ($script | type) == "array" then ($script | length)
-              elif ($script | type) == "string" then ([$script | split("\n")[] | select(length > 0)] | length)
-              else 0 end
-          ),
-          uses_only_except: (($entry.value | has("only")) or ($entry.value | has("except")))
-        }
-    )
+  | .job_name as $job_name
+  | if ($job_name | type) != "string" then
+      error("normalize mode `gitlab-ci-jobs` expects `job_name` string from yq stage")
+    else . end
+  | select(($job_name | startswith(".")) | not)
+  | select((reserved | index($job_name)) | not)
+  | .job as $job
+  | if ($job | type) != "object" then empty else . end
+  | {
+      job_name: $job_name,
+      stage: (($job.stage // "") | tostring),
+      script_count: (
+        $job.script as $script
+        | if ($script | type) == "array" then ($script | length)
+          elif ($script | type) == "string" then ([$script | split("\n")[] | select(length > 0)] | length)
+          else 0 end
+      ),
+      uses_only_except: (($job | has("only")) or ($job | has("except")))
+    }
 )
-| add // []
 "#;
 
 #[derive(Debug, Error)]
@@ -87,8 +87,9 @@ pub fn normalize_gitlab_ci_jobs(values: &[Value]) -> Result<Vec<Value>, JqError>
 }
 
 fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {
+    let jq_bin = std::env::var("DATAQ_JQ_BIN").unwrap_or_else(|_| "jq".to_string());
     let input = serde_json::to_vec(values).map_err(JqError::Serialize)?;
-    let mut child = match Command::new("jq")
+    let mut child = match Command::new(&jq_bin)
         .arg("-c")
         .arg(filter)
         .stdin(Stdio::piped())

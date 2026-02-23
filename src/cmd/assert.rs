@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::adapters::jq;
+use crate::adapters::{jq, mlr, yq};
+use crate::domain::report::PipelineStageDiagnostic;
 use crate::domain::rules::{AssertReport, AssertRules};
 use crate::engine::r#assert::{self, AssertValidationError};
 use crate::io::{self, Format, IoError};
@@ -42,15 +43,34 @@ pub struct AssertCommandResponse {
     pub payload: Value,
 }
 
+/// Trace details used by `--emit-pipeline` for assert normalization stages.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssertPipelineTrace {
+    pub used_tools: Vec<String>,
+    pub stage_diagnostics: Vec<PipelineStageDiagnostic>,
+}
+
+impl AssertPipelineTrace {
+    fn mark_tool_used(&mut self, tool: &'static str) {
+        if self.used_tools.iter().any(|used| used == tool) {
+            return;
+        }
+        self.used_tools.push(tool.to_string());
+    }
+}
+
 /// Ordered pipeline-step names used for `--emit-pipeline` diagnostics.
-pub fn pipeline_steps() -> Vec<String> {
-    vec![
+pub fn pipeline_steps(normalize: Option<AssertInputNormalizeMode>) -> Vec<String> {
+    let mut steps = vec![
         "load_rules".to_string(),
         "resolve_input_format".to_string(),
         "read_input_values".to_string(),
-        "normalize_assert_input".to_string(),
         "validate_assert_rules".to_string(),
-    ]
+    ];
+    if normalize.is_some() {
+        steps.insert(3, "normalize_assert_input".to_string());
+    }
+    steps
 }
 
 /// Determinism guards applied by the `assert` command.
@@ -61,6 +81,8 @@ pub fn deterministic_guards(normalize: Option<AssertInputNormalizeMode>) -> Vec<
         "rules_schema_deny_unknown_fields".to_string(),
     ];
     if let Some(mode) = normalize {
+        guards.push("normalize_pipeline_stage_order_yq_jq_mlr".to_string());
+        guards.push("normalize_pipeline_deterministic_sort_mlr".to_string());
         guards.push(format!(
             "assert_input_normalized_{}",
             mode.as_str().replace('-', "_")
@@ -179,22 +201,148 @@ pub fn run_with_stdin_and_normalize<R: Read>(
     stdin: R,
     normalize: Option<AssertInputNormalizeMode>,
 ) -> AssertCommandResponse {
+    run_with_stdin_and_normalize_with_trace(args, stdin, normalize).0
+}
+
+pub fn run_with_stdin_and_normalize_with_trace<R: Read>(
+    args: &AssertCommandArgs,
+    stdin: R,
+    normalize: Option<AssertInputNormalizeMode>,
+) -> (AssertCommandResponse, AssertPipelineTrace) {
     match execute(args, stdin, normalize) {
-        Ok(report) => report_response(report),
-        Err(CommandError::InputUsage(message)) => AssertCommandResponse {
-            exit_code: 3,
-            payload: json!({
-                "error": "input_usage_error",
-                "message": message,
-            }),
-        },
-        Err(CommandError::Internal(message)) => AssertCommandResponse {
-            exit_code: 1,
-            payload: json!({
-                "error": "internal_error",
-                "message": message,
-            }),
-        },
+        Ok(result) => (report_response(result.report), result.trace),
+        Err(error) => {
+            let response = match error.kind {
+                CommandErrorKind::InputUsage(message) => AssertCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": message,
+                    }),
+                },
+                CommandErrorKind::Internal(message) => AssertCommandResponse {
+                    exit_code: 1,
+                    payload: json!({
+                        "error": "internal_error",
+                        "message": message,
+                    }),
+                },
+            };
+            (response, error.trace)
+        }
+    }
+}
+
+fn execute<R: Read>(
+    args: &AssertCommandArgs,
+    stdin: R,
+    normalize: Option<AssertInputNormalizeMode>,
+) -> Result<ExecuteResult, CommandError> {
+    let source = resolve_validation_source(args)?;
+    let input_format = io::resolve_input_format(args.from, args.input.as_deref())
+        .map_err(map_io_as_input_usage)?;
+    let values = load_input_values(args, stdin, input_format)?;
+    let (values, trace) = normalize_input_values(values, normalize)?;
+    let report = match source {
+        ValidationSource::Rules(rules) => assert::execute_assert(&values, &rules),
+        ValidationSource::Schema(schema) => assert::execute_assert_with_schema(&values, &schema),
+    }
+    .map_err(map_engine_error)?;
+    Ok(ExecuteResult { report, trace })
+}
+
+enum ValidationSource {
+    Rules(AssertRules),
+    Schema(Value),
+}
+
+fn resolve_validation_source(args: &AssertCommandArgs) -> Result<ValidationSource, CommandError> {
+    match (&args.rules, &args.schema) {
+        (Some(_), Some(_)) => Err(CommandError::input_usage(
+            "`--rules` and `--schema` are mutually exclusive".to_string(),
+        )),
+        (None, None) => Err(CommandError::input_usage(
+            "either `--rules` or `--schema` must be provided".to_string(),
+        )),
+        (Some(rules_path), None) => load_rules(rules_path.as_path()).map(ValidationSource::Rules),
+        (None, Some(schema_path)) => {
+            load_schema(schema_path.as_path()).map(ValidationSource::Schema)
+        }
+    }
+}
+
+fn load_rules(path: &Path) -> Result<AssertRules, CommandError> {
+    let format = io::resolve_input_format(None, Some(path)).map_err(|err| {
+        CommandError::input_usage(format!(
+            "unable to resolve rules format from `{}`: {err}",
+            path.display()
+        ))
+    })?;
+    let file = File::open(path).map_err(|err| {
+        CommandError::input_usage(format!(
+            "failed to open rules file `{}`: {err}",
+            path.display()
+        ))
+    })?;
+    let values = io::reader::read_values(file, format).map_err(map_io_as_input_usage)?;
+    if values.len() != 1 {
+        return Err(CommandError::input_usage(
+            "rules file must contain exactly one object".to_string(),
+        ));
+    }
+    let rules_value = values.into_iter().next().unwrap_or(Value::Null);
+    serde_json::from_value(rules_value)
+        .map_err(|err| CommandError::input_usage(format!("invalid rules schema: {err}")))
+}
+
+fn load_schema(path: &Path) -> Result<Value, CommandError> {
+    let format = io::resolve_input_format(None, Some(path)).map_err(|err| {
+        CommandError::input_usage(format!(
+            "unable to resolve schema format from `{}`: {err}",
+            path.display()
+        ))
+    })?;
+    let file = File::open(path).map_err(|err| {
+        CommandError::input_usage(format!(
+            "failed to open schema file `{}`: {err}",
+            path.display()
+        ))
+    })?;
+    let values = io::reader::read_values(file, format).map_err(map_io_as_input_usage)?;
+    if values.len() != 1 {
+        return Err(CommandError::input_usage(
+            "schema file must contain exactly one value".to_string(),
+        ));
+    }
+    Ok(values.into_iter().next().unwrap_or(Value::Null))
+}
+
+fn load_input_values<R: Read>(
+    args: &AssertCommandArgs,
+    stdin: R,
+    format: Format,
+) -> Result<Vec<Value>, CommandError> {
+    if let Some(path) = &args.input {
+        let file = File::open(path).map_err(|err| {
+            CommandError::input_usage(format!(
+                "failed to open input file `{}`: {err}",
+                path.display()
+            ))
+        })?;
+        io::reader::read_values(file, format).map_err(map_io_as_input_usage)
+    } else {
+        io::reader::read_values(stdin, format).map_err(map_io_as_input_usage)
+    }
+}
+
+fn map_io_as_input_usage(error: IoError) -> CommandError {
+    CommandError::input_usage(error.to_string())
+}
+
+fn map_engine_error(error: AssertValidationError) -> CommandError {
+    match error {
+        AssertValidationError::InputUsage(message) => CommandError::input_usage(message),
+        AssertValidationError::Internal(message) => CommandError::internal(message),
     }
 }
 
@@ -212,163 +360,209 @@ fn report_response(report: AssertReport) -> AssertCommandResponse {
     }
 }
 
-fn execute<R: Read>(
-    args: &AssertCommandArgs,
-    stdin: R,
-    normalize: Option<AssertInputNormalizeMode>,
-) -> Result<AssertReport, CommandError> {
-    let source = resolve_validation_source(args)?;
-    let input_format = io::resolve_input_format(args.from, args.input.as_deref())
-        .map_err(map_io_as_input_usage)?;
-    let values = load_input_values(args, stdin, input_format)?;
-    let values = normalize_input_values(values, normalize)?;
-    match source {
-        ValidationSource::Rules(rules) => assert::execute_assert(&values, &rules),
-        ValidationSource::Schema(schema) => assert::execute_assert_with_schema(&values, &schema),
-    }
-    .map_err(map_engine_error)
+struct ExecuteResult {
+    report: AssertReport,
+    trace: AssertPipelineTrace,
 }
 
-enum ValidationSource {
-    Rules(AssertRules),
-    Schema(Value),
+struct CommandError {
+    kind: CommandErrorKind,
+    trace: AssertPipelineTrace,
 }
 
-fn resolve_validation_source(args: &AssertCommandArgs) -> Result<ValidationSource, CommandError> {
-    match (&args.rules, &args.schema) {
-        (Some(_), Some(_)) => Err(CommandError::InputUsage(
-            "`--rules` and `--schema` are mutually exclusive".to_string(),
-        )),
-        (None, None) => Err(CommandError::InputUsage(
-            "either `--rules` or `--schema` must be provided".to_string(),
-        )),
-        (Some(rules_path), None) => load_rules(rules_path.as_path()).map(ValidationSource::Rules),
-        (None, Some(schema_path)) => {
-            load_schema(schema_path.as_path()).map(ValidationSource::Schema)
-        }
-    }
-}
-
-fn load_rules(path: &Path) -> Result<AssertRules, CommandError> {
-    let format = io::resolve_input_format(None, Some(path)).map_err(|err| {
-        CommandError::InputUsage(format!(
-            "unable to resolve rules format from `{}`: {err}",
-            path.display()
-        ))
-    })?;
-    let file = File::open(path).map_err(|err| {
-        CommandError::InputUsage(format!(
-            "failed to open rules file `{}`: {err}",
-            path.display()
-        ))
-    })?;
-    let values = io::reader::read_values(file, format).map_err(map_io_as_input_usage)?;
-    if values.len() != 1 {
-        return Err(CommandError::InputUsage(
-            "rules file must contain exactly one object".to_string(),
-        ));
-    }
-    let rules_value = values.into_iter().next().unwrap_or(Value::Null);
-    serde_json::from_value(rules_value)
-        .map_err(|err| CommandError::InputUsage(format!("invalid rules schema: {err}")))
-}
-
-fn load_schema(path: &Path) -> Result<Value, CommandError> {
-    let format = io::resolve_input_format(None, Some(path)).map_err(|err| {
-        CommandError::InputUsage(format!(
-            "unable to resolve schema format from `{}`: {err}",
-            path.display()
-        ))
-    })?;
-    let file = File::open(path).map_err(|err| {
-        CommandError::InputUsage(format!(
-            "failed to open schema file `{}`: {err}",
-            path.display()
-        ))
-    })?;
-    let values = io::reader::read_values(file, format).map_err(map_io_as_input_usage)?;
-    if values.len() != 1 {
-        return Err(CommandError::InputUsage(
-            "schema file must contain exactly one value".to_string(),
-        ));
-    }
-    Ok(values.into_iter().next().unwrap_or(Value::Null))
-}
-
-fn load_input_values<R: Read>(
-    args: &AssertCommandArgs,
-    stdin: R,
-    format: Format,
-) -> Result<Vec<Value>, CommandError> {
-    if let Some(path) = &args.input {
-        let file = File::open(path).map_err(|err| {
-            CommandError::InputUsage(format!(
-                "failed to open input file `{}`: {err}",
-                path.display()
-            ))
-        })?;
-        io::reader::read_values(file, format).map_err(map_io_as_input_usage)
-    } else {
-        io::reader::read_values(stdin, format).map_err(map_io_as_input_usage)
-    }
-}
-
-fn map_io_as_input_usage(error: IoError) -> CommandError {
-    CommandError::InputUsage(error.to_string())
-}
-
-fn map_engine_error(error: AssertValidationError) -> CommandError {
-    match error {
-        AssertValidationError::InputUsage(message) => CommandError::InputUsage(message),
-        AssertValidationError::Internal(message) => CommandError::Internal(message),
-    }
-}
-
-enum CommandError {
+enum CommandErrorKind {
     InputUsage(String),
     Internal(String),
+}
+
+impl CommandError {
+    fn input_usage(message: String) -> Self {
+        Self {
+            kind: CommandErrorKind::InputUsage(message),
+            trace: AssertPipelineTrace::default(),
+        }
+    }
+
+    fn input_usage_with_trace(message: String, trace: AssertPipelineTrace) -> Self {
+        Self {
+            kind: CommandErrorKind::InputUsage(message),
+            trace,
+        }
+    }
+
+    fn internal(message: String) -> Self {
+        Self {
+            kind: CommandErrorKind::Internal(message),
+            trace: AssertPipelineTrace::default(),
+        }
+    }
 }
 
 fn normalize_input_values(
     values: Vec<Value>,
     normalize: Option<AssertInputNormalizeMode>,
-) -> Result<Vec<Value>, CommandError> {
+) -> Result<(Vec<Value>, AssertPipelineTrace), CommandError> {
     match normalize {
-        None => Ok(values),
-        Some(AssertInputNormalizeMode::GithubActionsJobs) => {
-            normalize_with_jq(values, AssertInputNormalizeMode::GithubActionsJobs)
-        }
-        Some(AssertInputNormalizeMode::GitlabCiJobs) => {
-            normalize_with_jq(values, AssertInputNormalizeMode::GitlabCiJobs)
-        }
+        None => Ok((values, AssertPipelineTrace::default())),
+        Some(mode) => normalize_with_pipeline(values, mode),
     }
 }
 
-fn normalize_with_jq(
+fn normalize_with_pipeline(
     values: Vec<Value>,
     mode: AssertInputNormalizeMode,
-) -> Result<Vec<Value>, CommandError> {
-    let jq_result = match mode {
-        AssertInputNormalizeMode::GithubActionsJobs => jq::normalize_github_actions_jobs(&values),
-        AssertInputNormalizeMode::GitlabCiJobs => jq::normalize_gitlab_ci_jobs(&values),
+) -> Result<(Vec<Value>, AssertPipelineTrace), CommandError> {
+    let mut trace = AssertPipelineTrace::default();
+
+    trace.mark_tool_used("yq");
+    let yq_input_rows = values.len();
+    let yq_rows = match mode {
+        AssertInputNormalizeMode::GithubActionsJobs => yq::extract_github_actions_jobs(&values),
+        AssertInputNormalizeMode::GitlabCiJobs => yq::extract_gitlab_ci_jobs(&values),
+    };
+    let yq_rows = match yq_rows {
+        Ok(rows) => {
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::success(
+                    1,
+                    "normalize_yq_extract",
+                    "yq",
+                    yq_input_rows,
+                    rows.len(),
+                ));
+            rows
+        }
+        Err(yq::YqError::Unavailable) => {
+            let message = format!("normalize mode `{}` requires `yq` in PATH", mode.as_str());
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure(
+                    1,
+                    "normalize_yq_extract",
+                    "yq",
+                    yq_input_rows,
+                ));
+            return Err(CommandError::input_usage_with_trace(message, trace));
+        }
+        Err(error) => {
+            let message = format!(
+                "failed to normalize assert input with yq (`{}`): {error}",
+                mode.as_str()
+            );
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure(
+                    1,
+                    "normalize_yq_extract",
+                    "yq",
+                    yq_input_rows,
+                ));
+            return Err(CommandError::input_usage_with_trace(message, trace));
+        }
     };
 
-    match jq_result {
-        Ok(normalized) => Ok(normalized),
-        Err(jq::JqError::Unavailable) => Err(CommandError::InputUsage(format!(
-            "normalize mode `{}` requires `jq` in PATH",
-            mode.as_str()
-        ))),
-        Err(error) => Err(CommandError::InputUsage(format!(
-            "failed to normalize assert input with jq (`{}`): {error}",
-            mode.as_str()
-        ))),
+    trace.mark_tool_used("jq");
+    let jq_input_rows = yq_rows.len();
+    let jq_rows = match mode {
+        AssertInputNormalizeMode::GithubActionsJobs => jq::normalize_github_actions_jobs(&yq_rows),
+        AssertInputNormalizeMode::GitlabCiJobs => jq::normalize_gitlab_ci_jobs(&yq_rows),
+    };
+    let jq_rows = match jq_rows {
+        Ok(rows) => {
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::success(
+                    2,
+                    "normalize_jq_project",
+                    "jq",
+                    jq_input_rows,
+                    rows.len(),
+                ));
+            rows
+        }
+        Err(jq::JqError::Unavailable) => {
+            let message = format!("normalize mode `{}` requires `jq` in PATH", mode.as_str());
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure(
+                    2,
+                    "normalize_jq_project",
+                    "jq",
+                    jq_input_rows,
+                ));
+            return Err(CommandError::input_usage_with_trace(message, trace));
+        }
+        Err(error) => {
+            let message = format!(
+                "failed to normalize assert input with jq (`{}`): {error}",
+                mode.as_str()
+            );
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure(
+                    2,
+                    "normalize_jq_project",
+                    "jq",
+                    jq_input_rows,
+                ));
+            return Err(CommandError::input_usage_with_trace(message, trace));
+        }
+    };
+
+    trace.mark_tool_used("mlr");
+    let mlr_input_rows = jq_rows.len();
+    let mlr_rows = match mode {
+        AssertInputNormalizeMode::GithubActionsJobs => mlr::sort_github_actions_jobs(&jq_rows),
+        AssertInputNormalizeMode::GitlabCiJobs => mlr::sort_gitlab_ci_jobs(&jq_rows),
+    };
+    match mlr_rows {
+        Ok(rows) => {
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::success(
+                    3,
+                    "normalize_mlr_sort",
+                    "mlr",
+                    mlr_input_rows,
+                    rows.len(),
+                ));
+            Ok((rows, trace))
+        }
+        Err(mlr::MlrError::Unavailable) => {
+            let message = format!("normalize mode `{}` requires `mlr` in PATH", mode.as_str());
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure(
+                    3,
+                    "normalize_mlr_sort",
+                    "mlr",
+                    mlr_input_rows,
+                ));
+            Err(CommandError::input_usage_with_trace(message, trace))
+        }
+        Err(error) => {
+            let message = format!(
+                "failed to normalize assert input with mlr (`{}`): {error}",
+                mode.as_str()
+            );
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure(
+                    3,
+                    "normalize_mlr_sort",
+                    "mlr",
+                    mlr_input_rows,
+                ));
+            Err(CommandError::input_usage_with_trace(message, trace))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::process::Command;
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -497,6 +691,9 @@ mod tests {
 
     #[test]
     fn github_actions_jobs_normalizer_extracts_job_rows() {
+        if !normalize_tools_available() {
+            return;
+        }
         let dir = tempdir().expect("tempdir");
         let rules_path = dir.path().join("rules.json");
         std::fs::write(
@@ -541,6 +738,9 @@ jobs:
 
     #[test]
     fn gitlab_jobs_normalizer_extracts_job_rows() {
+        if !normalize_tools_available() {
+            return;
+        }
         let dir = tempdir().expect("tempdir");
         let rules_path = dir.path().join("rules.json");
         std::fs::write(
@@ -578,5 +778,11 @@ build:
         );
         assert_eq!(response.exit_code, 0);
         assert_eq!(response.payload["matched"], json!(true));
+    }
+
+    fn normalize_tools_available() -> bool {
+        Command::new("jq").arg("--version").output().is_ok()
+            && Command::new("yq").arg("--version").output().is_ok()
+            && Command::new("mlr").arg("--version").output().is_ok()
     }
 }
