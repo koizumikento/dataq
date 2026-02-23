@@ -245,14 +245,14 @@ jobs:
 
     assert_eq!(output.status.code(), Some(3));
     let stderr_json_lines = parse_stderr_json_lines(&output.stderr);
-    assert!(
+    assert_eq!(
         stderr_json_lines
             .first()
             .expect("error json")
             .get("message")
             .and_then(Value::as_str)
-            .expect("message")
-            .contains("requires `yq` in PATH")
+            .expect("message"),
+        "normalize mode `github-actions-jobs` requires `yq` in PATH"
     );
     let pipeline_json = stderr_json_lines.last().expect("pipeline json");
     assert_eq!(
@@ -267,6 +267,15 @@ jobs:
         pipeline_json["stage_diagnostics"][0]["status"],
         Value::from("error")
     );
+    let tools = pipeline_json["external_tools"]
+        .as_array()
+        .expect("external_tools array");
+    assert_eq!(tools[0]["name"], Value::from("jq"));
+    assert_eq!(tools[0]["used"], Value::Bool(false));
+    assert_eq!(tools[1]["name"], Value::from("yq"));
+    assert_eq!(tools[1]["used"], Value::Bool(true));
+    assert_eq!(tools[2]["name"], Value::from("mlr"));
+    assert_eq!(tools[2]["used"], Value::Bool(false));
 }
 
 #[test]
@@ -310,14 +319,14 @@ jobs:
 
     assert_eq!(output.status.code(), Some(3));
     let stderr_json_lines = parse_stderr_json_lines(&output.stderr);
-    assert!(
+    assert_eq!(
         stderr_json_lines
             .first()
             .expect("error json")
             .get("message")
             .and_then(Value::as_str)
-            .expect("message")
-            .contains("requires `mlr` in PATH")
+            .expect("message"),
+        "normalize mode `github-actions-jobs` requires `mlr` in PATH"
     );
     let pipeline_json = stderr_json_lines.last().expect("pipeline json");
     assert_eq!(
@@ -336,6 +345,15 @@ jobs:
         pipeline_json["stage_diagnostics"][2]["status"],
         Value::from("error")
     );
+    let tools = pipeline_json["external_tools"]
+        .as_array()
+        .expect("external_tools array");
+    assert_eq!(tools[0]["name"], Value::from("jq"));
+    assert_eq!(tools[0]["used"], Value::Bool(true));
+    assert_eq!(tools[1]["name"], Value::from("yq"));
+    assert_eq!(tools[1]["used"], Value::Bool(true));
+    assert_eq!(tools[2]["name"], Value::from("mlr"));
+    assert_eq!(tools[2]["used"], Value::Bool(true));
     drop(tool_dir);
 }
 
