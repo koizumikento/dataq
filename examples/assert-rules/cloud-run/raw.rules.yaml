@@ -1,0 +1,20 @@
+required_keys:
+  - apiVersion
+  - kind
+  - metadata.name
+  - spec.template.spec.containers
+forbid_keys:
+  - status
+fields:
+  apiVersion:
+    enum: [serving.knative.dev/v1]
+  kind:
+    enum: [Service]
+  metadata.name:
+    type: string
+    pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+  spec.template.spec.containers:
+    type: array
+count:
+  min: 1
+  max: 1

@@ -1,9 +1,45 @@
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
-use dataq::cmd::r#assert::{AssertCommandArgs, run_with_stdin};
+use dataq::cmd::r#assert::{AssertCommandArgs, AssertCommandResponse, run_with_stdin};
 use dataq::io::Format;
 use serde_json::Value;
 use tempfile::tempdir;
+
+fn sample_rules_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
+fn run_with_sample_rules(
+    rules_relative_path: &str,
+    format: Format,
+    input: &str,
+) -> AssertCommandResponse {
+    let rules_path = sample_rules_path(rules_relative_path);
+    assert!(
+        rules_path.exists(),
+        "sample rules must exist: {rules_relative_path}"
+    );
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(format),
+        rules: Some(rules_path),
+        schema: None,
+    };
+    run_with_stdin(&args, Cursor::new(input.as_bytes()))
+}
+
+fn has_mismatch(payload: &Value, path: &str, rule_kind: &str, reason: &str) -> bool {
+    payload["mismatches"]
+        .as_array()
+        .expect("mismatches array")
+        .iter()
+        .any(|entry| {
+            entry["path"].as_str() == Some(path)
+                && entry["rule_kind"].as_str() == Some(rule_kind)
+                && entry["reason"].as_str() == Some(reason)
+        })
+}
 
 #[test]
 fn assert_api_success_with_stdin_input() {
@@ -496,4 +532,305 @@ fn assert_api_schema_mode_keeps_numeric_object_key_paths_unambiguous() {
         response.payload["mismatches"][0]["path"],
         Value::from("$[0][\"0\"]")
     );
+}
+
+#[test]
+fn cloud_run_raw_sample_rules_accept_valid_input() {
+    let input = r#"
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: demo-service
+spec:
+  template:
+    spec:
+      containers:
+        - image: us-docker.pkg.dev/p/r/app:1
+"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/cloud-run/raw.rules.yaml",
+        Format::Yaml,
+        input,
+    );
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(response.payload["matched"], Value::Bool(true));
+}
+
+#[test]
+fn cloud_run_raw_sample_rules_reject_invalid_input() {
+    let input = r#"
+apiVersion: serving.knative.dev/v1
+kind: Revision
+metadata:
+  name: demo-service
+spec:
+  template:
+    spec:
+      containers:
+        - image: us-docker.pkg.dev/p/r/app:1
+status: {}
+"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/cloud-run/raw.rules.yaml",
+        Format::Yaml,
+        input,
+    );
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(response.payload["matched"], Value::Bool(false));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].status",
+        "forbid_keys",
+        "forbidden_key"
+    ));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].kind",
+        "enum",
+        "enum_mismatch"
+    ));
+}
+
+#[test]
+fn github_actions_raw_sample_rules_accept_valid_input() {
+    let input = r#"
+name: CI
+'on':
+  push:
+    branches: [main]
+jobs: {}
+permissions:
+  contents: read
+"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/github-actions/raw.rules.yaml",
+        Format::Yaml,
+        input,
+    );
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(response.payload["matched"], Value::Bool(true));
+}
+
+#[test]
+fn github_actions_raw_sample_rules_reject_invalid_input() {
+    let input = r#"
+name: CI
+'on': push
+jobs: {}
+"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/github-actions/raw.rules.yaml",
+        Format::Yaml,
+        input,
+    );
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(response.payload["matched"], Value::Bool(false));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].permissions",
+        "required_keys",
+        "missing_key"
+    ));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].on",
+        "types",
+        "type_mismatch"
+    ));
+}
+
+#[test]
+fn gitlab_ci_raw_sample_rules_accept_valid_input() {
+    let input = r#"
+stages: [build, test]
+build:
+  stage: build
+  script: ["echo ok"]
+"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/gitlab-ci/raw.rules.yaml",
+        Format::Yaml,
+        input,
+    );
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(response.payload["matched"], Value::Bool(true));
+}
+
+#[test]
+fn gitlab_ci_raw_sample_rules_reject_invalid_input() {
+    let input = r#"
+stages: build
+"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/gitlab-ci/raw.rules.yaml",
+        Format::Yaml,
+        input,
+    );
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(response.payload["matched"], Value::Bool(false));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].stages",
+        "types",
+        "type_mismatch"
+    ));
+}
+
+#[test]
+fn github_actions_jobs_sample_rules_accept_valid_input() {
+    let input = r#"[{"job_id":"build","runs_on":"ubuntu-latest","steps_count":2,"uses_unpinned_action":false}]"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/github-actions/jobs.rules.yaml",
+        Format::Json,
+        input,
+    );
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(response.payload["matched"], Value::Bool(true));
+}
+
+#[test]
+fn github_actions_jobs_sample_rules_reject_invalid_input() {
+    let input = r#"[{"job_id":"build","runs_on":"ubuntu-latest","steps_count":0,"uses_unpinned_action":true}]"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/github-actions/jobs.rules.yaml",
+        Format::Json,
+        input,
+    );
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(response.payload["matched"], Value::Bool(false));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].steps_count",
+        "ranges",
+        "below_min"
+    ));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].uses_unpinned_action",
+        "enum",
+        "enum_mismatch"
+    ));
+}
+
+#[test]
+fn gitlab_ci_jobs_sample_rules_accept_valid_input() {
+    let input =
+        r#"[{"job_name":"build:test","stage":"build","script_count":1,"uses_only_except":false}]"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/gitlab-ci/jobs.rules.yaml",
+        Format::Json,
+        input,
+    );
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(response.payload["matched"], Value::Bool(true));
+}
+
+#[test]
+fn gitlab_ci_jobs_sample_rules_reject_invalid_input() {
+    let input =
+        r#"[{"job_name":"build test","stage":"build","script_count":0,"uses_only_except":true}]"#;
+    let response = run_with_sample_rules(
+        "examples/assert-rules/gitlab-ci/jobs.rules.yaml",
+        Format::Json,
+        input,
+    );
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(response.payload["matched"], Value::Bool(false));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].job_name",
+        "pattern",
+        "pattern_mismatch"
+    ));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].script_count",
+        "ranges",
+        "below_min"
+    ));
+    assert!(has_mismatch(
+        &response.payload,
+        "$[0].uses_only_except",
+        "enum",
+        "enum_mismatch"
+    ));
+}
+
+#[test]
+fn all_sample_rules_files_are_loadable() {
+    let cases = [
+        (
+            "examples/assert-rules/cloud-run/raw.rules.yaml",
+            Format::Yaml,
+            r#"
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: demo-service
+spec:
+  template:
+    spec:
+      containers:
+        - image: us-docker.pkg.dev/p/r/app:1
+"#,
+        ),
+        (
+            "examples/assert-rules/github-actions/raw.rules.yaml",
+            Format::Yaml,
+            r#"
+name: CI
+'on':
+  push: {}
+jobs: {}
+permissions:
+  contents: read
+"#,
+        ),
+        (
+            "examples/assert-rules/github-actions/jobs.rules.yaml",
+            Format::Json,
+            r#"[{"job_id":"build","runs_on":"ubuntu-latest","steps_count":1,"uses_unpinned_action":false}]"#,
+        ),
+        (
+            "examples/assert-rules/gitlab-ci/raw.rules.yaml",
+            Format::Yaml,
+            "stages: [build]\n",
+        ),
+        (
+            "examples/assert-rules/gitlab-ci/jobs.rules.yaml",
+            Format::Json,
+            r#"[{"job_name":"build","stage":"build","script_count":1,"uses_only_except":false}]"#,
+        ),
+    ];
+
+    for (rules_path, format, input) in cases {
+        let response = run_with_sample_rules(rules_path, format, input);
+        assert_eq!(
+            response.exit_code, 0,
+            "sample rules should load: {rules_path}"
+        );
+    }
+}
+
+#[test]
+fn sample_rules_files_do_not_contain_unknown_fields() {
+    let rules_paths = [
+        "examples/assert-rules/cloud-run/raw.rules.yaml",
+        "examples/assert-rules/github-actions/raw.rules.yaml",
+        "examples/assert-rules/github-actions/jobs.rules.yaml",
+        "examples/assert-rules/gitlab-ci/raw.rules.yaml",
+        "examples/assert-rules/gitlab-ci/jobs.rules.yaml",
+    ];
+
+    for rules_path in rules_paths {
+        let response = run_with_sample_rules(rules_path, Format::Json, "[]");
+        assert_eq!(
+            response.exit_code, 2,
+            "invalid sample rules schema should fail with exit=3: {rules_path}"
+        );
+        assert_ne!(
+            response.payload["error"],
+            Value::String("input_usage_error".to_string())
+        );
+    }
 }

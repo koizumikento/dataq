@@ -16,11 +16,18 @@ dataq [--emit-pipeline] <command> [options]
 - `profile`: フィールド統計を決定的JSONで出力
 - `merge`: base + overlays をポリシーマージ
 
+## このCLIの位置づけ
+
+- `dataq` は `jq` / `yq` / `mlr` の代替ではなく、運用で繰り返す複合処理を短いコマンドに固定するための契約CLI
+- 直接パイプ（`yq ... | jq ... | mlr ...`）で起きやすいI/O揺れ・終了コード揺れを、`dataq` 側で吸収して統一
+- 探索や一時分析は各ツール単体、本番運用パイプラインは `dataq` で固定化する使い分けを想定
+
 ## `assert` 補助出力
 
 - `dataq assert --rules-help` で `--rules` 用ルール仕様を機械可読JSONで出力
 - `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
+- `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義をジョブ単位レコードへ正規化してから `--rules` 検証可能（`jq` 必須）
 
 ## CLI I/O 契約
 
@@ -48,7 +55,7 @@ pipeline JSON schema:
 - `command`: 実行サブコマンド名
 - `input`: 入力ソース情報（stdin/path, format）
 - `steps`: 実行ステップ配列
-- `external_tools`: `jq|yq|mlr` の使用有無
+- `external_tools`: `jq|yq|mlr` の使用有無（ツール名順で固定）
 - `deterministic_guards`: 適用した決定性ガード
 
 ```bash
@@ -57,6 +64,7 @@ cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.jso
 
 ### 外部ツール連携の方針
 
+- `dataq` は外部ツールを運用上の依存として扱い、CLI契約（JSON/終了コード）をRust層で統一する
 - ユーザー入力はシェル文字列展開せず、外部ツール連携時も明示的な引数配列で扱う
 
 ## 関連ドキュメント

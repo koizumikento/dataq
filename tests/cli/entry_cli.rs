@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 
 use predicates::prelude::predicate;
 use serde_json::Value;
@@ -84,6 +85,77 @@ fn assert_command_reports_validation_mismatch() {
         .assert()
         .code(2)
         .stdout(predicate::str::contains("\"mismatch_count\":1"));
+}
+
+#[test]
+fn assert_command_normalize_github_actions_jobs_from_raw_yaml() {
+    let dir = tempdir().expect("temp dir");
+    let workflow_path = dir.path().join("workflow.yml");
+    fs::write(
+        &workflow_path,
+        r#"
+name: CI
+on:
+  push: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"#,
+    )
+    .expect("write workflow");
+    let rules_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/assert-rules/github-actions/jobs.rules.yaml");
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "assert",
+            "--input",
+            workflow_path.to_str().expect("utf8 path"),
+            "--normalize",
+            "github-actions-jobs",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+        ])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"matched\":true"));
+}
+
+#[test]
+fn assert_command_normalize_gitlab_ci_jobs_from_raw_yaml() {
+    let dir = tempdir().expect("temp dir");
+    let workflow_path = dir.path().join(".gitlab-ci.yml");
+    fs::write(
+        &workflow_path,
+        r#"
+stages: [build]
+build:
+  stage: build
+  script:
+    - echo ok
+  only:
+    - main
+"#,
+    )
+    .expect("write workflow");
+    let rules_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/assert-rules/gitlab-ci/jobs.rules.yaml");
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "assert",
+            "--input",
+            workflow_path.to_str().expect("utf8 path"),
+            "--normalize",
+            "gitlab-ci-jobs",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+        ])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"reason\":\"enum_mismatch\""));
 }
 
 #[test]

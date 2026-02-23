@@ -1,0 +1,20 @@
+required_keys:
+  - job_id
+  - runs_on
+  - steps_count
+  - uses_unpinned_action
+fields:
+  job_id:
+    type: string
+    pattern: '^[A-Za-z_][A-Za-z0-9_-]*$'
+  runs_on:
+    type: string
+  steps_count:
+    type: integer
+    range:
+      min: 1
+  uses_unpinned_action:
+    type: boolean
+    enum: [false]
+count:
+  min: 1

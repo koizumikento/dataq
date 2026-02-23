@@ -3,11 +3,46 @@
 `dataq` は、JSON / YAML / CSV を対象にした「決定的な前処理・検証・差分」CLIです。  
 AI処理そのものは行わず、エージェントやCIから呼びやすい機械可読I/Oを提供します。
 
+## これは何か（3行要約）
+
+- `dataq` は `jq` / `yq` / `mlr` の「よく使う組み合わせ」を単一CLIにまとめるための契約レイヤーです
+- 実行のオーケストレーションは Rust 側で行い、出力JSONと終了コード契約を固定します
+- 探索は各ツール単体、運用パイプラインは `dataq` で再利用する使い分けを想定しています
+
 ## 目的
 
 - データ変換を再現可能にする（同じ入力なら同じ出力）
 - 失敗を終了コードとJSONで明確化する
-- `jq` / `yq` / `mlr` の強みを統一的に使えるようにする
+- `jq` / `yq` / `mlr` を組み合わせた処理を、短い固定コマンドとして再利用可能にする
+
+## 立ち位置（`jq` / `yq` / `mlr` との関係）
+
+| 観点 | dataq | jq / yq / mlr |
+| --- | --- | --- |
+| 主目的 | よく使う複合パイプラインを契約化して再利用 | 抽出・変換・集計の表現力 |
+| 実行モデル | Rustオーケストレータ + 必要時 `jq/yq/mlr` 連携 | 各ツールのDSL/フィルタ実行 |
+| 出力契約 | 機械可読JSONを既定、スキーマ化しやすい | フィルタ次第で形式が変動 |
+| 終了コード契約 | `0/2/3/1` を意味付きで固定 | ツールごとに意味が異なる |
+| 決定性ガード | キー順・時刻正規化・差分順序などを固定 | フィルタ/オプション次第 |
+| 診断 | `--emit-pipeline` で内部ステップをJSON出力 | 同等の共通仕様はない |
+
+## 使い分け
+
+- `dataq` を使う場面:
+  CI品質ゲート、前処理の再実行保証、チームで共通化したいパイプライン、差分の定常監視
+- `jq` / `yq` / `mlr` を使う場面:
+  ワンライナー探索、複雑な抽出クエリ、対話的な整形や一時分析
+- 併用の考え方:
+  探索は `jq` / `yq` / `mlr`、本番の再利用パイプラインは `dataq`（契約を `dataq` 側に寄せる）
+
+## 生パイプラインとの違い
+
+- 生パイプライン:
+  `yq ... | jq ... | mlr ...` のように都度書けるが、引数差分・エラー解釈・終了コードが揺れやすい
+- `dataq`:
+  同等の処理意図をサブコマンド化し、I/O形式・失敗JSON・終了コードを固定できる
+- 監査性:
+  `--emit-pipeline` で、内部処理ステップと外部ツール使用有無を機械可読で残せる
 
 ## コマンド一覧
 
@@ -56,6 +91,9 @@ dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --polic
 
 # ID で対応付けし、更新時刻は差分対象外
 dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-path '$["updated_at"]'
+
+# JSON入力をそのままdataqで検証
+dataq assert --input raw.json --rules rules.yaml
 ```
 
 ## OSS基本情報
@@ -108,6 +146,7 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 - 最小/最大件数
 - `--rules <path>`: dataq ルールで検証（ルールスキーマは厳密。未知キーは入力不正）
 - `--schema <path>`: JSON Schema で検証
+- `--normalize <github-actions-jobs|gitlab-ci-jobs>`: 生のCI定義をジョブ単位レコードへ正規化してから検証（`jq` 必須）
 - `--rules` と `--schema` は同時指定不可（入力不正として終了コード `3`）
 - `--rules-help`: `--rules` 用ルール仕様を機械可読JSONで出力して終了（終了コード `0`）
 - `--schema-help`: `--schema`（JSON Schema検証）用の使い方と結果契約を機械可読JSONで出力して終了（終了コード `0`）
@@ -148,6 +187,29 @@ JSON Schemaモード仕様をCLIから取得:
 
 ```bash
 dataq assert --schema-help
+```
+
+サービス定義向けのサンプルルール:
+
+- 配置先: `examples/assert-rules/`
+- 対象: `cloud-run`, `github-actions`, `gitlab-ci`
+- 方式:
+  - `raw.rules.yaml`: 生のYAML構造を検証
+  - `jobs.rules.yaml`: `--normalize` でジョブ単位に正規化して検証（2段方式）
+
+例（Cloud Run の raw 検証）:
+
+```bash
+dataq assert --input service.yaml --rules examples/assert-rules/cloud-run/raw.rules.yaml
+```
+
+例（GitHub Actions の jobs 検証）:
+
+```bash
+dataq assert \
+  --input .github/workflows/ci.yml \
+  --normalize github-actions-jobs \
+  --rules examples/assert-rules/github-actions/jobs.rules.yaml
 ```
 
 ### 3. `sdiff`
@@ -194,8 +256,9 @@ dataq assert --schema-help
 1. MVP (`canon`, `assert`, `sdiff`)
 2. `profile`（欠損率、ユニーク数、型分布）
 3. `merge`（YAML/JSONのポリシーマージ、実装済み）
-4. JSON Schema連携
-5. スナップショットテスト拡充
+4. 外部ツール前提の環境診断（`doctor`）
+5. 複合パイプライン定義の簡素化（レシピ実行）
+6. スナップショットテスト拡充
 
 ## 想定ユースケース
 

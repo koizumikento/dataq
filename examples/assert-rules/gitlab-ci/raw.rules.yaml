@@ -1,0 +1,8 @@
+required_keys:
+  - stages
+fields:
+  stages:
+    type: array
+count:
+  min: 1
+  max: 1

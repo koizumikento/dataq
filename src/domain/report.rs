@@ -54,6 +54,17 @@ impl PipelineReport {
             deterministic_guards,
         }
     }
+
+    pub fn mark_external_tool_used(mut self, tool_name: &str) -> Self {
+        if let Some(tool) = self
+            .external_tools
+            .iter_mut()
+            .find(|tool| tool.name == tool_name)
+        {
+            tool.used = true;
+        }
+        self
+    }
 }
 
 /// Input-source descriptors used in pipeline diagnostics.

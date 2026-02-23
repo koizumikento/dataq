@@ -1,0 +1,20 @@
+required_keys:
+  - job_name
+  - stage
+  - script_count
+  - uses_only_except
+fields:
+  job_name:
+    type: string
+    pattern: '^[A-Za-z0-9_.:-]+$'
+  stage:
+    type: string
+  script_count:
+    type: integer
+    range:
+      min: 1
+  uses_only_except:
+    type: boolean
+    enum: [false]
+count:
+  min: 1

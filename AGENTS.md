@@ -10,6 +10,7 @@ Core goals:
 - Machine-readable output by default
 - Stable exit-code contract
 - Pragmatic interoperability with `jq`, `yq`, and `mlr`
+- Simplify recurring `jq`/`yq`/`mlr` pipeline patterns into stable `dataq` commands
 
 ## Scope and precedence
 

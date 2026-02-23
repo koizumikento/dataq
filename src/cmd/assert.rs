@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::adapters::jq;
 use crate::domain::rules::{AssertReport, AssertRules};
 use crate::engine::r#assert::{self, AssertValidationError};
 use crate::io::{self, Format, IoError};
@@ -16,6 +17,22 @@ pub struct AssertCommandArgs {
     pub from: Option<Format>,
     pub rules: Option<PathBuf>,
     pub schema: Option<PathBuf>,
+}
+
+/// Optional input normalization profile applied before assert validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertInputNormalizeMode {
+    GithubActionsJobs,
+    GitlabCiJobs,
+}
+
+impl AssertInputNormalizeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GithubActionsJobs => "github-actions-jobs",
+            Self::GitlabCiJobs => "gitlab-ci-jobs",
+        }
+    }
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -31,17 +48,25 @@ pub fn pipeline_steps() -> Vec<String> {
         "load_rules".to_string(),
         "resolve_input_format".to_string(),
         "read_input_values".to_string(),
+        "normalize_assert_input".to_string(),
         "validate_assert_rules".to_string(),
     ]
 }
 
 /// Determinism guards applied by the `assert` command.
-pub fn deterministic_guards() -> Vec<String> {
-    vec![
+pub fn deterministic_guards(normalize: Option<AssertInputNormalizeMode>) -> Vec<String> {
+    let mut guards = vec![
         "rust_native_execution".to_string(),
         "no_shell_interpolation_for_user_input".to_string(),
         "rules_schema_deny_unknown_fields".to_string(),
-    ]
+    ];
+    if let Some(mode) = normalize {
+        guards.push(format!(
+            "assert_input_normalized_{}",
+            mode.as_str().replace('-', "_")
+        ));
+    }
+    guards
 }
 
 /// Machine-readable help payload for `assert --rules` rule files.
@@ -146,7 +171,15 @@ pub fn schema_help_payload() -> Value {
 }
 
 pub fn run_with_stdin<R: Read>(args: &AssertCommandArgs, stdin: R) -> AssertCommandResponse {
-    match execute(args, stdin) {
+    run_with_stdin_and_normalize(args, stdin, None)
+}
+
+pub fn run_with_stdin_and_normalize<R: Read>(
+    args: &AssertCommandArgs,
+    stdin: R,
+    normalize: Option<AssertInputNormalizeMode>,
+) -> AssertCommandResponse {
+    match execute(args, stdin, normalize) {
         Ok(report) => report_response(report),
         Err(CommandError::InputUsage(message)) => AssertCommandResponse {
             exit_code: 3,
@@ -179,11 +212,16 @@ fn report_response(report: AssertReport) -> AssertCommandResponse {
     }
 }
 
-fn execute<R: Read>(args: &AssertCommandArgs, stdin: R) -> Result<AssertReport, CommandError> {
+fn execute<R: Read>(
+    args: &AssertCommandArgs,
+    stdin: R,
+    normalize: Option<AssertInputNormalizeMode>,
+) -> Result<AssertReport, CommandError> {
     let source = resolve_validation_source(args)?;
     let input_format = io::resolve_input_format(args.from, args.input.as_deref())
         .map_err(map_io_as_input_usage)?;
     let values = load_input_values(args, stdin, input_format)?;
+    let values = normalize_input_values(values, normalize)?;
     match source {
         ValidationSource::Rules(rules) => assert::execute_assert(&values, &rules),
         ValidationSource::Schema(schema) => assert::execute_assert_with_schema(&values, &schema),
@@ -289,6 +327,43 @@ fn map_engine_error(error: AssertValidationError) -> CommandError {
 enum CommandError {
     InputUsage(String),
     Internal(String),
+}
+
+fn normalize_input_values(
+    values: Vec<Value>,
+    normalize: Option<AssertInputNormalizeMode>,
+) -> Result<Vec<Value>, CommandError> {
+    match normalize {
+        None => Ok(values),
+        Some(AssertInputNormalizeMode::GithubActionsJobs) => {
+            normalize_with_jq(values, AssertInputNormalizeMode::GithubActionsJobs)
+        }
+        Some(AssertInputNormalizeMode::GitlabCiJobs) => {
+            normalize_with_jq(values, AssertInputNormalizeMode::GitlabCiJobs)
+        }
+    }
+}
+
+fn normalize_with_jq(
+    values: Vec<Value>,
+    mode: AssertInputNormalizeMode,
+) -> Result<Vec<Value>, CommandError> {
+    let jq_result = match mode {
+        AssertInputNormalizeMode::GithubActionsJobs => jq::normalize_github_actions_jobs(&values),
+        AssertInputNormalizeMode::GitlabCiJobs => jq::normalize_gitlab_ci_jobs(&values),
+    };
+
+    match jq_result {
+        Ok(normalized) => Ok(normalized),
+        Err(jq::JqError::Unavailable) => Err(CommandError::InputUsage(format!(
+            "normalize mode `{}` requires `jq` in PATH",
+            mode.as_str()
+        ))),
+        Err(error) => Err(CommandError::InputUsage(format!(
+            "failed to normalize assert input with jq (`{}`): {error}",
+            mode.as_str()
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -418,5 +493,90 @@ mod tests {
         let response = run_with_stdin(&args, Cursor::new("[]"));
         assert_eq!(response.exit_code, 3);
         assert_eq!(response.payload["error"], json!("input_usage_error"));
+    }
+
+    #[test]
+    fn github_actions_jobs_normalizer_extracts_job_rows() {
+        let dir = tempdir().expect("tempdir");
+        let rules_path = dir.path().join("rules.json");
+        std::fs::write(
+            &rules_path,
+            r#"{
+                "required_keys": ["job_id", "runs_on", "steps_count", "uses_unpinned_action"],
+                "fields": {
+                    "job_id": {"type": "string"},
+                    "runs_on": {"type": "string"},
+                    "steps_count": {"type": "integer", "range": {"min": 1}},
+                    "uses_unpinned_action": {"type": "boolean", "enum": [false]}
+                },
+                "count": {"min": 1}
+            }"#,
+        )
+        .expect("write rules");
+        let args = AssertCommandArgs {
+            input: None,
+            from: Some(Format::Yaml),
+            rules: Some(rules_path),
+            schema: None,
+        };
+        let input = r#"
+name: CI
+on:
+  push: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"#;
+
+        let response = super::run_with_stdin_and_normalize(
+            &args,
+            Cursor::new(input),
+            Some(super::AssertInputNormalizeMode::GithubActionsJobs),
+        );
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.payload["matched"], json!(true));
+    }
+
+    #[test]
+    fn gitlab_jobs_normalizer_extracts_job_rows() {
+        let dir = tempdir().expect("tempdir");
+        let rules_path = dir.path().join("rules.json");
+        std::fs::write(
+            &rules_path,
+            r#"{
+                "required_keys": ["job_name", "stage", "script_count", "uses_only_except"],
+                "fields": {
+                    "job_name": {"type": "string"},
+                    "stage": {"type": "string"},
+                    "script_count": {"type": "integer", "range": {"min": 1}},
+                    "uses_only_except": {"type": "boolean", "enum": [false]}
+                },
+                "count": {"min": 1}
+            }"#,
+        )
+        .expect("write rules");
+        let args = AssertCommandArgs {
+            input: None,
+            from: Some(Format::Yaml),
+            rules: Some(rules_path),
+            schema: None,
+        };
+        let input = r#"
+stages: [build]
+build:
+  stage: build
+  script:
+    - echo ok
+"#;
+
+        let response = super::run_with_stdin_and_normalize(
+            &args,
+            Cursor::new(input),
+            Some(super::AssertInputNormalizeMode::GitlabCiJobs),
+        );
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.payload["matched"], json!(true));
     }
 }

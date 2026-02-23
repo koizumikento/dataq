@@ -76,6 +76,10 @@ struct AssertArgs {
     #[arg(long, conflicts_with_all = ["rules_help", "schema_help"])]
     input: Option<PathBuf>,
 
+    /// Normalize raw input into assert-friendly records before validation.
+    #[arg(long, value_enum, conflicts_with_all = ["rules_help", "schema_help"])]
+    normalize: Option<CliAssertNormalizeMode>,
+
     /// Print machine-readable rules help for `--rules` and exit.
     #[arg(long, default_value_t = false)]
     rules_help: bool,
@@ -142,6 +146,12 @@ enum CliMergePolicy {
     ArrayReplace,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliAssertNormalizeMode {
+    GithubActionsJobs,
+    GitlabCiJobs,
+}
+
 impl From<CliInputFormat> for Format {
     fn from(value: CliInputFormat) -> Self {
         match value {
@@ -168,6 +178,15 @@ impl From<CliMergePolicy> for MergePolicy {
             CliMergePolicy::LastWins => Self::LastWins,
             CliMergePolicy::DeepMerge => Self::DeepMerge,
             CliMergePolicy::ArrayReplace => Self::ArrayReplace,
+        }
+    }
+}
+
+impl From<CliAssertNormalizeMode> for r#assert::AssertInputNormalizeMode {
+    fn from(value: CliAssertNormalizeMode) -> Self {
+        match value {
+            CliAssertNormalizeMode::GithubActionsJobs => Self::GithubActionsJobs,
+            CliAssertNormalizeMode::GitlabCiJobs => Self::GitlabCiJobs,
         }
     }
 }
@@ -336,7 +355,11 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
     };
 
     let stdin = io::stdin();
-    let response = r#assert::run_with_stdin(&command_args, stdin.lock());
+    let response = r#assert::run_with_stdin_and_normalize(
+        &command_args,
+        stdin.lock(),
+        args.normalize.map(Into::into),
+    );
 
     let exit_code = match response.exit_code {
         0 | 2 => {
@@ -721,12 +744,16 @@ fn build_assert_pipeline_report(
         ));
     }
 
-    PipelineReport::new(
+    let mut report = PipelineReport::new(
         "assert",
         PipelineInput::new(sources),
         r#assert::pipeline_steps(),
-        r#assert::deterministic_guards(),
-    )
+        r#assert::deterministic_guards(args.normalize.map(Into::into)),
+    );
+    if args.normalize.is_some() {
+        report = report.mark_external_tool_used("jq");
+    }
+    report
 }
 
 fn build_sdiff_pipeline_report(

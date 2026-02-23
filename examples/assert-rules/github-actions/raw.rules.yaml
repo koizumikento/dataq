@@ -1,0 +1,17 @@
+required_keys:
+  - name
+  - on
+  - jobs
+  - permissions
+fields:
+  name:
+    type: string
+  on:
+    type: object
+  jobs:
+    type: object
+  permissions:
+    type: object
+count:
+  min: 1
+  max: 1
