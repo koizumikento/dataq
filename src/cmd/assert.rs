@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -14,7 +14,8 @@ use crate::io::{self, Format, IoError};
 pub struct AssertCommandArgs {
     pub input: Option<PathBuf>,
     pub from: Option<Format>,
-    pub rules: PathBuf,
+    pub rules: Option<PathBuf>,
+    pub schema: Option<PathBuf>,
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -22,6 +23,25 @@ pub struct AssertCommandArgs {
 pub struct AssertCommandResponse {
     pub exit_code: i32,
     pub payload: Value,
+}
+
+/// Ordered pipeline-step names used for `--emit-pipeline` diagnostics.
+pub fn pipeline_steps() -> Vec<String> {
+    vec![
+        "load_rules".to_string(),
+        "resolve_input_format".to_string(),
+        "read_input_values".to_string(),
+        "validate_assert_rules".to_string(),
+    ]
+}
+
+/// Determinism guards applied by the `assert` command.
+pub fn deterministic_guards() -> Vec<String> {
+    vec![
+        "rust_native_execution".to_string(),
+        "no_shell_interpolation_for_user_input".to_string(),
+        "rules_schema_deny_unknown_fields".to_string(),
+    ]
 }
 
 pub fn run_with_stdin<R: Read>(args: &AssertCommandArgs, stdin: R) -> AssertCommandResponse {
@@ -59,24 +79,48 @@ fn report_response(report: AssertReport) -> AssertCommandResponse {
 }
 
 fn execute<R: Read>(args: &AssertCommandArgs, stdin: R) -> Result<AssertReport, CommandError> {
-    let rules = load_rules(args)?;
+    let source = resolve_validation_source(args)?;
     let input_format = io::resolve_input_format(args.from, args.input.as_deref())
         .map_err(map_io_as_input_usage)?;
     let values = load_input_values(args, stdin, input_format)?;
-    assert::execute_assert(&values, &rules).map_err(map_engine_error)
+    match source {
+        ValidationSource::Rules(rules) => assert::execute_assert(&values, &rules),
+        ValidationSource::Schema(schema) => assert::execute_assert_with_schema(&values, &schema),
+    }
+    .map_err(map_engine_error)
 }
 
-fn load_rules(args: &AssertCommandArgs) -> Result<AssertRules, CommandError> {
-    let format = io::resolve_input_format(None, Some(args.rules.as_path())).map_err(|err| {
+enum ValidationSource {
+    Rules(AssertRules),
+    Schema(Value),
+}
+
+fn resolve_validation_source(args: &AssertCommandArgs) -> Result<ValidationSource, CommandError> {
+    match (&args.rules, &args.schema) {
+        (Some(_), Some(_)) => Err(CommandError::InputUsage(
+            "`--rules` and `--schema` are mutually exclusive".to_string(),
+        )),
+        (None, None) => Err(CommandError::InputUsage(
+            "either `--rules` or `--schema` must be provided".to_string(),
+        )),
+        (Some(rules_path), None) => load_rules(rules_path.as_path()).map(ValidationSource::Rules),
+        (None, Some(schema_path)) => {
+            load_schema(schema_path.as_path()).map(ValidationSource::Schema)
+        }
+    }
+}
+
+fn load_rules(path: &Path) -> Result<AssertRules, CommandError> {
+    let format = io::resolve_input_format(None, Some(path)).map_err(|err| {
         CommandError::InputUsage(format!(
             "unable to resolve rules format from `{}`: {err}",
-            args.rules.display()
+            path.display()
         ))
     })?;
-    let file = File::open(&args.rules).map_err(|err| {
+    let file = File::open(path).map_err(|err| {
         CommandError::InputUsage(format!(
             "failed to open rules file `{}`: {err}",
-            args.rules.display()
+            path.display()
         ))
     })?;
     let values = io::reader::read_values(file, format).map_err(map_io_as_input_usage)?;
@@ -88,6 +132,28 @@ fn load_rules(args: &AssertCommandArgs) -> Result<AssertRules, CommandError> {
     let rules_value = values.into_iter().next().unwrap_or(Value::Null);
     serde_json::from_value(rules_value)
         .map_err(|err| CommandError::InputUsage(format!("invalid rules schema: {err}")))
+}
+
+fn load_schema(path: &Path) -> Result<Value, CommandError> {
+    let format = io::resolve_input_format(None, Some(path)).map_err(|err| {
+        CommandError::InputUsage(format!(
+            "unable to resolve schema format from `{}`: {err}",
+            path.display()
+        ))
+    })?;
+    let file = File::open(path).map_err(|err| {
+        CommandError::InputUsage(format!(
+            "failed to open schema file `{}`: {err}",
+            path.display()
+        ))
+    })?;
+    let values = io::reader::read_values(file, format).map_err(map_io_as_input_usage)?;
+    if values.len() != 1 {
+        return Err(CommandError::InputUsage(
+            "schema file must contain exactly one value".to_string(),
+        ));
+    }
+    Ok(values.into_iter().next().unwrap_or(Value::Null))
 }
 
 fn load_input_values<R: Read>(
@@ -151,7 +217,8 @@ mod tests {
         let args = AssertCommandArgs {
             input: None,
             from: Some(Format::Json),
-            rules: rules_path,
+            rules: Some(rules_path),
+            schema: None,
         };
 
         let response = run_with_stdin(&args, Cursor::new(r#"[{"id":1}]"#));
@@ -176,7 +243,8 @@ mod tests {
         let args = AssertCommandArgs {
             input: None,
             from: Some(Format::Json),
-            rules: rules_path,
+            rules: Some(rules_path),
+            schema: None,
         };
 
         let response = run_with_stdin(&args, Cursor::new(r#"[{"id":"oops"}]"#));
@@ -192,7 +260,58 @@ mod tests {
         let args = AssertCommandArgs {
             input: None,
             from: Some(Format::Json),
-            rules: rules_path,
+            rules: Some(rules_path),
+            schema: None,
+        };
+
+        let response = run_with_stdin(&args, Cursor::new("[]"));
+        assert_eq!(response.exit_code, 3);
+        assert_eq!(response.payload["error"], json!("input_usage_error"));
+    }
+
+    #[test]
+    fn maps_schema_mismatch_to_exit_two() {
+        let dir = tempdir().expect("tempdir");
+        let schema_path = dir.path().join("schema.json");
+        std::fs::write(
+            &schema_path,
+            r#"{
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "integer"}
+                }
+            }"#,
+        )
+        .expect("write schema");
+        let args = AssertCommandArgs {
+            input: None,
+            from: Some(Format::Json),
+            rules: None,
+            schema: Some(schema_path),
+        };
+
+        let response = run_with_stdin(&args, Cursor::new(r#"[{"id":"oops"}]"#));
+        assert_eq!(response.exit_code, 2);
+        assert_eq!(response.payload["mismatch_count"], json!(1));
+        assert_eq!(
+            response.payload["mismatches"][0]["reason"],
+            json!("schema_mismatch")
+        );
+    }
+
+    #[test]
+    fn maps_rules_schema_conflict_to_exit_three() {
+        let dir = tempdir().expect("tempdir");
+        let rules_path = dir.path().join("rules.json");
+        let schema_path = dir.path().join("schema.json");
+        std::fs::write(&rules_path, "{}").expect("write rules");
+        std::fs::write(&schema_path, "{}").expect("write schema");
+        let args = AssertCommandArgs {
+            input: None,
+            from: Some(Format::Json),
+            rules: Some(rules_path),
+            schema: Some(schema_path),
         };
 
         let response = run_with_stdin(&args, Cursor::new("[]"));

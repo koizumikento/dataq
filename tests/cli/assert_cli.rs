@@ -30,7 +30,8 @@ ranges:
     let args = AssertCommandArgs {
         input: None,
         from: Some(Format::Json),
-        rules: rules_path,
+        rules: Some(rules_path),
+        schema: None,
     };
 
     let response = run_with_stdin(&args, Cursor::new(r#"[{"id":1,"score":10.5}]"#));
@@ -57,7 +58,8 @@ fn assert_api_reports_mismatch_shape() {
     let args = AssertCommandArgs {
         input: None,
         from: Some(Format::Json),
-        rules: rules_path,
+        rules: Some(rules_path),
+        schema: None,
     };
 
     let response = run_with_stdin(&args, Cursor::new(r#"[{"id":"x","score":4}]"#));
@@ -72,6 +74,7 @@ fn assert_api_reports_mismatch_shape() {
     for mismatch in mismatches {
         let obj = mismatch.as_object().expect("mismatch object");
         assert!(obj.contains_key("path"));
+        assert!(obj.contains_key("rule_kind"));
         assert!(obj.contains_key("reason"));
         assert!(obj.contains_key("actual"));
         assert!(obj.contains_key("expected"));
@@ -96,7 +99,8 @@ fn assert_api_reports_input_usage_errors() {
     let args = AssertCommandArgs {
         input: None,
         from: None,
-        rules: rules_path,
+        rules: Some(rules_path),
+        schema: None,
     };
 
     let response = run_with_stdin(&args, Cursor::new("[]"));
@@ -126,7 +130,8 @@ fn assert_api_rejects_unknown_rule_keys() {
     let args = AssertCommandArgs {
         input: None,
         from: Some(Format::Json),
-        rules: rules_path,
+        rules: Some(rules_path),
+        schema: None,
     };
 
     let response = run_with_stdin(&args, Cursor::new("[]"));
@@ -159,7 +164,8 @@ fn assert_api_compares_large_integer_ranges_exactly() {
     let args = AssertCommandArgs {
         input: None,
         from: Some(Format::Json),
-        rules: rules_path,
+        rules: Some(rules_path),
+        schema: None,
     };
 
     let response = run_with_stdin(&args, Cursor::new(r#"[{"value":9007199254740993}]"#));
@@ -172,5 +178,222 @@ fn assert_api_compares_large_integer_ranges_exactly() {
     assert_eq!(
         response.payload["mismatches"][0]["reason"],
         Value::from("above_max")
+    );
+    assert_eq!(
+        response.payload["mismatches"][0]["rule_kind"],
+        Value::from("ranges")
+    );
+}
+
+#[test]
+fn assert_api_supports_enum_pattern_forbid_keys_and_nullable() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    std::fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": [],
+            "forbid_keys": ["meta.blocked"],
+            "types": {},
+            "nullable": {"optional": true},
+            "enum": {"status": ["ok", "done"]},
+            "pattern": {"name": "^[a-z]+_[0-9]+$"},
+            "count": {},
+            "ranges": {}
+        }"#,
+    )
+    .expect("write rules");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(rules_path),
+        schema: None,
+    };
+
+    let response = run_with_stdin(
+        &args,
+        Cursor::new(
+            r#"[{"status":"pending","name":"User-1","meta":{"blocked":true},"optional":null}]"#,
+        ),
+    );
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(response.payload["matched"], Value::Bool(false));
+    assert_eq!(response.payload["mismatch_count"], Value::from(3));
+    assert_eq!(
+        response.payload["mismatches"][0]["rule_kind"],
+        Value::from("forbid_keys")
+    );
+    assert_eq!(
+        response.payload["mismatches"][1]["rule_kind"],
+        Value::from("enum")
+    );
+    assert_eq!(
+        response.payload["mismatches"][2]["rule_kind"],
+        Value::from("pattern")
+    );
+}
+
+#[test]
+fn assert_api_rejects_invalid_pattern_rules() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    std::fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": [],
+            "forbid_keys": [],
+            "types": {},
+            "nullable": {},
+            "enum": {},
+            "pattern": {"name": "[a-z"},
+            "count": {},
+            "ranges": {}
+        }"#,
+    )
+    .expect("write rules");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(rules_path),
+        schema: None,
+    };
+
+    let response = run_with_stdin(&args, Cursor::new("[]"));
+    assert_eq!(response.exit_code, 3);
+    assert_eq!(
+        response.payload["error"],
+        Value::String("input_usage_error".to_string())
+    );
+    let message = response.payload["message"]
+        .as_str()
+        .expect("input usage message");
+    assert!(message.contains("invalid pattern"));
+}
+
+#[test]
+fn assert_api_supports_jsonschema_mode() {
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    std::fs::write(
+        &schema_path,
+        r#"{
+            "type": "object",
+            "required": ["id", "score"],
+            "properties": {
+                "id": {"type": "integer"},
+                "score": {"type": "number", "maximum": 10}
+            }
+        }"#,
+    )
+    .expect("write schema");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: None,
+        schema: Some(schema_path),
+    };
+
+    let response = run_with_stdin(&args, Cursor::new(r#"[{"id":"x","score":12}]"#));
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(response.payload["matched"], Value::Bool(false));
+    assert_eq!(response.payload["mismatch_count"], Value::from(2));
+
+    let mismatches = response.payload["mismatches"]
+        .as_array()
+        .expect("mismatches array");
+    assert!(!mismatches.is_empty());
+    for mismatch in mismatches {
+        let obj = mismatch.as_object().expect("mismatch object");
+        assert!(obj.contains_key("path"));
+        assert!(obj.contains_key("reason"));
+        assert!(obj.contains_key("actual"));
+        assert!(obj.contains_key("expected"));
+        assert_eq!(
+            obj.get("reason"),
+            Some(&Value::String("schema_mismatch".to_string()))
+        );
+    }
+}
+
+#[test]
+fn assert_api_rejects_rules_and_schema_together() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    let schema_path = dir.path().join("schema.json");
+    std::fs::write(
+        &rules_path,
+        r#"{"required_keys":[],"types":{},"count":{},"ranges":{}}"#,
+    )
+    .expect("write rules");
+    std::fs::write(&schema_path, r#"{"type":"object"}"#).expect("write schema");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(rules_path),
+        schema: Some(schema_path),
+    };
+
+    let response = run_with_stdin(&args, Cursor::new("[]"));
+    assert_eq!(response.exit_code, 3);
+    assert_eq!(
+        response.payload["error"],
+        Value::String("input_usage_error".to_string())
+    );
+}
+
+#[test]
+fn assert_api_maps_schema_parse_errors_to_exit_three() {
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    std::fs::write(&schema_path, r#"{"type":"object","properties":{"id":}"#)
+        .expect("write invalid schema");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: None,
+        schema: Some(schema_path),
+    };
+
+    let response = run_with_stdin(&args, Cursor::new(r#"[{"id":1}]"#));
+    assert_eq!(response.exit_code, 3);
+    assert_eq!(
+        response.payload["error"],
+        Value::String("input_usage_error".to_string())
+    );
+}
+
+#[test]
+fn assert_api_schema_mode_keeps_numeric_object_key_paths_unambiguous() {
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    std::fs::write(
+        &schema_path,
+        r#"{
+            "type": "object",
+            "required": ["0"],
+            "properties": {
+                "0": {"type": "integer"}
+            }
+        }"#,
+    )
+    .expect("write schema");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: None,
+        schema: Some(schema_path),
+    };
+
+    let response = run_with_stdin(&args, Cursor::new(r#"[{"0":"x"}]"#));
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(
+        response.payload["mismatches"][0]["path"],
+        Value::from("$[0][\"0\"]")
     );
 }

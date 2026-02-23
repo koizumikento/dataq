@@ -31,6 +31,32 @@ impl From<CanonCommandOptions> for CanonOptions {
     }
 }
 
+/// Ordered pipeline-step names used for `--emit-pipeline` diagnostics.
+pub fn pipeline_steps() -> Vec<String> {
+    vec![
+        "read_input_values".to_string(),
+        "canonicalize_values".to_string(),
+        "write_output_values".to_string(),
+    ]
+}
+
+/// Determinism guards applied by the `canon` command.
+pub fn deterministic_guards(options: CanonCommandOptions) -> Vec<String> {
+    let mut guards = vec![
+        "rust_native_execution".to_string(),
+        "no_shell_interpolation_for_user_input".to_string(),
+    ];
+    if options.sort_keys {
+        guards.push("object_keys_sorted_lexicographically".to_string());
+    } else {
+        guards.push("input_object_key_order_preserved".to_string());
+    }
+    if options.normalize_time {
+        guards.push("timestamps_normalized_rfc3339_utc".to_string());
+    }
+    guards
+}
+
 /// Execute `canon` from input stream to output stream.
 ///
 /// This function is intentionally thin: it only coordinates I/O and delegates
