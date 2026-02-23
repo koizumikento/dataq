@@ -17,6 +17,23 @@ dataq [--emit-pipeline] <command> [options]
 - `merge`: base + overlays をポリシーマージ
 - `doctor`: `jq` / `yq` / `mlr` の実行前診断
 
+## `profile` 出力契約
+
+- 既存キーは固定: `record_count`, `field_count`, `fields`, `type_distribution`
+- `fields.<canonical-path>.numeric_stats` は後方互換な追加キー（数値サンプルが存在するときのみ出力）
+- `numeric_stats` スキーマ:
+  - `count`
+  - `min`
+  - `max`
+  - `mean`
+  - `p50`
+  - `p95`
+- 数値サンプル抽出対象は JSON number のみ
+- パーセンタイル規則は nearest-rank で固定:
+  - `rank = ceil(p * n)`（`p` は 0.50 / 0.95）
+  - `index = rank - 1`（0始まり）
+- `numeric_stats` の浮動小数は小数点以下6桁に丸めて出力
+
 ## このCLIの位置づけ
 
 - `dataq` は `jq` / `yq` / `mlr` の代替ではなく、運用で繰り返す複合処理を短いコマンドに固定するための契約CLI

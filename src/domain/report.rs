@@ -16,6 +16,19 @@ pub struct ProfileFieldReport {
     pub null_ratio: f64,
     pub unique_count: usize,
     pub type_distribution: ProfileTypeDistribution,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numeric_stats: Option<ProfileNumericStats>,
+}
+
+/// Deterministic numeric statistics for one field path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProfileNumericStats {
+    pub count: usize,
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+    pub p50: f64,
+    pub p95: f64,
 }
 
 /// Deterministic type distribution for one field path.
