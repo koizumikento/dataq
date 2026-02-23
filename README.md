@@ -66,6 +66,8 @@ dataq [--emit-pipeline] <command> [options]
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
+| `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
+| `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` |
 | `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
@@ -97,6 +99,12 @@ dataq sdiff --left before.jsonl --right after.jsonl
 
 # 品質プロファイル
 dataq profile --from json --input out.jsonl
+
+# 内部結合（idキー）
+dataq join --left users.json --right scores.json --on id --how inner
+
+# グループ集計（team単位でprice平均）
+dataq aggregate --input orders.json --group-by team --metric avg --target price
 
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
@@ -273,7 +281,32 @@ dataq assert \
 - `p50` / `p95` は nearest-rank 方式（`rank = ceil(p * n)`、`index = rank - 1`、0始まり配列で評価）
 - `numeric_stats` の浮動小数は小数点以下6桁へ丸め（`round half away from zero` 相当）
 
-### 5. `merge`
+### 5. `join`
+
+2つの入力を結合キーで結合し、JSON配列で返す。
+
+- `--left <path>`: 左入力（JSON/YAML/CSV/JSONL）
+- `--right <path>`: 右入力（JSON/YAML/CSV/JSONL）
+- `--on <field>`: 結合キー
+- `--how <inner|left>`: 結合方式
+- 入力レコードは object であること、および `--on` キーが全レコードに存在することが必須
+- 出力は JSON 配列固定（決定的順序）
+- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断を出力
+
+### 6. `aggregate`
+
+単一入力をグループ化して集計し、JSON配列で返す。
+
+- `--input <path>`: 入力（JSON/YAML/CSV/JSONL）
+- `--group-by <field>`: グループキー
+- `--metric <count|sum|avg>`: 集計メトリクス
+- `--target <field>`: 集計対象キー
+- `sum` / `avg` は `--target` が数値であることを要求
+- 入力レコードは object であること、および `group-by`/`target` キーが全レコードに存在することが必須
+- 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
+- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断を出力
+
+### 7. `merge`
 
 複数の JSON/YAML 入力をポリシー指定で決定的にマージ。
 
@@ -283,7 +316,7 @@ dataq assert \
 - `--policy array-replace`: object は再帰マージ、配列は overlay 側で全置換
 - 出力は JSON 固定（キー順は決定的にソート）
 
-### 6. `doctor`
+### 8. `doctor`
 
 実行環境で `jq` / `yq` / `mlr` が利用可能かを、固定順 (`jq`, `yq`, `mlr`) で診断。
 
@@ -295,7 +328,7 @@ dataq assert \
   - `1`: 予期しない内部エラー
 - `--emit-pipeline` 指定時は stderr に診断ステップ (`doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`) を追加出力
 
-### 7. `recipe run`
+### 9. `recipe run`
 
 レシピファイル（YAML/JSON）を読み込み、`steps` を定義順で実行します。
 

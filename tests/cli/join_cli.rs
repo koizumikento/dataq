@@ -1,0 +1,321 @@
+use std::fs;
+use std::path::PathBuf;
+
+use predicates::prelude::predicate;
+use serde_json::{Value, json};
+use tempfile::tempdir;
+
+#[test]
+fn join_command_inner_and_left_return_expected_json_array() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let left = dir.path().join("left.json");
+    let right = dir.path().join("right.json");
+    fs::write(&left, r#"[{"id":1,"l":"L1"},{"id":2,"l":"L2"}]"#).expect("write left");
+    fs::write(&right, r#"[{"id":1,"r":"R1"}]"#).expect("write right");
+
+    let inner_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "join",
+            "--left",
+            left.to_str().expect("utf8 left path"),
+            "--right",
+            right.to_str().expect("utf8 right path"),
+            "--on",
+            "id",
+            "--how",
+            "inner",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let inner: Value = serde_json::from_slice(&inner_output).expect("parse join inner output");
+    assert_eq!(inner, json!([{"id": 1, "l": "L1", "r": "R1"}]));
+
+    let left_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "join",
+            "--left",
+            left.to_str().expect("utf8 left path"),
+            "--right",
+            right.to_str().expect("utf8 right path"),
+            "--on",
+            "id",
+            "--how",
+            "left",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let left_join: Value = serde_json::from_slice(&left_output).expect("parse join left output");
+    assert_eq!(
+        left_join,
+        json!([
+            {"id": 1, "l": "L1", "r": "R1"},
+            {"id": 2, "l": "L2", "r": Value::Null}
+        ])
+    );
+}
+
+#[test]
+fn aggregate_command_count_sum_avg_are_deterministic() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"a","price":5.0},{"team":"b","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let first_count = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "count",
+            "--target",
+            "price",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let second_count = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "count",
+            "--target",
+            "price",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(first_count, second_count);
+
+    let count_json: Value = serde_json::from_slice(&first_count).expect("parse count output");
+    assert_eq!(
+        count_json,
+        json!([
+            {"count": 2, "team": "a"},
+            {"count": 1, "team": "b"}
+        ])
+    );
+
+    let sum_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "sum",
+            "--target",
+            "price",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let sum_json: Value = serde_json::from_slice(&sum_output).expect("parse sum output");
+    assert_eq!(
+        sum_json,
+        json!([
+            {"sum": 15.0, "team": "a"},
+            {"sum": 7.0, "team": "b"}
+        ])
+    );
+
+    let avg_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "avg",
+            "--target",
+            "price",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let avg_json: Value = serde_json::from_slice(&avg_output).expect("parse avg output");
+    assert_eq!(
+        avg_json,
+        json!([
+            {"avg": 7.5, "team": "a"},
+            {"avg": 7.0, "team": "b"}
+        ])
+    );
+}
+
+#[test]
+fn join_missing_key_returns_exit_three() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let left = dir.path().join("left.json");
+    let right = dir.path().join("right.json");
+    fs::write(&left, r#"[{"id":1},{"name":"missing-id"}]"#).expect("write left");
+    fs::write(&right, r#"[{"id":1}]"#).expect("write right");
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "join",
+            "--left",
+            left.to_str().expect("utf8 left path"),
+            "--right",
+            right.to_str().expect("utf8 right path"),
+            "--on",
+            "id",
+            "--how",
+            "inner",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""))
+        .stderr(predicate::str::contains("missing join key `id`"));
+}
+
+#[test]
+fn join_emit_pipeline_reports_stage_diagnostics() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let left = dir.path().join("left.json");
+    let right = dir.path().join("right.json");
+    fs::write(&left, r#"[{"id":1,"l":"L1"}]"#).expect("write left");
+    fs::write(&right, r#"[{"id":1,"r":"R1"}]"#).expect("write right");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "join",
+            "--emit-pipeline",
+            "--left",
+            left.to_str().expect("utf8 left path"),
+            "--right",
+            right.to_str().expect("utf8 right path"),
+            "--on",
+            "id",
+            "--how",
+            "inner",
+        ])
+        .output()
+        .expect("run join command");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], Value::from("join"));
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["step"],
+        Value::from("join_mlr_execute")
+    );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["tool"],
+        Value::from("mlr")
+    );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["status"],
+        Value::from("ok")
+    );
+
+    let tools = stderr_json["external_tools"]
+        .as_array()
+        .expect("external tools array");
+    let mlr_entry = tools
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some("mlr"))
+        .expect("mlr entry");
+    assert_eq!(mlr_entry["used"], Value::Bool(true));
+}
+
+fn parse_last_stderr_json(stderr: &[u8]) -> Value {
+    let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
+    let line = text
+        .lines()
+        .rev()
+        .find(|candidate| !candidate.trim().is_empty())
+        .expect("non-empty stderr line");
+    serde_json::from_str(line).expect("stderr json")
+}
+
+fn write_fake_mlr_script(path: PathBuf) -> PathBuf {
+    let script = r#"#!/bin/sh
+mode=""
+action=""
+for arg in "$@"; do
+  if [ "$arg" = "join" ]; then mode="join"; fi
+  if [ "$arg" = "stats1" ]; then mode="stats1"; fi
+  if [ "$arg" = "count" ] || [ "$arg" = "sum" ] || [ "$arg" = "mean" ]; then action="$arg"; fi
+  if [ "$arg" = "--ul" ]; then left_join="1"; fi
+done
+
+if [ "$mode" = "join" ]; then
+  if [ -n "$left_join" ]; then
+    printf '[{"id":1,"l":"L1","r":"R1"},{"id":2,"l":"L2","r":null}]'
+  else
+    printf '[{"id":1,"l":"L1","r":"R1"}]'
+  fi
+  exit 0
+fi
+
+if [ "$mode" = "stats1" ]; then
+  if [ "$action" = "count" ]; then
+    printf '[{"team":"a","price_count":"2"},{"team":"b","price_count":"1"}]'
+    exit 0
+  fi
+  if [ "$action" = "sum" ]; then
+    printf '[{"team":"a","price_sum":"15.0"},{"team":"b","price_sum":"7.0"}]'
+    exit 0
+  fi
+  if [ "$action" = "mean" ]; then
+    printf '[{"team":"a","price_mean":"7.5"},{"team":"b","price_mean":"7.0"}]'
+    exit 0
+  fi
+fi
+
+echo 'unexpected mlr args' 1>&2
+exit 9
+"#;
+
+    fs::write(&path, script).expect("write fake mlr script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    path
+}

@@ -14,9 +14,44 @@ dataq [--emit-pipeline] <command> [options]
 - `assert`: ルールまたはJSON Schemaで検証
 - `sdiff`: 2データセットの構造差分を出力
 - `profile`: フィールド統計を決定的JSONで出力
+- `join`: 2入力をキー結合してJSON配列を出力
+- `aggregate`: グループ集計をJSON配列で出力
 - `merge`: base + overlays をポリシーマージ
 - `doctor`: `jq` / `yq` / `mlr` の実行前診断
 - `recipe run`: 宣言的レシピを定義順に実行
+
+## `join` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq join --left <path> --right <path> --on <field> --how <inner|left>`
+- 出力: JSON 配列（stdout）
+- 入力要件:
+  - 左右入力の各レコードは object
+  - `--on` で指定したキーは全レコードに存在
+- 異常時契約:
+  - 入力不正または結合実行失敗は exit `3`
+- 実行方式:
+  - `mlr` を明示的引数配列で実行（シェル展開なし）
+  - `--emit-pipeline` で `stage_diagnostics` に `join_mlr_execute` を出力
+
+## `aggregate` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq aggregate --input <path> --group-by <field> --metric <count|sum|avg> --target <field>`
+- 出力: JSON 配列（stdout）
+- 出力フィールド:
+  - `--metric count` のとき集計列は `count`
+  - `--metric sum` のとき集計列は `sum`
+  - `--metric avg` のとき集計列は `avg`
+- 入力要件:
+  - 各レコードは object
+  - `group-by` と `target` は全レコードで必須
+  - `sum` / `avg` は `target` が数値であることが必須
+- 異常時契約:
+  - 入力不正または集計実行失敗は exit `3`
+- 実行方式:
+  - `mlr` を明示的引数配列で実行（シェル展開なし）
+  - `--emit-pipeline` で `stage_diagnostics` に `aggregate_mlr_execute` を出力
 
 ## `profile` 出力契約
 
