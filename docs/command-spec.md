@@ -194,6 +194,7 @@ pipeline JSON schema:
 - `steps`: 実行ステップ配列
 - `external_tools`: `jq|yq|mlr` の使用有無（ツール名順で固定）
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
+- `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ), `dataq_version`）
 - `deterministic_guards`: 適用した決定性ガード
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
 - `recipe run` では `steps` に `load_recipe_file`, `validate_recipe_schema`, `execute_step_<index>_<kind>` が入る

@@ -1,7 +1,8 @@
-use std::fs::File;
+use std::collections::BTreeMap;
+use std::fs::{self, File};
 use std::io::{self, BufRead, Cursor, Read};
 use std::path::PathBuf;
-use std::process;
+use std::process::{self, Command};
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
@@ -9,13 +10,16 @@ use dataq::cmd::{
     aggregate, r#assert, canon, contract, doctor, join, merge, profile, recipe, sdiff,
 };
 use dataq::domain::error::CanonError;
-use dataq::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
+use dataq::domain::report::{
+    PipelineFingerprint, PipelineInput, PipelineInputSource, PipelineReport,
+};
 use dataq::engine::aggregate::AggregateMetric;
 use dataq::engine::canon::canonicalize_value;
 use dataq::engine::join::JoinHow;
 use dataq::engine::merge::MergePolicy;
 use dataq::io::format::jsonl::JsonlStreamError;
 use dataq::io::{self as dataq_io, Format, IoError};
+use dataq::util::hash::DeterministicHasher;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -1671,6 +1675,120 @@ fn format_label(format: Option<Format>) -> Option<&'static str> {
     format.map(Format::as_str)
 }
 
+fn build_pipeline_fingerprint(report: &PipelineReport) -> PipelineFingerprint {
+    PipelineFingerprint {
+        command: report.command.clone(),
+        args_hash: hash_normalized_args(),
+        input_hash: hash_input_sources(&report.input.sources),
+        tool_versions: collect_used_tool_versions(report),
+        dataq_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+fn hash_normalized_args() -> String {
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .filter(|arg| arg != "--emit-pipeline")
+        .collect();
+
+    let mut hasher = DeterministicHasher::new();
+    hasher.update_len_prefixed(b"dataq.execution_fingerprint.args.v1");
+    for arg in &args {
+        hasher.update_len_prefixed(arg.as_bytes());
+    }
+    hasher.finish_hex()
+}
+
+fn hash_input_sources(sources: &[PipelineInputSource]) -> Option<String> {
+    if sources.is_empty() {
+        return None;
+    }
+    if sources
+        .iter()
+        .any(|source| source.source != "path" || source.path.is_none())
+    {
+        return None;
+    }
+
+    let mut hasher = DeterministicHasher::new();
+    hasher.update_len_prefixed(b"dataq.execution_fingerprint.input.v1");
+    for source in sources {
+        hasher.update_len_prefixed(source.label.as_bytes());
+        hasher.update_len_prefixed(source.source.as_bytes());
+        if let Some(path) = &source.path {
+            hasher.update_len_prefixed(path.as_bytes());
+            let bytes = fs::read(path).ok()?;
+            hasher.update_len_prefixed(&bytes);
+        }
+        if let Some(format) = &source.format {
+            hasher.update_len_prefixed(format.as_bytes());
+        } else {
+            hasher.update_len_prefixed(&[]);
+        }
+    }
+    Some(hasher.finish_hex())
+}
+
+fn collect_used_tool_versions(report: &PipelineReport) -> BTreeMap<String, String> {
+    report
+        .external_tools
+        .iter()
+        .filter(|tool| tool.used)
+        .map(|tool| {
+            let version = detect_tool_version(&tool.name, report.command.as_str());
+            (tool.name.clone(), version)
+        })
+        .collect()
+}
+
+fn detect_tool_version(tool_name: &str, command_name: &str) -> String {
+    let executable = resolve_tool_executable(tool_name, command_name);
+    match Command::new(&executable).arg("--version").output() {
+        Ok(output) if output.status.success() => first_non_empty_line(&output.stdout)
+            .or_else(|| first_non_empty_line(&output.stderr))
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "error: empty --version output".to_string()),
+        Ok(output) => format!(
+            "error: --version exited with {}",
+            status_label(output.status.code())
+        ),
+        Err(error) => match error.kind() {
+            io::ErrorKind::NotFound => "error: unavailable in PATH".to_string(),
+            io::ErrorKind::PermissionDenied => "error: not executable".to_string(),
+            other => format!("error: failed to execute --version ({other:?})"),
+        },
+    }
+}
+
+fn resolve_tool_executable(tool_name: &str, command_name: &str) -> String {
+    if command_name != "assert" {
+        return tool_name.to_string();
+    }
+
+    let env_key = match tool_name {
+        "jq" => Some("DATAQ_JQ_BIN"),
+        "yq" => Some("DATAQ_YQ_BIN"),
+        "mlr" => Some("DATAQ_MLR_BIN"),
+        _ => None,
+    };
+
+    env_key
+        .and_then(|key| std::env::var(key).ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| tool_name.to_string())
+}
+
+fn first_non_empty_line(bytes: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.lines().find(|line| !line.trim().is_empty())
+}
+
+fn status_label(code: Option<i32>) -> String {
+    code.map(|value| value.to_string())
+        .unwrap_or_else(|| "terminated by signal".to_string())
+}
+
 fn emit_json_stdout(value: &Value) -> bool {
     match serde_json::to_string(value) {
         Ok(serialized) => {
@@ -1692,7 +1810,10 @@ fn emit_json_stderr(value: &Value) -> bool {
 }
 
 fn emit_pipeline_report(report: &PipelineReport) {
-    match serde_json::to_string(report) {
+    let report = report
+        .clone()
+        .with_fingerprint(build_pipeline_fingerprint(report));
+    match serde_json::to_string(&report) {
         Ok(serialized) => eprintln!("{serialized}"),
         Err(error) => emit_error(
             "internal_error",

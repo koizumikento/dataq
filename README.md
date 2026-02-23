@@ -42,7 +42,7 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - `dataq`:
   同等の処理意図をサブコマンド化し、I/O形式・失敗JSON・終了コードを固定できる
 - 監査性:
-  `--emit-pipeline` で、内部処理ステップ・外部ツール使用有無・`stage_diagnostics`（段ごとの順序/件数/状態）を機械可読で残せる
+  `--emit-pipeline` で、内部処理ステップ・外部ツール使用有無・`stage_diagnostics`（段ごとの順序/件数/状態）に加えて、`fingerprint`（`args_hash` / `input_hash`(optional) / 使用ツール版数 / `dataq_version`）を機械可読で残せる
 
 ## 外部ツール多段連携の方針
 
@@ -75,7 +75,7 @@ dataq [--emit-pipeline] <command> [options]
 
 グローバルオプション:
 
-- `--emit-pipeline`: stderr に pipeline JSON を1行追加出力
+- `--emit-pipeline`: stderr に pipeline JSON を1行追加出力（`fingerprint` を含む）
 - `-h, --help`: ヘルプ
 - `-V, --version`: バージョン
 
