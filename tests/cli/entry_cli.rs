@@ -7,6 +7,9 @@ use predicates::prelude::predicate;
 use serde_json::Value;
 use tempfile::tempdir;
 
+#[path = "contract_cli.rs"]
+mod contract_cli;
+
 #[test]
 fn help_is_available() {
     assert_cmd::cargo::cargo_bin_cmd!("dataq")
@@ -17,7 +20,8 @@ fn help_is_available() {
         .stdout(predicate::str::contains("assert"))
         .stdout(predicate::str::contains("sdiff"))
         .stdout(predicate::str::contains("profile"))
-        .stdout(predicate::str::contains("doctor"));
+        .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("contract"));
 }
 
 #[test]

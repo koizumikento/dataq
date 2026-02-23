@@ -5,7 +5,9 @@ use std::process;
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
-use dataq::cmd::{aggregate, r#assert, canon, doctor, join, merge, profile, recipe, sdiff};
+use dataq::cmd::{
+    aggregate, r#assert, canon, contract, doctor, join, merge, profile, recipe, sdiff,
+};
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
 use dataq::engine::aggregate::AggregateMetric;
@@ -51,6 +53,8 @@ enum Commands {
     Recipe(RecipeArgs),
     /// Diagnose jq/yq/mlr availability and executability.
     Doctor,
+    /// Emit machine-readable output contracts for subcommands.
+    Contract(ContractArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -194,6 +198,21 @@ struct RecipeRunArgs {
     file: PathBuf,
 }
 
+#[derive(Debug, clap::Args)]
+#[command(group(
+    ArgGroup::new("contract_target")
+        .args(["command", "all"])
+        .required(true)
+        .multiple(false)
+))]
+struct ContractArgs {
+    #[arg(long, value_enum)]
+    command: Option<CliContractCommand>,
+
+    #[arg(long, default_value_t = false)]
+    all: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliInputFormat {
     Json,
@@ -232,6 +251,17 @@ enum CliAggregateMetric {
 enum CliAssertNormalizeMode {
     GithubActionsJobs,
     GitlabCiJobs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliContractCommand {
+    Canon,
+    Assert,
+    Sdiff,
+    Profile,
+    Merge,
+    Doctor,
+    Recipe,
 }
 
 impl From<CliInputFormat> for Format {
@@ -292,6 +322,20 @@ impl From<CliAssertNormalizeMode> for r#assert::AssertInputNormalizeMode {
     }
 }
 
+impl From<CliContractCommand> for contract::ContractCommand {
+    fn from(value: CliContractCommand) -> Self {
+        match value {
+            CliContractCommand::Canon => Self::Canon,
+            CliContractCommand::Assert => Self::Assert,
+            CliContractCommand::Sdiff => Self::Sdiff,
+            CliContractCommand::Profile => Self::Profile,
+            CliContractCommand::Merge => Self::Merge,
+            CliContractCommand::Doctor => Self::Doctor,
+            CliContractCommand::Recipe => Self::Recipe,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct CliError<'a> {
     error: &'a str,
@@ -321,6 +365,7 @@ fn run() -> i32 {
         Commands::Merge(args) => run_merge(args, emit_pipeline),
         Commands::Recipe(args) => run_recipe(args, emit_pipeline),
         Commands::Doctor => run_doctor(emit_pipeline),
+        Commands::Contract(args) => run_contract(args, emit_pipeline),
     }
 }
 
@@ -1133,6 +1178,67 @@ fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
+fn run_contract(args: ContractArgs, emit_pipeline: bool) -> i32 {
+    let response = if args.all {
+        contract::run_all()
+    } else if let Some(command) = args.command {
+        contract::run_for_command(command.into())
+    } else {
+        emit_error(
+            "input_usage_error",
+            "either `--command` or `--all` must be specified".to_string(),
+            json!({"command": "contract"}),
+            3,
+        );
+        return 3;
+    };
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize contract response".to_string(),
+                    json!({"command": "contract"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize contract error".to_string(),
+                    json!({"command": "contract"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected contract exit code: {other}"),
+                json!({"command": "contract"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_contract_pipeline_report();
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
+}
+
 fn read_values_from_path(path: &PathBuf, format: Format) -> Result<Vec<Value>, String> {
     let file = File::open(path)
         .map_err(|error| format!("failed to open input file `{}`: {error}", path.display()))?;
@@ -1524,6 +1630,15 @@ fn build_doctor_pipeline_report() -> PipelineReport {
         report = report.mark_external_tool_used(tool);
     }
     report
+}
+
+fn build_contract_pipeline_report() -> PipelineReport {
+    PipelineReport::new(
+        "contract",
+        PipelineInput::new(Vec::new()),
+        contract::pipeline_steps(),
+        contract::deterministic_guards(),
+    )
 }
 
 fn build_recipe_pipeline_report(

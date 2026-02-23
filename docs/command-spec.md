@@ -19,6 +19,28 @@ dataq [--emit-pipeline] <command> [options]
 - `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
 - `doctor`: `jq` / `yq` / `mlr` の実行前診断
 - `recipe run`: 宣言的レシピを定義順に実行
+- `contract`: サブコマンド出力契約を機械可読JSONで取得
+
+## `contract` 出力契約（MVP）
+
+- コマンド:
+  - `dataq contract --command <canon|assert|sdiff|profile|merge|doctor|recipe>`
+  - `dataq contract --all`
+- `--command` 出力: 単一オブジェクト
+- `--all` 出力: 契約オブジェクト配列（決定的順序）
+  - `canon`, `assert`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+- 各オブジェクトの最低限キー:
+  - `command`
+  - `schema`
+  - `output_fields`
+  - `exit_codes`
+  - `notes`
+- 終了コード:
+  - `0`: 成功
+  - `3`: 入力不正（例: `--command` に未知値）
+  - `1`: 予期しない内部エラー
+- 副作用:
+  - `contract` は参照専用（read-only）で、入力データやファイル内容を変更しない
 
 ## `join` コマンド契約（MVP）
 
