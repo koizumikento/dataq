@@ -96,6 +96,8 @@ Core goals:
 - Invoke external tools with explicit argument arrays.
 - Validate tool availability early and fail with actionable errors.
 - Keep pipeline generation inspectable (`--emit-pipeline` behavior).
+- For features marketed as tool-integration value, design explicit multi-stage pipelines with distinct stage responsibilities.
+- For multi-stage integration commands, keep stage order deterministic per command and expose stage-level diagnostics in `--emit-pipeline`.
 
 ## CLI contract rules
 

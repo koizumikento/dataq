@@ -29,6 +29,15 @@ dataq [--emit-pipeline] <command> [options]
 - このモードは検証処理を実行せず、終了コード `0` で終了
 - `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義をジョブ単位レコードへ正規化してから `--rules` 検証可能（`jq` 必須）
 
+## 外部ツール多段連携（契約方針）
+
+- 多段連携コマンドは、内部で `jq` / `yq` / `mlr` の1つ以上を段階実行して1つの結果JSONを返す
+- 各段は役割を分離する:
+  - `yq`: YAML抽出/整形
+  - `jq`: JSON正規化/判定フラグ付け
+  - `mlr`: 集計/結合/統計
+- 使用段数や順序は機能ごとに定義し、CLI契約の一部として `--emit-pipeline` で追跡可能にする
+
 ## CLI I/O 契約
 
 ### 出力モード
@@ -57,6 +66,7 @@ pipeline JSON schema:
 - `steps`: 実行ステップ配列
 - `external_tools`: `jq|yq|mlr` の使用有無（ツール名順で固定）
 - `deterministic_guards`: 適用した決定性ガード
+- （多段連携時）各ステップで使用したツール名・入出力件数・実行順を含める
 
 ```bash
 cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.json
