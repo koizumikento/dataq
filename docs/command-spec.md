@@ -14,9 +14,66 @@ dataq [--emit-pipeline] <command> [options]
 - `assert`: ルールまたはJSON Schemaで検証
 - `sdiff`: 2データセットの構造差分を出力
 - `profile`: フィールド統計を決定的JSONで出力
-- `merge`: base + overlays をポリシーマージ
+- `join`: 2入力をキー結合してJSON配列を出力
+- `aggregate`: グループ集計をJSON配列で出力
+- `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
 - `doctor`: `jq` / `yq` / `mlr` の実行前診断
 - `recipe run`: 宣言的レシピを定義順に実行
+- `contract`: サブコマンド出力契約を機械可読JSONで取得
+
+## `contract` 出力契約（MVP）
+
+- コマンド:
+  - `dataq contract --command <canon|assert|sdiff|profile|merge|doctor|recipe>`
+  - `dataq contract --all`
+- `--command` 出力: 単一オブジェクト
+- `--all` 出力: 契約オブジェクト配列（決定的順序）
+  - `canon`, `assert`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+- 各オブジェクトの最低限キー:
+  - `command`
+  - `schema`
+  - `output_fields`
+  - `exit_codes`
+  - `notes`
+- 終了コード:
+  - `0`: 成功
+  - `3`: 入力不正（例: `--command` に未知値）
+  - `1`: 予期しない内部エラー
+- 副作用:
+  - `contract` は参照専用（read-only）で、入力データやファイル内容を変更しない
+
+## `join` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq join --left <path> --right <path> --on <field> --how <inner|left>`
+- 出力: JSON 配列（stdout）
+- 入力要件:
+  - 左右入力の各レコードは object
+  - `--on` で指定したキーは全レコードに存在
+- 異常時契約:
+  - 入力不正または結合実行失敗は exit `3`
+- 実行方式:
+  - `mlr` を明示的引数配列で実行（シェル展開なし）
+  - `--emit-pipeline` で `stage_diagnostics` に `join_mlr_execute` を出力
+
+## `aggregate` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq aggregate --input <path> --group-by <field> --metric <count|sum|avg> --target <field>`
+- 出力: JSON 配列（stdout）
+- 出力フィールド:
+  - `--metric count` のとき集計列は `count`
+  - `--metric sum` のとき集計列は `sum`
+  - `--metric avg` のとき集計列は `avg`
+- 入力要件:
+  - 各レコードは object
+  - `group-by` と `target` は全レコードで必須
+  - `sum` / `avg` は `target` が数値であることが必須
+- 異常時契約:
+  - 入力不正または集計実行失敗は exit `3`
+- 実行方式:
+  - `mlr` を明示的引数配列で実行（シェル展開なし）
+  - `--emit-pipeline` で `stage_diagnostics` に `aggregate_mlr_execute` を出力
 
 ## `profile` 出力契約
 
@@ -48,6 +105,21 @@ dataq [--emit-pipeline] <command> [options]
 - このモードは検証処理を実行せず、終了コード `0` で終了
 - `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義を `yq -> jq -> mlr` の固定3段でジョブ単位レコードへ正規化してから `--rules` 検証可能（`yq`/`jq`/`mlr` 必須）
 
+## `merge` パス別ポリシー（MVP）
+
+- 既存 `--policy` は全体デフォルトポリシーとして動作
+- 追加 `--policy-path <canonical-path=policy>` は複数指定可能
+  - 例: `--policy-path '$["spec"]["containers"]=array-replace'`
+  - `canonical-path` は `$["field"][0]...` 形式を要求
+  - `policy` は `last-wins | deep-merge | array-replace`
+- ポリシー解決順:
+  - 現在マージ中の値パスに対して、最長一致する `--policy-path` を適用
+  - 最長一致が同一深さで複数ある場合は、後ろに指定した `--policy-path` を優先
+  - 一致がなければ `--policy` を適用
+- 入力不正:
+  - `--policy-path` の path が非canonical、または policy が未知値の場合は exit `3`
+  - `--policy-path` 未指定時の挙動は従来どおり
+
 ## 外部ツール多段連携（契約方針）
 
 - 多段連携コマンドは、内部で `jq` / `yq` / `mlr` の1つ以上を段階実行して1つの結果JSONを返す
@@ -63,6 +135,16 @@ dataq [--emit-pipeline] <command> [options]
 
 - 既定: JSON（機械可読）
 - `canon` のみ `--to jsonl` で JSONL 出力を選択可能
+- `canon --to jsonl` かつ JSONL入力はレコード単位の逐次処理（出力順は入力順）
+
+### `canon` 入力フォーマット解決
+
+- `--from` 指定時は指定フォーマットを使用
+- `--from` 未指定かつ `--input <path>` 指定時は拡張子で解決（`.json|.yaml|.yml|.csv|.jsonl|.ndjson`）
+- `--from` 未指定かつ stdin入力時は固定順で自動判別:
+  - `JSONL -> JSON -> YAML -> CSV`
+- 非空行が1行のみで入力全体がJSONとして成立する場合は `JSON` を優先（JSON/JSONLの曖昧さ回避）
+- 自動判別失敗は `input_usage_error` で終了コード `3`
 
 ### 終了コード
 
@@ -112,6 +194,7 @@ pipeline JSON schema:
 - `steps`: 実行ステップ配列
 - `external_tools`: `jq|yq|mlr` の使用有無（ツール名順で固定）
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
+- `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ), `dataq_version`）
 - `deterministic_guards`: 適用した決定性ガード
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
 - `recipe run` では `steps` に `load_recipe_file`, `validate_recipe_schema`, `execute_step_<index>_<kind>` が入る

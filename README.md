@@ -42,7 +42,7 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - `dataq`:
   同等の処理意図をサブコマンド化し、I/O形式・失敗JSON・終了コードを固定できる
 - 監査性:
-  `--emit-pipeline` で、内部処理ステップ・外部ツール使用有無・`stage_diagnostics`（段ごとの順序/件数/状態）を機械可読で残せる
+  `--emit-pipeline` で、内部処理ステップ・外部ツール使用有無・`stage_diagnostics`（段ごとの順序/件数/状態）に加えて、`fingerprint`（`args_hash` / `input_hash`(optional) / 使用ツール版数 / `dataq_version`）を機械可読で残せる
 
 ## 外部ツール多段連携の方針
 
@@ -62,17 +62,20 @@ dataq [--emit-pipeline] <command> [options]
 
 | Command | 用途 | 必須オプション |
 | --- | --- | --- |
-| `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>` |
+| `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>`（stdin時は省略可） |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
-| `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` |
+| `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
+| `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
+| `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
 | `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
+| `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
 
 グローバルオプション:
 
-- `--emit-pipeline`: stderr に pipeline JSON を1行追加出力
+- `--emit-pipeline`: stderr に pipeline JSON を1行追加出力（`fingerprint` を含む）
 - `-h, --help`: ヘルプ
 - `-V, --version`: バージョン
 
@@ -81,6 +84,10 @@ dataq [--emit-pipeline] <command> [options]
 ```bash
 # YAMLを正規化してJSONLへ
 cat in.yaml | dataq canon --from yaml --to jsonl > out.jsonl
+
+# stdin入力は --from 省略時に JSONL -> JSON -> YAML -> CSV の順で自動判別
+# ただし非空行が1行のみで全体がJSONとして成立する場合は JSON を優先（曖昧さ回避）
+cat events.jsonl | dataq canon --to jsonl > out.jsonl
 
 # ルール検証
 dataq assert --input out.jsonl --rules rules.yaml
@@ -94,11 +101,20 @@ dataq sdiff --left before.jsonl --right after.jsonl
 # 品質プロファイル
 dataq profile --from json --input out.jsonl
 
+# 内部結合（idキー）
+dataq join --left users.json --right scores.json --on id --how inner
+
+# グループ集計（team単位でprice平均）
+dataq aggregate --input orders.json --group-by team --metric avg --target price
+
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
 
 # 依存ツール診断
 dataq doctor
+
+# assert 出力契約を取得
+dataq contract --command assert
 
 # ID で対応付けし、更新時刻は差分対象外
 dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-path '$["updated_at"]'
@@ -145,6 +161,11 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 ### 1. `canon`
 
 入力（JSON/YAML/CSV/JSONL）を決定的に正規化し、JSON もしくは JSONL へ変換。
+
+- `--from` 省略時（stdin入力のみ）は固定順で自動判別: `JSONL -> JSON -> YAML -> CSV`
+- 非空行が1行のみで入力全体がJSONとして成立する場合は、曖昧さ回避のため `JSON` として扱う
+- 自動判別できない入力は `input_usage_error`（終了コード `3`）
+- `--to jsonl` かつ JSONL入力ではレコード単位で逐次処理（入力順を保持）
 
 - キー順ソート
 - 型寄せ（数値/真偽値/日時）
@@ -264,7 +285,32 @@ dataq assert \
 - `p50` / `p95` は nearest-rank 方式（`rank = ceil(p * n)`、`index = rank - 1`、0始まり配列で評価）
 - `numeric_stats` の浮動小数は小数点以下6桁へ丸め（`round half away from zero` 相当）
 
-### 5. `merge`
+### 5. `join`
+
+2つの入力を結合キーで結合し、JSON配列で返す。
+
+- `--left <path>`: 左入力（JSON/YAML/CSV/JSONL）
+- `--right <path>`: 右入力（JSON/YAML/CSV/JSONL）
+- `--on <field>`: 結合キー
+- `--how <inner|left>`: 結合方式
+- 入力レコードは object であること、および `--on` キーが全レコードに存在することが必須
+- 出力は JSON 配列固定（決定的順序）
+- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断を出力
+
+### 6. `aggregate`
+
+単一入力をグループ化して集計し、JSON配列で返す。
+
+- `--input <path>`: 入力（JSON/YAML/CSV/JSONL）
+- `--group-by <field>`: グループキー
+- `--metric <count|sum|avg>`: 集計メトリクス
+- `--target <field>`: 集計対象キー
+- `sum` / `avg` は `--target` が数値であることを要求
+- 入力レコードは object であること、および `group-by`/`target` キーが全レコードに存在することが必須
+- 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
+- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断を出力
+
+### 7. `merge`
 
 複数の JSON/YAML 入力をポリシー指定で決定的にマージ。
 
@@ -272,9 +318,12 @@ dataq assert \
 - `--policy last-wins`: 同一キーは overlay 側で上書き（shallow）
 - `--policy deep-merge`: object は再帰マージ、配列は要素インデックス単位で再帰マージ
 - `--policy array-replace`: object は再帰マージ、配列は overlay 側で全置換
+- `--policy-path <canonical-path=policy>`（複数指定可）で subtree ごとのポリシーを上書き
+  - 例: `--policy-path '$["spec"]["containers"]=array-replace'`
+  - 解決順: 最長一致する `--policy-path` を優先し、同一深さの一致は後ろに指定した定義を優先。一致なしは `--policy` を適用
 - 出力は JSON 固定（キー順は決定的にソート）
 
-### 6. `doctor`
+### 8. `doctor`
 
 実行環境で `jq` / `yq` / `mlr` が利用可能かを、固定順 (`jq`, `yq`, `mlr`) で診断。
 
@@ -286,7 +335,7 @@ dataq assert \
   - `1`: 予期しない内部エラー
 - `--emit-pipeline` 指定時は stderr に診断ステップ (`doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`) を追加出力
 
-### 7. `recipe run`
+### 9. `recipe run`
 
 レシピファイル（YAML/JSON）を読み込み、`steps` を定義順で実行します。
 
@@ -316,6 +365,18 @@ steps:
           id:
             type: integer
 ```
+
+### 8. `contract`
+
+サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
+
+- `dataq contract --command <canon|assert|sdiff|profile|merge|doctor|recipe>`
+  - 単一コマンドの契約を1オブジェクトで返す
+- `dataq contract --all`
+  - 全コマンド契約を固定順配列で返す
+  - 順序: `canon`, `assert`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+- 各契約オブジェクトのキー:
+  - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
 ## 設計ドキュメント
 

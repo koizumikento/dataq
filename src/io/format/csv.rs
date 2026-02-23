@@ -5,6 +5,28 @@ use serde_json::{Map, Value};
 
 use crate::io::IoError;
 
+pub fn looks_like_csv(input: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(input) else {
+        return false;
+    };
+    if text.trim().is_empty() {
+        return false;
+    }
+    if !text.contains(',') || !text.contains('\n') {
+        return false;
+    }
+
+    let mut csv_reader = csv::ReaderBuilder::new().from_reader(input);
+    let mut has_record = false;
+    for row in csv_reader.records() {
+        if row.is_err() {
+            return false;
+        }
+        has_record = true;
+    }
+    has_record
+}
+
 pub fn read_csv<R: Read>(reader: R) -> Result<Vec<Value>, IoError> {
     let mut csv_reader = csv::ReaderBuilder::new().from_reader(reader);
     let headers = csv_reader.headers()?.clone();

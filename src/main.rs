@@ -1,15 +1,25 @@
-use std::fs::File;
-use std::io;
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, BufRead, Cursor, Read};
 use std::path::PathBuf;
-use std::process;
+use std::process::{self, Command};
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
-use dataq::cmd::{r#assert, canon, doctor, merge, profile, recipe, sdiff};
+use dataq::cmd::{
+    aggregate, r#assert, canon, contract, doctor, join, merge, profile, recipe, sdiff,
+};
 use dataq::domain::error::CanonError;
-use dataq::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
+use dataq::domain::report::{
+    PipelineFingerprint, PipelineInput, PipelineInputSource, PipelineReport,
+};
+use dataq::engine::aggregate::AggregateMetric;
+use dataq::engine::canon::canonicalize_value;
+use dataq::engine::join::JoinHow;
 use dataq::engine::merge::MergePolicy;
+use dataq::io::format::jsonl::JsonlStreamError;
 use dataq::io::{self as dataq_io, Format, IoError};
+use dataq::util::hash::DeterministicHasher;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -37,12 +47,18 @@ enum Commands {
     Sdiff(SdiffArgs),
     /// Generate deterministic field profile statistics.
     Profile(ProfileArgs),
+    /// Join two datasets by key using deterministic JSON output.
+    Join(JoinArgs),
+    /// Aggregate grouped metrics with deterministic JSON output.
+    Aggregate(AggregateArgs),
     /// Merge base and overlays with a deterministic merge policy.
     Merge(MergeArgs),
     /// Execute a declarative deterministic recipe.
     Recipe(RecipeArgs),
     /// Diagnose jq/yq/mlr availability and executability.
     Doctor,
+    /// Emit machine-readable output contracts for subcommands.
+    Contract(ContractArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -51,7 +67,7 @@ struct CanonArgs {
     input: Option<PathBuf>,
 
     #[arg(long, value_enum)]
-    from: CliInputFormat,
+    from: Option<CliInputFormat>,
 
     #[arg(long, value_enum)]
     to: Option<CanonOutputFormat>,
@@ -133,6 +149,39 @@ struct MergeArgs {
 
     #[arg(long, value_enum)]
     policy: CliMergePolicy,
+
+    #[arg(long = "policy-path", value_name = "path=policy")]
+    policy_path: Vec<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct JoinArgs {
+    #[arg(long)]
+    left: PathBuf,
+
+    #[arg(long)]
+    right: PathBuf,
+
+    #[arg(long)]
+    on: String,
+
+    #[arg(long, value_enum)]
+    how: CliJoinHow,
+}
+
+#[derive(Debug, clap::Args)]
+struct AggregateArgs {
+    #[arg(long)]
+    input: PathBuf,
+
+    #[arg(long)]
+    group_by: String,
+
+    #[arg(long, value_enum)]
+    metric: CliAggregateMetric,
+
+    #[arg(long)]
+    target: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -151,6 +200,21 @@ enum RecipeSubcommand {
 struct RecipeRunArgs {
     #[arg(long)]
     file: PathBuf,
+}
+
+#[derive(Debug, clap::Args)]
+#[command(group(
+    ArgGroup::new("contract_target")
+        .args(["command", "all"])
+        .required(true)
+        .multiple(false)
+))]
+struct ContractArgs {
+    #[arg(long, value_enum)]
+    command: Option<CliContractCommand>,
+
+    #[arg(long, default_value_t = false)]
+    all: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -175,9 +239,33 @@ enum CliMergePolicy {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliJoinHow {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliAggregateMetric {
+    Count,
+    Sum,
+    Avg,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliAssertNormalizeMode {
     GithubActionsJobs,
     GitlabCiJobs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliContractCommand {
+    Canon,
+    Assert,
+    Sdiff,
+    Profile,
+    Merge,
+    Doctor,
+    Recipe,
 }
 
 impl From<CliInputFormat> for Format {
@@ -210,11 +298,44 @@ impl From<CliMergePolicy> for MergePolicy {
     }
 }
 
+impl From<CliJoinHow> for JoinHow {
+    fn from(value: CliJoinHow) -> Self {
+        match value {
+            CliJoinHow::Inner => Self::Inner,
+            CliJoinHow::Left => Self::Left,
+        }
+    }
+}
+
+impl From<CliAggregateMetric> for AggregateMetric {
+    fn from(value: CliAggregateMetric) -> Self {
+        match value {
+            CliAggregateMetric::Count => Self::Count,
+            CliAggregateMetric::Sum => Self::Sum,
+            CliAggregateMetric::Avg => Self::Avg,
+        }
+    }
+}
+
 impl From<CliAssertNormalizeMode> for r#assert::AssertInputNormalizeMode {
     fn from(value: CliAssertNormalizeMode) -> Self {
         match value {
             CliAssertNormalizeMode::GithubActionsJobs => Self::GithubActionsJobs,
             CliAssertNormalizeMode::GitlabCiJobs => Self::GitlabCiJobs,
+        }
+    }
+}
+
+impl From<CliContractCommand> for contract::ContractCommand {
+    fn from(value: CliContractCommand) -> Self {
+        match value {
+            CliContractCommand::Canon => Self::Canon,
+            CliContractCommand::Assert => Self::Assert,
+            CliContractCommand::Sdiff => Self::Sdiff,
+            CliContractCommand::Profile => Self::Profile,
+            CliContractCommand::Merge => Self::Merge,
+            CliContractCommand::Doctor => Self::Doctor,
+            CliContractCommand::Recipe => Self::Recipe,
         }
     }
 }
@@ -243,9 +364,12 @@ fn run() -> i32 {
         Commands::Assert(args) => run_assert(args, emit_pipeline),
         Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
         Commands::Profile(args) => run_profile(args, emit_pipeline),
+        Commands::Join(args) => run_join(args, emit_pipeline),
+        Commands::Aggregate(args) => run_aggregate(args, emit_pipeline),
         Commands::Merge(args) => run_merge(args, emit_pipeline),
         Commands::Recipe(args) => run_recipe(args, emit_pipeline),
         Commands::Doctor => run_doctor(emit_pipeline),
+        Commands::Contract(args) => run_contract(args, emit_pipeline),
     }
 }
 
@@ -268,35 +392,73 @@ fn handle_parse_error(error: clap::Error) -> i32 {
 }
 
 fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
-    let input_format: Format = args.from.into();
     let output_format = args.to.map(Into::into).unwrap_or(Format::Json);
     let options = canon::CanonCommandOptions {
         sort_keys: args.sort_keys,
         normalize_time: args.normalize_time,
     };
-    let pipeline_report = build_canon_pipeline_report(&args, input_format, options);
+    let mut input_format = args.from.map(Into::into);
 
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    let exit_code = if let Some(path) = args.input {
-        match File::open(&path) {
-            Ok(file) => match canon::run(file, &mut output, input_format, output_format, options) {
-                Ok(()) => 0,
+    let mut fingerprint_context = FingerprintContext::default();
+    let exit_code = if let Some(path) = args.input.as_ref() {
+        if input_format.is_none() {
+            match dataq_io::resolve_input_format(None, Some(path.as_path())) {
+                Ok(resolved) => input_format = Some(resolved),
                 Err(error) => {
-                    let (exit_code, error_kind) = map_canon_error(&error);
                     emit_error(
-                        error_kind,
+                        "input_usage_error",
                         error.to_string(),
-                        json!({"command": "canon"}),
-                        exit_code,
+                        json!({"command": "canon", "input": path}),
+                        3,
                     );
-                    exit_code
+                    if emit_pipeline {
+                        let pipeline_report =
+                            build_canon_pipeline_report(&args, input_format, options);
+                        emit_pipeline_report_with_context(&pipeline_report, &fingerprint_context);
+                    }
+                    return 3;
                 }
-            },
-            Err(err) => {
+            }
+        }
+
+        let resolved_input_format = input_format.expect("input format must be resolved");
+        let path_string = path.display().to_string();
+        match fs::read(path) {
+            Ok(bytes) => {
+                fingerprint_context.input_hash =
+                    hash_consumed_input_entries(&[ConsumedInputHashEntry {
+                        label: "input",
+                        source: "path",
+                        path: Some(path_string.as_str()),
+                        format: Some(resolved_input_format.as_str()),
+                        bytes: bytes.as_slice(),
+                    }]);
+                match run_canon_with_format(
+                    Cursor::new(bytes),
+                    &mut output,
+                    resolved_input_format,
+                    output_format,
+                    options,
+                ) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        let (exit_code, error_kind) = map_canon_error(&error);
+                        emit_error(
+                            error_kind,
+                            error.to_string(),
+                            json!({"command": "canon"}),
+                            exit_code,
+                        );
+                        exit_code
+                    }
+                }
+            }
+            Err(error) => {
                 emit_error(
                     "input_usage_error",
-                    format!("failed to open input file `{}`: {err}", path.display()),
+                    format!("failed to read input file `{}`: {error}", path.display()),
                     json!({"command": "canon", "input": path}),
                     3,
                 );
@@ -304,30 +466,118 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
             }
         }
     } else {
-        let stdin = io::stdin();
-        match canon::run(
-            stdin.lock(),
-            &mut output,
-            input_format,
-            output_format,
-            options,
-        ) {
-            Ok(()) => 0,
-            Err(error) => {
-                let (exit_code, error_kind) = map_canon_error(&error);
-                emit_error(
-                    error_kind,
-                    error.to_string(),
-                    json!({"command": "canon"}),
-                    exit_code,
-                );
-                exit_code
+        match input_format {
+            Some(resolved_input_format) => {
+                let stdin = io::stdin();
+                match run_canon_with_format(
+                    stdin.lock(),
+                    &mut output,
+                    resolved_input_format,
+                    output_format,
+                    options,
+                ) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        let (exit_code, error_kind) = map_canon_error(&error);
+                        emit_error(
+                            error_kind,
+                            error.to_string(),
+                            json!({"command": "canon"}),
+                            exit_code,
+                        );
+                        exit_code
+                    }
+                }
+            }
+            None => {
+                if output_format == Format::Jsonl {
+                    match run_canon_jsonl_autodetect_stdin(&mut output, options) {
+                        Ok(detected) => {
+                            input_format = Some(detected);
+                            0
+                        }
+                        Err(CanonStdinAutodetectError::Input(error)) => {
+                            emit_error(
+                                "input_usage_error",
+                                error.to_string(),
+                                json!({"command": "canon"}),
+                                3,
+                            );
+                            3
+                        }
+                        Err(CanonStdinAutodetectError::Canon(error)) => {
+                            let (exit_code, error_kind) = map_canon_error(&error);
+                            emit_error(
+                                error_kind,
+                                error.to_string(),
+                                json!({"command": "canon"}),
+                                exit_code,
+                            );
+                            exit_code
+                        }
+                    }
+                } else {
+                    let stdin = io::stdin();
+                    let mut input = Vec::new();
+                    if let Err(error) = stdin.lock().read_to_end(&mut input) {
+                        emit_error(
+                            "input_usage_error",
+                            format!("failed to read stdin: {error}"),
+                            json!({"command": "canon"}),
+                            3,
+                        );
+                        3
+                    } else {
+                        match dataq_io::autodetect_stdin_input_format(&input) {
+                            Ok(detected) => {
+                                input_format = Some(detected);
+                                fingerprint_context.input_hash =
+                                    hash_consumed_input_entries(&[ConsumedInputHashEntry {
+                                        label: "input",
+                                        source: "stdin",
+                                        path: None,
+                                        format: Some(detected.as_str()),
+                                        bytes: input.as_slice(),
+                                    }]);
+                                match run_canon_with_format(
+                                    Cursor::new(input),
+                                    &mut output,
+                                    detected,
+                                    output_format,
+                                    options,
+                                ) {
+                                    Ok(()) => 0,
+                                    Err(error) => {
+                                        let (exit_code, error_kind) = map_canon_error(&error);
+                                        emit_error(
+                                            error_kind,
+                                            error.to_string(),
+                                            json!({"command": "canon"}),
+                                            exit_code,
+                                        );
+                                        exit_code
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                emit_error(
+                                    "input_usage_error",
+                                    error.to_string(),
+                                    json!({"command": "canon"}),
+                                    3,
+                                );
+                                3
+                            }
+                        }
+                    }
+                }
             }
         }
     };
 
     if emit_pipeline {
-        emit_pipeline_report(&pipeline_report);
+        let pipeline_report = build_canon_pipeline_report(&args, input_format, options);
+        emit_pipeline_report_with_context(&pipeline_report, &fingerprint_context);
     }
     exit_code
 }
@@ -481,7 +731,7 @@ fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
         overlays: args.overlay.clone(),
         policy: args.policy.into(),
     };
-    let response = merge::run(&command_args);
+    let response = merge::run_with_policy_paths(&command_args, &args.policy_path);
 
     let exit_code = match response.exit_code {
         0 => {
@@ -522,6 +772,117 @@ fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
     };
 
     if emit_pipeline {
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn run_join(args: JoinArgs, emit_pipeline: bool) -> i32 {
+    let left_format = dataq_io::resolve_input_format(None, Some(args.left.as_path())).ok();
+    let right_format = dataq_io::resolve_input_format(None, Some(args.right.as_path())).ok();
+    let command_args = join::JoinCommandArgs {
+        left: args.left.clone(),
+        right: args.right.clone(),
+        on: args.on.clone(),
+        how: args.how.into(),
+    };
+    let (response, trace) = join::run_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize join output".to_string(),
+                    json!({"command": "join"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 => {
+            if emit_json_stderr(&response.payload) {
+                3
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize join error".to_string(),
+                    json!({"command": "join"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected join exit code: {other}"),
+                json!({"command": "join"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_join_pipeline_report(&args, left_format, right_format, &trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn run_aggregate(args: AggregateArgs, emit_pipeline: bool) -> i32 {
+    let input_format = dataq_io::resolve_input_format(None, Some(args.input.as_path())).ok();
+    let command_args = aggregate::AggregateCommandArgs {
+        input: args.input.clone(),
+        group_by: args.group_by.clone(),
+        metric: args.metric.into(),
+        target: args.target.clone(),
+    };
+    let (response, trace) = aggregate::run_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize aggregate output".to_string(),
+                    json!({"command": "aggregate"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 => {
+            if emit_json_stderr(&response.payload) {
+                3
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize aggregate error".to_string(),
+                    json!({"command": "aggregate"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected aggregate exit code: {other}"),
+                json!({"command": "aggregate"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_aggregate_pipeline_report(&args, input_format, &trace);
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
@@ -586,8 +947,8 @@ fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
     };
     let right_format_opt = Some(right_format);
 
-    let left_values = match read_values_from_path(&args.left, left_format) {
-        Ok(values) => values,
+    let (left_values, left_bytes) = match read_values_from_path(&args.left, left_format) {
+        Ok(value) => value,
         Err(error) => {
             emit_error(
                 "input_usage_error",
@@ -605,8 +966,8 @@ fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
             return 3;
         }
     };
-    let right_values = match read_values_from_path(&args.right, right_format) {
-        Ok(values) => values,
+    let (right_values, right_bytes) = match read_values_from_path(&args.right, right_format) {
+        Ok(value) => value,
         Err(error) => {
             emit_error(
                 "input_usage_error",
@@ -670,11 +1031,29 @@ fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
     };
 
     if emit_pipeline {
-        emit_pipeline_report(&build_sdiff_pipeline_report(
-            &args,
-            left_format_opt,
-            right_format_opt,
-        ));
+        let fingerprint_context = FingerprintContext {
+            input_hash: hash_consumed_input_entries(&[
+                ConsumedInputHashEntry {
+                    label: "left",
+                    source: "path",
+                    path: Some(left_path.as_str()),
+                    format: Some(left_format.as_str()),
+                    bytes: left_bytes.as_slice(),
+                },
+                ConsumedInputHashEntry {
+                    label: "right",
+                    source: "path",
+                    path: Some(right_path.as_str()),
+                    format: Some(right_format.as_str()),
+                    bytes: right_bytes.as_slice(),
+                },
+            ]),
+            ..Default::default()
+        };
+        emit_pipeline_report_with_context(
+            &build_sdiff_pipeline_report(&args, left_format_opt, right_format_opt),
+            &fingerprint_context,
+        );
     }
     exit_code
 }
@@ -736,7 +1115,7 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
 }
 
 fn run_doctor(emit_pipeline: bool) -> i32 {
-    let response = doctor::run();
+    let (response, trace) = doctor::run_with_trace();
     let exit_code = match response.exit_code {
         0 | 3 => {
             if emit_json_stdout(&response.payload) {
@@ -776,8 +1155,12 @@ fn run_doctor(emit_pipeline: bool) -> i32 {
     };
 
     if emit_pipeline {
+        let fingerprint_context = FingerprintContext {
+            preferred_tool_versions: trace.tool_versions,
+            ..Default::default()
+        };
         let pipeline_report = build_doctor_pipeline_report();
-        emit_pipeline_report(&pipeline_report);
+        emit_pipeline_report_with_context(&pipeline_report, &fingerprint_context);
     }
     exit_code
 }
@@ -840,10 +1223,238 @@ fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn read_values_from_path(path: &PathBuf, format: Format) -> Result<Vec<Value>, String> {
-    let file = File::open(path)
-        .map_err(|error| format!("failed to open input file `{}`: {error}", path.display()))?;
-    dataq_io::reader::read_values(file, format).map_err(|error| error.to_string())
+fn run_contract(args: ContractArgs, emit_pipeline: bool) -> i32 {
+    let response = if args.all {
+        contract::run_all()
+    } else if let Some(command) = args.command {
+        contract::run_for_command(command.into())
+    } else {
+        emit_error(
+            "input_usage_error",
+            "either `--command` or `--all` must be specified".to_string(),
+            json!({"command": "contract"}),
+            3,
+        );
+        return 3;
+    };
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize contract response".to_string(),
+                    json!({"command": "contract"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize contract error".to_string(),
+                    json!({"command": "contract"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected contract exit code: {other}"),
+                json!({"command": "contract"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_contract_pipeline_report();
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
+}
+
+fn read_values_from_path(path: &PathBuf, format: Format) -> Result<(Vec<Value>, Vec<u8>), String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("failed to read input file `{}`: {error}", path.display()))?;
+    let values = dataq_io::reader::read_values(std::io::Cursor::new(bytes.as_slice()), format)
+        .map_err(|error| error.to_string())?;
+    Ok((values, bytes))
+}
+
+fn run_canon_with_format<R: Read, W: io::Write>(
+    input: R,
+    output: W,
+    input_format: Format,
+    output_format: Format,
+    options: canon::CanonCommandOptions,
+) -> Result<(), CanonError> {
+    if output_format == Format::Jsonl {
+        return run_canon_jsonl_stream(input, output, input_format, options);
+    }
+    canon::run(input, output, input_format, output_format, options)
+}
+
+#[derive(Debug)]
+enum CanonStdinAutodetectError {
+    Input(IoError),
+    Canon(CanonError),
+}
+
+fn run_canon_jsonl_autodetect_stdin<W: io::Write>(
+    mut output: W,
+    options: canon::CanonCommandOptions,
+) -> Result<Format, CanonStdinAutodetectError> {
+    let stdin = io::stdin();
+    let mut reader = io::BufReader::new(stdin.lock());
+    let mut buffered_input = Vec::new();
+    let mut prefetched_values = Vec::new();
+    let mut non_empty_lines = 0usize;
+
+    while non_empty_lines < 2 {
+        let mut line = Vec::new();
+        let bytes_read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(IoError::from)
+            .map_err(CanonStdinAutodetectError::Input)?;
+        if bytes_read == 0 {
+            break;
+        }
+        buffered_input.extend_from_slice(&line);
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        non_empty_lines += 1;
+        let trimmed = trim_ascii_whitespace(&line);
+        match serde_json::from_slice(trimmed) {
+            Ok(parsed) => prefetched_values.push(parsed),
+            Err(_) => {
+                return run_canon_jsonl_with_buffered_stdin(
+                    reader,
+                    buffered_input,
+                    output,
+                    options,
+                );
+            }
+        }
+    }
+
+    if non_empty_lines >= 2 {
+        let canon_options = options.into();
+        for value in prefetched_values {
+            let canonical = canonicalize_value(value, canon_options);
+            write_jsonl_stream_value(&mut output, &canonical)
+                .map_err(CanonStdinAutodetectError::Canon)?;
+        }
+        dataq_io::reader::read_jsonl_stream(reader, |value| {
+            let canonical = canonicalize_value(value, canon_options);
+            write_jsonl_stream_value(&mut output, &canonical)
+        })
+        .map_err(|error| match error {
+            JsonlStreamError::Read(source) => {
+                CanonStdinAutodetectError::Canon(CanonError::ReadInput {
+                    format: Format::Jsonl,
+                    source,
+                })
+            }
+            JsonlStreamError::Emit(source) => CanonStdinAutodetectError::Canon(source),
+        })?;
+        return Ok(Format::Jsonl);
+    }
+
+    run_canon_jsonl_with_buffered_stdin(reader, buffered_input, output, options)
+}
+
+fn run_canon_jsonl_with_buffered_stdin<R: Read, W: io::Write>(
+    mut reader: R,
+    mut buffered_input: Vec<u8>,
+    output: W,
+    options: canon::CanonCommandOptions,
+) -> Result<Format, CanonStdinAutodetectError> {
+    reader
+        .read_to_end(&mut buffered_input)
+        .map_err(IoError::from)
+        .map_err(CanonStdinAutodetectError::Input)?;
+    let detected = dataq_io::autodetect_stdin_input_format(&buffered_input)
+        .map_err(CanonStdinAutodetectError::Input)?;
+    run_canon_with_format(
+        Cursor::new(buffered_input),
+        output,
+        detected,
+        Format::Jsonl,
+        options,
+    )
+    .map_err(CanonStdinAutodetectError::Canon)?;
+    Ok(detected)
+}
+
+fn trim_ascii_whitespace(input: &[u8]) -> &[u8] {
+    let Some(start) = input.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return &input[0..0];
+    };
+    let end = input
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .expect("start implies end")
+        + 1;
+    &input[start..end]
+}
+
+fn run_canon_jsonl_stream<R: Read, W: io::Write>(
+    input: R,
+    mut output: W,
+    input_format: Format,
+    options: canon::CanonCommandOptions,
+) -> Result<(), CanonError> {
+    let canon_options = options.into();
+    if input_format == Format::Jsonl {
+        return dataq_io::reader::read_jsonl_stream(input, |value| {
+            let canonical = canonicalize_value(value, canon_options);
+            write_jsonl_stream_value(&mut output, &canonical)
+        })
+        .map_err(|error| match error {
+            JsonlStreamError::Read(source) => CanonError::ReadInput {
+                format: Format::Jsonl,
+                source,
+            },
+            JsonlStreamError::Emit(source) => source,
+        });
+    }
+
+    let values = dataq_io::reader::read_values(input, input_format).map_err(|source| {
+        CanonError::ReadInput {
+            format: input_format,
+            source,
+        }
+    })?;
+    for value in values {
+        let canonical = canonicalize_value(value, canon_options);
+        write_jsonl_stream_value(&mut output, &canonical)?;
+    }
+    Ok(())
+}
+
+fn write_jsonl_stream_value<W: io::Write>(output: &mut W, value: &Value) -> Result<(), CanonError> {
+    dataq_io::format::jsonl::write_jsonl_value(&mut *output, value).map_err(|source| {
+        CanonError::WriteOutput {
+            format: Format::Jsonl,
+            source,
+        }
+    })?;
+    output.flush().map_err(|source| CanonError::WriteOutput {
+        format: Format::Jsonl,
+        source: IoError::from(source),
+    })
 }
 
 fn map_canon_error(error: &CanonError) -> (i32, &'static str) {
@@ -858,17 +1469,17 @@ fn map_canon_error(error: &CanonError) -> (i32, &'static str) {
 
 fn build_canon_pipeline_report(
     args: &CanonArgs,
-    input_format: Format,
+    input_format: Option<Format>,
     options: canon::CanonCommandOptions,
 ) -> PipelineReport {
     let source = if let Some(path) = &args.input {
         PipelineInputSource::path(
             "input",
             path.display().to_string(),
-            Some(input_format.as_str()),
+            format_label(input_format),
         )
     } else {
-        PipelineInputSource::stdin("input", Some(input_format.as_str()))
+        PipelineInputSource::stdin("input", format_label(input_format))
     };
 
     PipelineReport::new(
@@ -1005,6 +1616,56 @@ fn build_merge_pipeline_report(
     )
 }
 
+fn build_join_pipeline_report(
+    args: &JoinArgs,
+    left_format: Option<Format>,
+    right_format: Option<Format>,
+    trace: &join::JoinPipelineTrace,
+) -> PipelineReport {
+    let mut report = PipelineReport::new(
+        "join",
+        PipelineInput::new(vec![
+            PipelineInputSource::path(
+                "left",
+                args.left.display().to_string(),
+                format_label(left_format),
+            ),
+            PipelineInputSource::path(
+                "right",
+                args.right.display().to_string(),
+                format_label(right_format),
+            ),
+        ]),
+        join::pipeline_steps(),
+        join::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
+fn build_aggregate_pipeline_report(
+    args: &AggregateArgs,
+    input_format: Option<Format>,
+    trace: &aggregate::AggregatePipelineTrace,
+) -> PipelineReport {
+    let mut report = PipelineReport::new(
+        "aggregate",
+        PipelineInput::new(vec![PipelineInputSource::path(
+            "input",
+            args.input.display().to_string(),
+            format_label(input_format),
+        )]),
+        aggregate::pipeline_steps(),
+        aggregate::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
 fn build_doctor_pipeline_report() -> PipelineReport {
     let mut report = PipelineReport::new(
         "doctor",
@@ -1016,6 +1677,15 @@ fn build_doctor_pipeline_report() -> PipelineReport {
         report = report.mark_external_tool_used(tool);
     }
     report
+}
+
+fn build_contract_pipeline_report() -> PipelineReport {
+    PipelineReport::new(
+        "contract",
+        PipelineInput::new(Vec::new()),
+        contract::pipeline_steps(),
+        contract::deterministic_guards(),
+    )
 }
 
 fn build_recipe_pipeline_report(
@@ -1048,6 +1718,122 @@ fn format_label(format: Option<Format>) -> Option<&'static str> {
     format.map(Format::as_str)
 }
 
+fn build_pipeline_fingerprint(
+    report: &PipelineReport,
+    context: &FingerprintContext,
+) -> PipelineFingerprint {
+    PipelineFingerprint {
+        command: report.command.clone(),
+        args_hash: hash_normalized_args(),
+        input_hash: context.input_hash.clone(),
+        tool_versions: collect_used_tool_versions(report, &context.preferred_tool_versions),
+        dataq_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+fn hash_normalized_args() -> String {
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .filter(|arg| arg != "--emit-pipeline")
+        .collect();
+
+    let mut hasher = DeterministicHasher::new();
+    hasher.update_len_prefixed(b"dataq.execution_fingerprint.args.v1");
+    for arg in &args {
+        hasher.update_len_prefixed(arg.as_bytes());
+    }
+    hasher.finish_hex()
+}
+
+fn hash_consumed_input_entries(entries: &[ConsumedInputHashEntry<'_>]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut hasher = DeterministicHasher::new();
+    hasher.update_len_prefixed(b"dataq.execution_fingerprint.input.v1");
+    for entry in entries {
+        hasher.update_len_prefixed(entry.label.as_bytes());
+        hasher.update_len_prefixed(entry.source.as_bytes());
+        if let Some(path) = entry.path {
+            hasher.update_len_prefixed(path.as_bytes());
+        }
+        hasher.update_len_prefixed(entry.bytes);
+        if let Some(format) = entry.format {
+            hasher.update_len_prefixed(format.as_bytes());
+        } else {
+            hasher.update_len_prefixed(&[]);
+        }
+    }
+    Some(hasher.finish_hex())
+}
+
+fn collect_used_tool_versions(
+    report: &PipelineReport,
+    preferred_versions: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    report
+        .external_tools
+        .iter()
+        .filter(|tool| tool.used)
+        .map(|tool| {
+            let version = preferred_versions
+                .get(tool.name.as_str())
+                .cloned()
+                .unwrap_or_else(|| detect_tool_version(&tool.name, report.command.as_str()));
+            (tool.name.clone(), version)
+        })
+        .collect()
+}
+
+fn detect_tool_version(tool_name: &str, command_name: &str) -> String {
+    let executable = resolve_tool_executable(tool_name, command_name);
+    match Command::new(&executable).arg("--version").output() {
+        Ok(output) if output.status.success() => first_non_empty_line(&output.stdout)
+            .or_else(|| first_non_empty_line(&output.stderr))
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "error: empty --version output".to_string()),
+        Ok(output) => format!(
+            "error: --version exited with {}",
+            status_label(output.status.code())
+        ),
+        Err(error) => match error.kind() {
+            io::ErrorKind::NotFound => "error: unavailable in PATH".to_string(),
+            io::ErrorKind::PermissionDenied => "error: not executable".to_string(),
+            other => format!("error: failed to execute --version ({other:?})"),
+        },
+    }
+}
+
+fn resolve_tool_executable(tool_name: &str, command_name: &str) -> String {
+    if command_name != "assert" {
+        return tool_name.to_string();
+    }
+
+    let env_key = match tool_name {
+        "jq" => Some("DATAQ_JQ_BIN"),
+        "yq" => Some("DATAQ_YQ_BIN"),
+        "mlr" => Some("DATAQ_MLR_BIN"),
+        _ => None,
+    };
+
+    env_key
+        .and_then(|key| std::env::var(key).ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| tool_name.to_string())
+}
+
+fn first_non_empty_line(bytes: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.lines().find(|line| !line.trim().is_empty())
+}
+
+fn status_label(code: Option<i32>) -> String {
+    code.map(|value| value.to_string())
+        .unwrap_or_else(|| "terminated by signal".to_string())
+}
+
 fn emit_json_stdout(value: &Value) -> bool {
     match serde_json::to_string(value) {
         Ok(serialized) => {
@@ -1069,7 +1855,14 @@ fn emit_json_stderr(value: &Value) -> bool {
 }
 
 fn emit_pipeline_report(report: &PipelineReport) {
-    match serde_json::to_string(report) {
+    emit_pipeline_report_with_context(report, &FingerprintContext::default());
+}
+
+fn emit_pipeline_report_with_context(report: &PipelineReport, context: &FingerprintContext) {
+    let report = report
+        .clone()
+        .with_fingerprint(build_pipeline_fingerprint(report, context));
+    match serde_json::to_string(&report) {
         Ok(serialized) => eprintln!("{serialized}"),
         Err(error) => emit_error(
             "internal_error",
@@ -1078,6 +1871,20 @@ fn emit_pipeline_report(report: &PipelineReport) {
             1,
         ),
     }
+}
+
+#[derive(Debug, Default, Clone)]
+struct FingerprintContext {
+    input_hash: Option<String>,
+    preferred_tool_versions: BTreeMap<String, String>,
+}
+
+struct ConsumedInputHashEntry<'a> {
+    label: &'a str,
+    source: &'a str,
+    path: Option<&'a str>,
+    format: Option<&'a str>,
+    bytes: &'a [u8],
 }
 
 fn emit_error(error: &'static str, message: String, details: Value, code: i32) {

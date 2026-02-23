@@ -1,6 +1,6 @@
 use std::fs;
 
-use dataq::cmd::merge::{MergeCommandArgs, run};
+use dataq::cmd::merge::{MergeCommandArgs, run, run_with_policy_paths};
 use dataq::engine::merge::MergePolicy;
 use predicates::prelude::predicate;
 use serde_json::json;
@@ -99,4 +99,103 @@ fn unsupported_policy_returns_exit_code_three() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
+}
+
+#[test]
+fn policy_path_applies_to_subtree_only() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("base.json");
+    let overlay = dir.path().join("overlay.json");
+    fs::write(
+        &base,
+        r#"{"cfg":{"items":[{"left":1},2],"obj":{"left":1}}}"#,
+    )
+    .expect("write base");
+    fs::write(
+        &overlay,
+        r#"{"cfg":{"items":[{"right":2}],"obj":{"right":2}}}"#,
+    )
+    .expect("write overlay");
+
+    let response = run_with_policy_paths(
+        &MergeCommandArgs {
+            base,
+            overlays: vec![overlay],
+            policy: MergePolicy::DeepMerge,
+        },
+        &[r#"$["cfg"]["items"]=array-replace"#.to_string()],
+    );
+
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(
+        response.payload,
+        json!({
+            "cfg": {
+                "items": [{"right": 2}],
+                "obj": {"left": 1, "right": 2}
+            }
+        })
+    );
+}
+
+#[test]
+fn policy_path_same_depth_uses_last_definition() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("base.json");
+    let overlay = dir.path().join("overlay.json");
+    fs::write(
+        &base,
+        r#"{"cfg":{"items":[{"left":1},2],"obj":{"left":1}}}"#,
+    )
+    .expect("write base");
+    fs::write(
+        &overlay,
+        r#"{"cfg":{"items":[{"right":2}],"obj":{"right":2}}}"#,
+    )
+    .expect("write overlay");
+
+    let response = run_with_policy_paths(
+        &MergeCommandArgs {
+            base,
+            overlays: vec![overlay],
+            policy: MergePolicy::DeepMerge,
+        },
+        &[
+            r#"$["cfg"]["items"]=array-replace"#.to_string(),
+            r#"$["cfg"]["items"]=deep-merge"#.to_string(),
+        ],
+    );
+
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(
+        response.payload,
+        json!({
+            "cfg": {
+                "items": [{"left": 1, "right": 2}, 2],
+                "obj": {"left": 1, "right": 2}
+            }
+        })
+    );
+}
+
+#[test]
+fn invalid_policy_path_definition_returns_exit_code_three() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("base.json");
+    let overlay = dir.path().join("overlay.json");
+    fs::write(&base, "{}").expect("write base");
+    fs::write(&overlay, "{}").expect("write overlay");
+
+    let args = MergeCommandArgs {
+        base,
+        overlays: vec![overlay],
+        policy: MergePolicy::DeepMerge,
+    };
+    let invalid_path = run_with_policy_paths(&args, &[r#"$[cfg]=deep-merge"#.to_string()]);
+    assert_eq!(invalid_path.exit_code, 3);
+    assert_eq!(invalid_path.payload["error"], json!("input_usage_error"));
+
+    let invalid_policy = run_with_policy_paths(&args, &[r#"$["cfg"]=not-a-policy"#.to_string()]);
+    assert_eq!(invalid_policy.exit_code, 3);
+    assert_eq!(invalid_policy.payload["error"], json!("input_usage_error"));
 }

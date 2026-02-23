@@ -7,6 +7,9 @@ use predicates::prelude::predicate;
 use serde_json::Value;
 use tempfile::tempdir;
 
+#[path = "contract_cli.rs"]
+mod contract_cli;
+
 #[test]
 fn help_is_available() {
     assert_cmd::cargo::cargo_bin_cmd!("dataq")
@@ -17,7 +20,8 @@ fn help_is_available() {
         .stdout(predicate::str::contains("assert"))
         .stdout(predicate::str::contains("sdiff"))
         .stdout(predicate::str::contains("profile"))
-        .stdout(predicate::str::contains("doctor"));
+        .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("contract"));
 }
 
 #[test]
@@ -306,6 +310,86 @@ fn emit_pipeline_outputs_stderr_json_with_expected_schema() {
             .as_array()
             .expect("guards array")
             .is_empty()
+    );
+    assert_eq!(stderr_json["fingerprint"]["command"], Value::from("canon"));
+    assert!(stderr_json["fingerprint"]["args_hash"].is_string());
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"],
+        Value::Object(Default::default())
+    );
+    assert_eq!(
+        stderr_json["fingerprint"]["dataq_version"],
+        Value::from(env!("CARGO_PKG_VERSION"))
+    );
+    assert!(stderr_json["fingerprint"]["input_hash"].is_null());
+}
+
+#[test]
+fn emit_pipeline_fingerprint_hashes_are_stable_for_same_args_and_input() {
+    let dir = tempdir().expect("temp dir");
+    let input_path = dir.path().join("input.json");
+    fs::write(&input_path, r#"{"z":"2","a":"true"}"#).expect("write input");
+
+    let run_once = || {
+        let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+            .args([
+                "--emit-pipeline",
+                "canon",
+                "--from",
+                "json",
+                "--input",
+                input_path.to_str().expect("utf8 input path"),
+            ])
+            .output()
+            .expect("run command");
+
+        assert_eq!(output.status.code(), Some(0));
+        parse_last_stderr_json(&output.stderr)
+    };
+
+    let first = run_once();
+    let second = run_once();
+
+    assert_eq!(
+        first["fingerprint"]["args_hash"],
+        second["fingerprint"]["args_hash"]
+    );
+    assert_eq!(
+        first["fingerprint"]["input_hash"],
+        second["fingerprint"]["input_hash"]
+    );
+    assert!(first["fingerprint"]["input_hash"].is_string());
+}
+
+#[cfg(unix)]
+#[test]
+fn emit_pipeline_fingerprint_hashes_consumed_bytes_for_dev_stdin_input_path() {
+    let run_once = |payload: &str| {
+        let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+            .args([
+                "--emit-pipeline",
+                "canon",
+                "--from",
+                "json",
+                "--input",
+                "/dev/stdin",
+            ])
+            .write_stdin(payload)
+            .output()
+            .expect("run command");
+
+        assert_eq!(output.status.code(), Some(0));
+        parse_last_stderr_json(&output.stderr)
+    };
+
+    let first = run_once(r#"{"z":"2","a":"true"}"#);
+    let second = run_once(r#"{"z":"9","a":"false"}"#);
+
+    assert!(first["fingerprint"]["input_hash"].is_string());
+    assert!(second["fingerprint"]["input_hash"].is_string());
+    assert_ne!(
+        first["fingerprint"]["input_hash"],
+        second["fingerprint"]["input_hash"]
     );
 }
 

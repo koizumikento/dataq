@@ -6,6 +6,8 @@ mod canon_cli;
 mod doctor_cli;
 #[path = "cli/entry_cli.rs"]
 mod entry_cli;
+#[path = "cli/join_cli.rs"]
+mod join_cli;
 #[path = "cli/merge_cli.rs"]
 mod merge_cli;
 #[path = "cli/profile_cli.rs"]
