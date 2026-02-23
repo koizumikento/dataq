@@ -47,6 +47,10 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - カラム/キー差分
 - 値差分（パス単位）
 - パス表記は曖昧さ回避のため canonical 形式（例: `$["a.b"]`, `$[0]["quote\"key"]`）
+- `--key <canonical-path>` でレコード対応付けキーを指定（例: `$["id"]`）
+- `--ignore-path <canonical-path>` で比較除外パスを複数指定可能
+- `--key` 利用時に重複キーがある場合は入力不正として終了コード `3`
+- `--ignore-path` 指定時、レポートに `ignored_paths` が出力される
 
 ### 4. `profile`
 
@@ -100,6 +104,9 @@ dataq profile --from json --input out.jsonl
 
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
+
+# ID で対応付けし、更新時刻は差分対象外
+dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-path '$["updated_at"]'
 ```
 
 ## Rust 実装メモ

@@ -71,6 +71,12 @@ struct SdiffArgs {
 
     #[arg(long)]
     right: PathBuf,
+
+    #[arg(long)]
+    key: Option<String>,
+
+    #[arg(long = "ignore-path")]
+    ignore_path: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -167,7 +173,6 @@ fn run() -> i32 {
         Commands::Canon(args) => run_canon(args),
         Commands::Assert(args) => run_assert(args),
         Commands::Sdiff(args) => run_sdiff(args),
-        Commands::Profile(args) => run_profile(args),
         Commands::Profile(args) => run_profile(args),
         Commands::Merge(args) => run_merge(args),
     }
@@ -342,6 +347,27 @@ fn run_merge(args: MergeArgs) -> i32 {
 }
 
 fn run_sdiff(args: SdiffArgs) -> i32 {
+    let options = match sdiff::parse_options(
+        sdiff::DEFAULT_VALUE_DIFF_CAP,
+        args.key.as_deref(),
+        &args.ignore_path,
+    ) {
+        Ok(options) => options,
+        Err(error) => {
+            emit_error(
+                "input_usage_error",
+                error.to_string(),
+                json!({
+                    "command": "sdiff",
+                    "key": args.key,
+                    "ignore_path": args.ignore_path,
+                }),
+                3,
+            );
+            return 3;
+        }
+    };
+
     let left_format = match dataq_io::resolve_input_format(None, Some(args.left.as_path())) {
         Ok(format) => format,
         Err(error) => {
@@ -392,7 +418,22 @@ fn run_sdiff(args: SdiffArgs) -> i32 {
         }
     };
 
-    let report = sdiff::execute(&left_values, &right_values);
+    let report = match sdiff::execute_with_options(&left_values, &right_values, options) {
+        Ok(report) => report,
+        Err(error) => {
+            emit_error(
+                "input_usage_error",
+                error.to_string(),
+                json!({
+                    "command": "sdiff",
+                    "key": args.key,
+                    "ignore_path": args.ignore_path,
+                }),
+                3,
+            );
+            return 3;
+        }
+    };
     match serde_json::to_string(&report) {
         Ok(serialized) => {
             println!("{serialized}");
