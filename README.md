@@ -142,6 +142,19 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
+### Release
+
+- `v*` タグ（例: `v0.1.0`, `v0.1.0-rc.1`）を push すると、GitHub Actions の Release workflow が起動します
+- workflow は `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features` を通過した場合のみ公開処理へ進みます
+- 配布ターゲットは次の4種類です:
+  - `x86_64-unknown-linux-gnu`
+  - `x86_64-pc-windows-msvc`
+  - `x86_64-apple-darwin`
+  - `aarch64-apple-darwin`
+- 各ターゲットで `dataq-<tag>-<target>.<ext>` と `dataq-<tag>-<target>.sha256` を GitHub Release に添付します
+- タグ名に `-` を含む場合（例: `v0.1.0-rc.1`）は GitHub Pre-release として公開します
+- この workflow は `crates.io` 公開を行いません（将来は別 workflow で分離予定）
+
 ### コントリビュート
 
 Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参照してください。  
