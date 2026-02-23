@@ -102,6 +102,9 @@ dataq doctor
 # ID で対応付けし、更新時刻は差分対象外
 dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-path '$["updated_at"]'
 
+# CIゲート: 差分があれば終了コード2、値差分詳細は先頭1件まで
+dataq sdiff --left before.jsonl --right after.jsonl --fail-on-diff --value-diff-cap 1
+
 # JSON入力をそのままdataqで検証
 dataq assert --input raw.json --rules rules.yaml
 ```
@@ -232,8 +235,11 @@ dataq assert \
 - パス表記は曖昧さ回避のため canonical 形式（例: `$["a.b"]`, `$[0]["quote\"key"]`）
 - `--key <canonical-path>` でレコード対応付けキーを指定（例: `$["id"]`）
 - `--ignore-path <canonical-path>` で比較除外パスを複数指定可能
+- `--value-diff-cap <usize>` で `values.items` の最大件数を制御（既定: `100`）
+- `--fail-on-diff` 指定時は `values.total > 0` で終了コード `2`（未指定時は比較成功で `0`）
 - `--key` 利用時に重複キーがある場合は入力不正として終了コード `3`
 - `--ignore-path` 指定時、レポートに `ignored_paths` が出力される
+- `values.total` は実差分件数を維持し、上限超過時のみ `values.truncated=true`
 
 ### 4. `profile`
 

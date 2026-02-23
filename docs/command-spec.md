@@ -70,6 +70,16 @@ dataq [--emit-pipeline] <command> [options]
   - `1`: 予期しない内部エラー
 - `--emit-pipeline` 指定時の `steps`: `doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`
 
+### `sdiff` のCIゲート拡張
+
+- `--fail-on-diff`（既定: `false`）:
+  比較処理が成功し、かつ `values.total > 0` のとき終了コード `2` で終了
+- `--value-diff-cap <usize>`（既定: `100`）:
+  レポートの `values.items` 出力件数上限を制御
+- レポートJSON契約（`counts`, `keys`, `ignored_paths`, `values`）は不変
+- `values.total` は実差分件数を維持し、上限超過時のみ `values.truncated=true`
+- `--emit-pipeline` のstderr JSON出力契約は `sdiff` 拡張後も不変
+
 ### `--emit-pipeline`（診断出力）
 
 - グローバル引数として利用可能: `dataq --emit-pipeline <subcommand> ...`
