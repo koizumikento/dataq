@@ -104,6 +104,12 @@ struct SdiffArgs {
 
     #[arg(long = "ignore-path")]
     ignore_path: Vec<String>,
+
+    #[arg(long, default_value_t = false)]
+    fail_on_diff: bool,
+
+    #[arg(long, default_value_t = sdiff::DEFAULT_VALUE_DIFF_CAP)]
+    value_diff_cap: usize,
 }
 
 #[derive(Debug, clap::Args)]
@@ -501,29 +507,26 @@ fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
 }
 
 fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
-    let options = match sdiff::parse_options(
-        sdiff::DEFAULT_VALUE_DIFF_CAP,
-        args.key.as_deref(),
-        &args.ignore_path,
-    ) {
-        Ok(options) => options,
-        Err(error) => {
-            emit_error(
-                "input_usage_error",
-                error.to_string(),
-                json!({
-                    "command": "sdiff",
-                    "key": args.key,
-                    "ignore_path": args.ignore_path,
-                }),
-                3,
-            );
-            if emit_pipeline {
-                emit_pipeline_report(&build_sdiff_pipeline_report(&args, None, None));
+    let options =
+        match sdiff::parse_options(args.value_diff_cap, args.key.as_deref(), &args.ignore_path) {
+            Ok(options) => options,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    error.to_string(),
+                    json!({
+                        "command": "sdiff",
+                        "key": args.key,
+                        "ignore_path": args.ignore_path,
+                    }),
+                    3,
+                );
+                if emit_pipeline {
+                    emit_pipeline_report(&build_sdiff_pipeline_report(&args, None, None));
+                }
+                return 3;
             }
-            return 3;
-        }
-    };
+        };
 
     let left_path = args.left.display().to_string();
     let right_path = args.right.display().to_string();
@@ -624,10 +627,15 @@ fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
             return 3;
         }
     };
+    let success_exit_code = if args.fail_on_diff && report.values.total > 0 {
+        2
+    } else {
+        0
+    };
     let exit_code = match serde_json::to_string(&report) {
         Ok(serialized) => {
             println!("{serialized}");
-            0
+            success_exit_code
         }
         Err(error) => {
             emit_error(
