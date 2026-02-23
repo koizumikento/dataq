@@ -40,6 +40,18 @@ Core goals:
   - delete remote temporary branches when no longer needed (`git push origin --delete <branch>`)
 - Keep long-lived branches (`main` and active release branches) intact during cleanup.
 
+### Strict parallel execution rules (mandatory)
+
+- Treat each plan item as one isolated feature unit: `1 feature = 1 branch = 1 worktree = 1 PR`.
+- Do not implement feature code directly on `main` or the integration branch; integration branches are merge-only.
+- Create each feature branch from the latest integration branch HEAD at feature start time.
+- Assign each feature worktree to exactly one implementation sub-agent at a time; no shared write access across lanes.
+- Require explicit `$feat-add` workflow per feature (`explorer` impact map -> `worker` implementation/tests/docs -> parent gate).
+- Require explicit `$rev-pass` loop per feature; do not merge until review reports no required fixes.
+- Rebase each feature branch onto latest integration HEAD immediately before merge, then rerun required gates.
+- Do not batch multiple features in one commit or one PR; if cross-feature changes are unavoidable, create a dedicated prerequisite feature and merge it first.
+- If a feature was implemented in the wrong branch/worktree, stop integration for that feature and re-apply changes in the correct feature branch before continuing.
+
 ## Skill usage
 
 - Skill paths:
