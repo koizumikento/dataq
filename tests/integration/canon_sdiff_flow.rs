@@ -22,7 +22,7 @@ fn value_diff_cap_truncates_with_default_limit() {
     );
     assert_eq!(
         actual["keys"],
-        json!({"left_only": [], "right_only": [], "shared": ["$.v"]})
+        json!({"left_only": [], "right_only": [], "shared": ["$[\"v\"]"]})
     );
     assert_eq!(actual["values"]["total"], json!(120));
     assert_eq!(actual["values"]["truncated"], json!(true));
@@ -30,8 +30,8 @@ fn value_diff_cap_truncates_with_default_limit() {
         actual["values"]["items"].as_array().map(Vec::len),
         Some(100)
     );
-    assert_eq!(actual["values"]["items"][0]["path"], json!("$[0].v"));
-    assert_eq!(actual["values"]["items"][99]["path"], json!("$[99].v"));
+    assert_eq!(actual["values"]["items"][0]["path"], json!("$[0][\"v\"]"));
+    assert_eq!(actual["values"]["items"][99]["path"], json!("$[99][\"v\"]"));
 }
 
 fn build_jsonl(rows: usize, offset: i64) -> String {

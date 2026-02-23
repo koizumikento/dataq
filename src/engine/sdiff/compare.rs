@@ -53,7 +53,7 @@ fn collect_value_key_paths(value: &Value, path: &str, out: &mut BTreeSet<String>
             let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
             keys.sort_unstable();
             for key in keys {
-                let next_path = format!("{path}.{key}");
+                let next_path = append_object_key_path(path, key);
                 out.insert(next_path.clone());
                 if let Some(child) = map.get(key) {
                     collect_value_key_paths(child, &next_path, out);
@@ -76,12 +76,8 @@ fn compare_value_sections(
 ) -> ValueDiffSection {
     let mut collector = ValueDiffCollector::new(value_diff_cap);
     for (index, (left_value, right_value)) in left.iter().zip(right.iter()).enumerate() {
-        compare_value_pair(
-            left_value,
-            right_value,
-            &format!("$[{index}]"),
-            &mut collector,
-        );
+        let row_path = append_array_index_path("$", index);
+        compare_value_pair(left_value, right_value, &row_path, &mut collector);
     }
     collector.finish()
 }
@@ -112,7 +108,7 @@ fn compare_object_values(
     keys.extend(right_map.keys().map(String::as_str));
 
     for key in keys {
-        let next_path = format!("{path}.{key}");
+        let next_path = append_object_key_path(path, key);
         match (left_map.get(key), right_map.get(key)) {
             (Some(left_value), Some(right_value)) => {
                 compare_value_pair(left_value, right_value, &next_path, collector);
@@ -133,19 +129,30 @@ fn compare_array_values(
     collector: &mut ValueDiffCollector,
 ) {
     for (index, (left_item, right_item)) in left_items.iter().zip(right_items.iter()).enumerate() {
-        let next_path = format!("{path}[{index}]");
+        let next_path = append_array_index_path(path, index);
         compare_value_pair(left_item, right_item, &next_path, collector);
     }
 
     if left_items.len() > right_items.len() {
         for (index, left_item) in left_items.iter().enumerate().skip(right_items.len()) {
-            collector.push(format!("{path}[{index}]"), left_item.clone(), Value::Null);
+            let next_path = append_array_index_path(path, index);
+            collector.push(next_path, left_item.clone(), Value::Null);
         }
     } else if right_items.len() > left_items.len() {
         for (index, right_item) in right_items.iter().enumerate().skip(left_items.len()) {
-            collector.push(format!("{path}[{index}]"), Value::Null, right_item.clone());
+            let next_path = append_array_index_path(path, index);
+            collector.push(next_path, Value::Null, right_item.clone());
         }
     }
+}
+
+fn append_object_key_path(path: &str, key: &str) -> String {
+    let encoded_key = serde_json::to_string(key).expect("serializing object key cannot fail");
+    format!("{path}[{encoded_key}]")
+}
+
+fn append_array_index_path(path: &str, index: usize) -> String {
+    format!("{path}[{index}]")
 }
 
 struct ValueDiffCollector {
