@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::engine::merge::{self, MergePolicy};
+use crate::domain::value_path::ValuePath;
+use crate::engine::merge::{self, MergePolicy, PathMergePolicy};
 use crate::io::{self, IoError};
 
 /// Input arguments for merge command execution API.
@@ -23,7 +24,15 @@ pub struct MergeCommandResponse {
 }
 
 pub fn run(args: &MergeCommandArgs) -> MergeCommandResponse {
-    match execute(args) {
+    run_with_policy_paths(args, &[])
+}
+
+/// Runs merge command with optional path-scoped policy overrides.
+pub fn run_with_policy_paths(
+    args: &MergeCommandArgs,
+    policy_paths: &[String],
+) -> MergeCommandResponse {
+    match execute(args, policy_paths) {
         Ok(merged) => MergeCommandResponse {
             exit_code: 0,
             payload: merged,
@@ -38,7 +47,7 @@ pub fn run(args: &MergeCommandArgs) -> MergeCommandResponse {
     }
 }
 
-fn execute(args: &MergeCommandArgs) -> Result<Value, CommandError> {
+fn execute(args: &MergeCommandArgs, policy_paths: &[String]) -> Result<Value, CommandError> {
     if args.overlays.is_empty() {
         return Err(CommandError::InputUsage(
             "at least one --overlay is required".to_string(),
@@ -50,8 +59,14 @@ fn execute(args: &MergeCommandArgs) -> Result<Value, CommandError> {
     for overlay_path in &args.overlays {
         overlays.push(load_document(overlay_path, "overlay")?);
     }
+    let path_policies = parse_policy_paths(policy_paths)?;
 
-    Ok(merge::merge_with_policy(&base, &overlays, args.policy))
+    Ok(merge::merge_with_path_policies(
+        &base,
+        &overlays,
+        args.policy,
+        &path_policies,
+    ))
 }
 
 fn load_document(path: &Path, role: &'static str) -> Result<Value, CommandError> {
@@ -85,6 +100,45 @@ enum CommandError {
     InputUsage(String),
 }
 
+fn parse_policy_paths(raw_definitions: &[String]) -> Result<Vec<PathMergePolicy>, CommandError> {
+    let mut parsed = Vec::with_capacity(raw_definitions.len());
+    for raw_definition in raw_definitions {
+        let (path_literal, policy_literal) =
+            raw_definition
+                .rsplit_once('=')
+                .ok_or_else(|| {
+                    CommandError::InputUsage(format!(
+                        "invalid `--policy-path` definition `{raw_definition}`: expected `<canonical-path>=<policy>`"
+                    ))
+                })?;
+
+        let path_literal = path_literal.trim();
+        if path_literal.is_empty() {
+            return Err(CommandError::InputUsage(format!(
+                "invalid `--policy-path` definition `{raw_definition}`: path cannot be empty"
+            )));
+        }
+        let parsed_path = ValuePath::parse_canonical(path_literal).map_err(|source| {
+            CommandError::InputUsage(format!(
+                "invalid `--policy-path` path `{path_literal}`: {source}"
+            ))
+        })?;
+
+        let policy_literal = policy_literal.trim();
+        let parsed_policy = MergePolicy::parse_cli_name(policy_literal).ok_or_else(|| {
+            CommandError::InputUsage(format!(
+                "invalid `--policy-path` policy `{policy_literal}`: expected one of `last-wins`, `deep-merge`, `array-replace`"
+            ))
+        })?;
+
+        parsed.push(PathMergePolicy {
+            path: parsed_path,
+            policy: parsed_policy,
+        });
+    }
+    Ok(parsed)
+}
+
 /// Ordered pipeline-step names used for `--emit-pipeline` diagnostics.
 pub fn pipeline_steps() -> Vec<String> {
     vec![
@@ -109,7 +163,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::cmd::merge::{MergeCommandArgs, run};
+    use crate::cmd::merge::{MergeCommandArgs, run, run_with_policy_paths};
     use crate::engine::merge::MergePolicy;
 
     #[test]
@@ -195,5 +249,35 @@ cfg:
         let response = run(&args);
         assert_eq!(response.exit_code, 3);
         assert_eq!(response.payload["error"], json!("input_usage_error"));
+    }
+
+    #[test]
+    fn rejects_invalid_policy_path_definition_with_exit_three() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base.json");
+        let overlay = dir.path().join("overlay.json");
+        std::fs::write(&base, "{}").expect("write base");
+        std::fs::write(&overlay, "{}").expect("write overlay");
+
+        let args = MergeCommandArgs {
+            base: base.clone(),
+            overlays: vec![overlay.clone()],
+            policy: MergePolicy::DeepMerge,
+        };
+        let invalid_policy_response =
+            run_with_policy_paths(&args, &["$[\"cfg\"]=bad-policy".to_string()]);
+        assert_eq!(invalid_policy_response.exit_code, 3);
+        assert_eq!(
+            invalid_policy_response.payload["error"],
+            json!("input_usage_error")
+        );
+
+        let invalid_path_response =
+            run_with_policy_paths(&args, &["$[cfg]=deep-merge".to_string()]);
+        assert_eq!(invalid_path_response.exit_code, 3);
+        assert_eq!(
+            invalid_path_response.payload["error"],
+            json!("input_usage_error")
+        );
     }
 }
