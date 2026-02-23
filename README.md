@@ -71,6 +71,7 @@ dataq [--emit-pipeline] <command> [options]
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
 | `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
+| `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
 
 グローバルオプション:
 
@@ -111,6 +112,9 @@ dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --polic
 
 # 依存ツール診断
 dataq doctor
+
+# assert 出力契約を取得
+dataq contract --command assert
 
 # ID で対応付けし、更新時刻は差分対象外
 dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-path '$["updated_at"]'
@@ -361,6 +365,18 @@ steps:
           id:
             type: integer
 ```
+
+### 8. `contract`
+
+サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
+
+- `dataq contract --command <canon|assert|sdiff|profile|merge|doctor|recipe>`
+  - 単一コマンドの契約を1オブジェクトで返す
+- `dataq contract --all`
+  - 全コマンド契約を固定順配列で返す
+  - 順序: `canon`, `assert`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+- 各契約オブジェクトのキー:
+  - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
 ## 設計ドキュメント
 
