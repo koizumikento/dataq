@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{r#assert, canon, sdiff};
 use dataq::domain::error::CanonError;
 use dataq::io::{self as dataq_io, Format, IoError};
@@ -51,9 +51,18 @@ struct CanonArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(group(
+    ArgGroup::new("assert_source")
+        .args(["rules", "schema"])
+        .required(true)
+        .multiple(false)
+))]
 struct AssertArgs {
     #[arg(long)]
-    rules: PathBuf,
+    rules: Option<PathBuf>,
+
+    #[arg(long)]
+    schema: Option<PathBuf>,
 
     #[arg(long)]
     input: Option<PathBuf>,
@@ -204,6 +213,7 @@ fn run_assert(args: AssertArgs) -> i32 {
             Some(Format::Json)
         },
         rules: args.rules,
+        schema: args.schema,
     };
 
     let stdin = io::stdin();

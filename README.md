@@ -29,15 +29,17 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 
 ### 2. `assert`
 
-期待ルールに対して検証。
+期待ルールまたは JSON Schema に対して検証。
 
 - 必須キー
 - 型
 - 値域
 - 最小/最大件数
-- ルールスキーマは厳密（未知キーは入力不正として終了コード `3`）
+- `--rules <path>`: dataq ルールで検証（ルールスキーマは厳密。未知キーは入力不正）
+- `--schema <path>`: JSON Schema で検証
+- `--rules` と `--schema` は同時指定不可（入力不正として終了コード `3`）
 
-失敗時は機械可読エラーJSONを返し、終了コード `2`。
+不一致は機械可読レポートを返し、終了コード `2`。読み込み/パース失敗は終了コード `3`。
 
 ### 3. `sdiff`
 
@@ -70,6 +72,9 @@ cat in.yaml | dataq canon --from yaml --to jsonl > out.jsonl
 
 # ルール検証
 dataq assert --input out.jsonl --rules rules.yaml
+
+# JSON Schema 検証
+dataq assert --input out.jsonl --schema schema.json
 
 # 差分確認
 dataq sdiff --left before.jsonl --right after.jsonl
