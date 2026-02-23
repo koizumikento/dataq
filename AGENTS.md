@@ -24,6 +24,14 @@ Core goals:
 - Prefer root-cause fixes over one-off patches.
 - Avoid speculative abstractions in early stages.
 
+## Branch and worktree strategy
+
+- For multi-feature plans, split work by feature into separate branches and separate `git worktree` directories.
+- Run sub-agents in parallel on those split worktrees to reduce edit collisions.
+- Prefer integrating by merging the split feature branches (`git merge`) into the target branch.
+- Avoid integration via cherry-pick aggregation as the default path.
+- If a temporary integration branch is needed for validation, merge feature branches into it, then merge that branch to `main`.
+
 ## Skill usage
 
 - Skill paths:
