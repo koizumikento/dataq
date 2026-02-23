@@ -5,8 +5,9 @@ use std::process;
 
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
-use dataq::cmd::{r#assert, canon, profile, sdiff};
+use dataq::cmd::{r#assert, canon, merge, profile, sdiff};
 use dataq::domain::error::CanonError;
+use dataq::engine::merge::MergePolicy;
 use dataq::io::{self as dataq_io, Format, IoError};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -32,6 +33,8 @@ enum Commands {
     Sdiff(SdiffArgs),
     /// Generate deterministic field profile statistics.
     Profile(ProfileArgs),
+    /// Merge base and overlays with a deterministic merge policy.
+    Merge(MergeArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -79,6 +82,18 @@ struct ProfileArgs {
     from: CliInputFormat,
 }
 
+#[derive(Debug, clap::Args)]
+struct MergeArgs {
+    #[arg(long)]
+    base: PathBuf,
+
+    #[arg(long, required = true, num_args = 1..)]
+    overlay: Vec<PathBuf>,
+
+    #[arg(long, value_enum)]
+    policy: CliMergePolicy,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliInputFormat {
     Json,
@@ -91,6 +106,13 @@ enum CliInputFormat {
 enum CanonOutputFormat {
     Json,
     Jsonl,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliMergePolicy {
+    LastWins,
+    DeepMerge,
+    ArrayReplace,
 }
 
 impl From<CliInputFormat> for Format {
@@ -109,6 +131,16 @@ impl From<CanonOutputFormat> for Format {
         match value {
             CanonOutputFormat::Json => Self::Json,
             CanonOutputFormat::Jsonl => Self::Jsonl,
+        }
+    }
+}
+
+impl From<CliMergePolicy> for MergePolicy {
+    fn from(value: CliMergePolicy) -> Self {
+        match value {
+            CliMergePolicy::LastWins => Self::LastWins,
+            CliMergePolicy::DeepMerge => Self::DeepMerge,
+            CliMergePolicy::ArrayReplace => Self::ArrayReplace,
         }
     }
 }
@@ -136,6 +168,8 @@ fn run() -> i32 {
         Commands::Assert(args) => run_assert(args),
         Commands::Sdiff(args) => run_sdiff(args),
         Commands::Profile(args) => run_profile(args),
+        Commands::Profile(args) => run_profile(args),
+        Commands::Merge(args) => run_merge(args),
     }
 }
 
@@ -253,6 +287,53 @@ fn run_assert(args: AssertArgs) -> i32 {
                 "internal_error",
                 format!("unexpected assert exit code: {other}"),
                 json!({"command": "assert"}),
+                1,
+            );
+            1
+        }
+    }
+}
+
+fn run_merge(args: MergeArgs) -> i32 {
+    let command_args = merge::MergeCommandArgs {
+        base: args.base.clone(),
+        overlays: args.overlay.clone(),
+        policy: args.policy.into(),
+    };
+    let response = merge::run(&command_args);
+
+    match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize merge output".to_string(),
+                    json!({"command": "merge"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 => {
+            if emit_json_stderr(&response.payload) {
+                3
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize merge error".to_string(),
+                    json!({"command": "merge"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected merge exit code: {other}"),
+                json!({"command": "merge"}),
                 1,
             );
             1

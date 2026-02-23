@@ -59,6 +59,16 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
   - `unique_count`
   - `type_distribution`（`null|boolean|number|string|array|object`）
 
+### 5. `merge`
+
+複数の JSON/YAML 入力をポリシー指定で決定的にマージ。
+
+- `--base <path>` と `--overlay <path>`（複数指定可）を順に適用
+- `--policy last-wins`: 同一キーは overlay 側で上書き（shallow）
+- `--policy deep-merge`: object は再帰マージ、配列は要素インデックス単位で再帰マージ
+- `--policy array-replace`: object は再帰マージ、配列は overlay 側で全置換
+- 出力は JSON 固定（キー順は決定的にソート）
+
 ## CLI I/O 契約
 
 ### 出力モード
@@ -87,6 +97,9 @@ dataq sdiff --left before.jsonl --right after.jsonl
 
 # 品質プロファイル
 dataq profile --from json --input out.jsonl
+
+# ポリシーマージ
+dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
 ```
 
 ## Rust 実装メモ
@@ -204,7 +217,7 @@ dataq/
 
 1. MVP (`canon`, `assert`, `sdiff`)
 2. `profile`（欠損率、ユニーク数、型分布）
-3. `merge`（YAML/JSONのポリシーマージ）
+3. `merge`（YAML/JSONのポリシーマージ、実装済み）
 4. JSON Schema連携
 5. スナップショットテスト拡充
 

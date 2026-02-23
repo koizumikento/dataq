@@ -10,6 +10,8 @@ mod io_format_resolution;
 mod io_roundtrip;
 #[path = "integration/profile_determinism.rs"]
 mod profile_determinism;
+#[path = "integration/merge_flow.rs"]
+mod merge_flow;
 #[path = "integration/util_sort.rs"]
 mod util_sort;
 #[path = "integration/util_time.rs"]
