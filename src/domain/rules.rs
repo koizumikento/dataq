@@ -7,6 +7,7 @@ use serde_json::{Number, Value};
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AssertRules {
+    pub extends: Option<RulesExtends>,
     #[serde(default)]
     pub required_keys: Vec<String>,
     #[serde(default)]
@@ -16,6 +17,23 @@ pub struct AssertRules {
     pub fields: BTreeMap<String, FieldRule>,
     #[serde(default)]
     pub count: CountRule,
+}
+
+/// Optional inheritance spec used by `assert` rule files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RulesExtends {
+    Path(String),
+    Paths(Vec<String>),
+}
+
+impl RulesExtends {
+    pub fn into_paths(self) -> Vec<String> {
+        match self {
+            Self::Path(path) => vec![path],
+            Self::Paths(paths) => paths,
+        }
+    }
 }
 
 /// Field-level rule bundle for one path.

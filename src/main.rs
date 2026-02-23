@@ -5,7 +5,7 @@ use std::process;
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
-use dataq::cmd::{r#assert, canon, merge, profile, sdiff};
+use dataq::cmd::{r#assert, canon, doctor, merge, profile, recipe, sdiff};
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
 use dataq::engine::merge::MergePolicy;
@@ -39,6 +39,10 @@ enum Commands {
     Profile(ProfileArgs),
     /// Merge base and overlays with a deterministic merge policy.
     Merge(MergeArgs),
+    /// Execute a declarative deterministic recipe.
+    Recipe(RecipeArgs),
+    /// Diagnose jq/yq/mlr availability and executability.
+    Doctor,
 }
 
 #[derive(Debug, clap::Args)]
@@ -102,6 +106,12 @@ struct SdiffArgs {
 
     #[arg(long = "ignore-path")]
     ignore_path: Vec<String>,
+
+    #[arg(long, default_value_t = false)]
+    fail_on_diff: bool,
+
+    #[arg(long, default_value_t = sdiff::DEFAULT_VALUE_DIFF_CAP)]
+    value_diff_cap: usize,
 }
 
 #[derive(Debug, clap::Args)]
@@ -123,6 +133,24 @@ struct MergeArgs {
 
     #[arg(long, value_enum)]
     policy: CliMergePolicy,
+}
+
+#[derive(Debug, clap::Args)]
+struct RecipeArgs {
+    #[command(subcommand)]
+    command: RecipeSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RecipeSubcommand {
+    /// Run a declarative recipe file.
+    Run(RecipeRunArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct RecipeRunArgs {
+    #[arg(long)]
+    file: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -216,6 +244,8 @@ fn run() -> i32 {
         Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
         Commands::Profile(args) => run_profile(args, emit_pipeline),
         Commands::Merge(args) => run_merge(args, emit_pipeline),
+        Commands::Recipe(args) => run_recipe(args, emit_pipeline),
+        Commands::Doctor => run_doctor(emit_pipeline),
     }
 }
 
@@ -498,29 +528,26 @@ fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
 }
 
 fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
-    let options = match sdiff::parse_options(
-        sdiff::DEFAULT_VALUE_DIFF_CAP,
-        args.key.as_deref(),
-        &args.ignore_path,
-    ) {
-        Ok(options) => options,
-        Err(error) => {
-            emit_error(
-                "input_usage_error",
-                error.to_string(),
-                json!({
-                    "command": "sdiff",
-                    "key": args.key,
-                    "ignore_path": args.ignore_path,
-                }),
-                3,
-            );
-            if emit_pipeline {
-                emit_pipeline_report(&build_sdiff_pipeline_report(&args, None, None));
+    let options =
+        match sdiff::parse_options(args.value_diff_cap, args.key.as_deref(), &args.ignore_path) {
+            Ok(options) => options,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    error.to_string(),
+                    json!({
+                        "command": "sdiff",
+                        "key": args.key,
+                        "ignore_path": args.ignore_path,
+                    }),
+                    3,
+                );
+                if emit_pipeline {
+                    emit_pipeline_report(&build_sdiff_pipeline_report(&args, None, None));
+                }
+                return 3;
             }
-            return 3;
-        }
-    };
+        };
 
     let left_path = args.left.display().to_string();
     let right_path = args.right.display().to_string();
@@ -621,10 +648,15 @@ fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
             return 3;
         }
     };
+    let success_exit_code = if args.fail_on_diff && report.values.total > 0 {
+        2
+    } else {
+        0
+    };
     let exit_code = match serde_json::to_string(&report) {
         Ok(serialized) => {
             println!("{serialized}");
-            0
+            success_exit_code
         }
         Err(error) => {
             emit_error(
@@ -698,6 +730,111 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     };
 
     if emit_pipeline {
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn run_doctor(emit_pipeline: bool) -> i32 {
+    let response = doctor::run();
+    let exit_code = match response.exit_code {
+        0 | 3 => {
+            if emit_json_stdout(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize doctor response".to_string(),
+                    json!({"command": "doctor"}),
+                    1,
+                );
+                1
+            }
+        }
+        1 => {
+            if emit_json_stderr(&response.payload) {
+                1
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize doctor error".to_string(),
+                    json!({"command": "doctor"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected doctor exit code: {other}"),
+                json!({"command": "doctor"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_doctor_pipeline_report();
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn run_recipe(args: RecipeArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        RecipeSubcommand::Run(run_args) => run_recipe_run(run_args, emit_pipeline),
+    }
+}
+
+fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool) -> i32 {
+    let recipe_format = dataq_io::resolve_input_format(None, Some(args.file.as_path())).ok();
+    let command_args = recipe::RecipeCommandArgs {
+        file: args.file.clone(),
+    };
+    let (response, trace) = recipe::run_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 | 2 => {
+            if emit_json_stdout(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize recipe response".to_string(),
+                    json!({"command": "recipe"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize recipe error".to_string(),
+                    json!({"command": "recipe"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected recipe exit code: {other}"),
+                json!({"command": "recipe"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_recipe_pipeline_report(&args, recipe_format, trace.steps);
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
@@ -865,6 +1002,45 @@ fn build_merge_pipeline_report(
         PipelineInput::new(sources),
         merge::pipeline_steps(),
         merge::deterministic_guards(),
+    )
+}
+
+fn build_doctor_pipeline_report() -> PipelineReport {
+    let mut report = PipelineReport::new(
+        "doctor",
+        PipelineInput::new(Vec::new()),
+        doctor::pipeline_steps(),
+        doctor::deterministic_guards(),
+    );
+    for tool in ["jq", "yq", "mlr"] {
+        report = report.mark_external_tool_used(tool);
+    }
+    report
+}
+
+fn build_recipe_pipeline_report(
+    args: &RecipeRunArgs,
+    recipe_format: Option<Format>,
+    steps: Vec<String>,
+) -> PipelineReport {
+    let step_names = if steps.is_empty() {
+        vec![
+            "load_recipe_file".to_string(),
+            "validate_recipe_schema".to_string(),
+        ]
+    } else {
+        steps
+    };
+
+    PipelineReport::new(
+        "recipe",
+        PipelineInput::new(vec![PipelineInputSource::path(
+            "recipe",
+            args.file.display().to_string(),
+            format_label(recipe_format),
+        )]),
+        step_names,
+        recipe::deterministic_guards(),
     )
 }
 

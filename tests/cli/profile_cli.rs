@@ -27,7 +27,8 @@ fn profile_command_returns_expected_json_for_json_input() {
                     "string": 0,
                     "array": 0,
                     "object": 0
-                }
+                },
+                "numeric_stats": null
             },
             "$[\"id\"]": {
                 "null_ratio": 0.5,
@@ -39,11 +40,68 @@ fn profile_command_returns_expected_json_for_json_input() {
                     "string": 0,
                     "array": 0,
                     "object": 0
+                },
+                "numeric_stats": {
+                    "count": 1,
+                    "min": 1.0,
+                    "max": 1.0,
+                    "mean": 1.0,
+                    "p50": 1.0,
+                    "p95": 1.0
                 }
             }
         }
     });
+    let mut expected = expected;
+    expected["fields"]["$[\"active\"]"]
+        .as_object_mut()
+        .expect("active field object")
+        .remove("numeric_stats");
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn profile_command_numeric_stats_respect_null_mixing_and_non_numeric_fields() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "json"])
+        .write_stdin(r#"[{"score":1,"label":"a"},{"score":null,"label":"b"},{"label":null}]"#)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+
+    assert_eq!(
+        actual["fields"]["$[\"score\"]"]["type_distribution"]["number"],
+        json!(1)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"score\"]"]["type_distribution"]["null"],
+        json!(2)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"score\"]"]["null_ratio"],
+        json!(2.0 / 3.0)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"score\"]"]["numeric_stats"]["count"],
+        json!(1)
+    );
+
+    assert_eq!(
+        actual["fields"]["$[\"label\"]"]["type_distribution"]["string"],
+        json!(2)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"label\"]"]["type_distribution"]["null"],
+        json!(1)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"label\"]"]["numeric_stats"],
+        json!(null)
+    );
 }
 
 #[test]

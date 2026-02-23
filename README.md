@@ -67,6 +67,8 @@ dataq [--emit-pipeline] <command> [options]
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` |
+| `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
+| `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
 
 グローバルオプション:
 
@@ -95,8 +97,14 @@ dataq profile --from json --input out.jsonl
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
 
+# 依存ツール診断
+dataq doctor
+
 # ID で対応付けし、更新時刻は差分対象外
 dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-path '$["updated_at"]'
+
+# CIゲート: 差分があれば終了コード2、値差分詳細は先頭1件まで
+dataq sdiff --left before.jsonl --right after.jsonl --fail-on-diff --value-diff-cap 1
 
 # JSON入力をそのままdataqで検証
 dataq assert --input raw.json --rules rules.yaml
@@ -151,6 +159,8 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 - フィールド制約（`fields.<path>` に `type` / `enum` / `pattern` / `nullable` / `range` を集約）
 - 最小/最大件数
 - `--rules <path>`: dataq ルールで検証（ルールスキーマは厳密。未知キーは入力不正）
+- ルールは `extends` で再利用可能（親相対パス解決、循環/欠損/不正形式は入力不正）
+- `extends` マージ: `required_keys`/`forbid_keys` は和集合、`fields` はパス後勝ち、`count` は最後に定義された値を採用
 - `--schema <path>`: JSON Schema で検証
 - `--normalize <github-actions-jobs|gitlab-ci-jobs>`: 生のCI定義を `yq -> jq -> mlr` の3段でジョブ単位レコードへ正規化してから検証（`yq`/`jq`/`mlr` 必須）
 - `--rules` と `--schema` は同時指定不可（入力不正として終了コード `3`）
@@ -163,6 +173,7 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 `assert` ルール例:
 
 ```yaml
+extends: [./base.rules.yaml]
 required_keys: [id, status]
 forbid_keys: [debug, meta.blocked]
 fields:
@@ -228,8 +239,11 @@ dataq assert \
 - パス表記は曖昧さ回避のため canonical 形式（例: `$["a.b"]`, `$[0]["quote\"key"]`）
 - `--key <canonical-path>` でレコード対応付けキーを指定（例: `$["id"]`）
 - `--ignore-path <canonical-path>` で比較除外パスを複数指定可能
+- `--value-diff-cap <usize>` で `values.items` の最大件数を制御（既定: `100`）
+- `--fail-on-diff` 指定時は `values.total > 0` で終了コード `2`（未指定時は比較成功で `0`）
 - `--key` 利用時に重複キーがある場合は入力不正として終了コード `3`
 - `--ignore-path` 指定時、レポートに `ignored_paths` が出力される
+- `values.total` は実差分件数を維持し、上限超過時のみ `values.truncated=true`
 
 ### 4. `profile`
 
@@ -237,7 +251,18 @@ dataq assert \
 
 - `record_count`: レコード件数
 - `field_count`: フィールドパス件数
-- `fields`: canonical path ごとの集計（`null_ratio`（0.0-1.0）, `unique_count`, `type_distribution`（`null|boolean|number|string|array|object`））
+- `fields`: canonical path ごとの集計
+  - `null_ratio`（0.0-1.0）
+  - `unique_count`
+  - `type_distribution`（`null|boolean|number|string|array|object`）
+  - `numeric_stats`（数値サンプルが1件以上ある場合のみ）
+    - `count`, `min`, `max`, `mean`, `p50`, `p95`
+
+`numeric_stats` の決定性ルール:
+
+- 数値サンプルは JSON number 型のみを対象（null/文字列/真偽値などは対象外）
+- `p50` / `p95` は nearest-rank 方式（`rank = ceil(p * n)`、`index = rank - 1`、0始まり配列で評価）
+- `numeric_stats` の浮動小数は小数点以下6桁へ丸め（`round half away from zero` 相当）
 
 ### 5. `merge`
 
@@ -248,6 +273,49 @@ dataq assert \
 - `--policy deep-merge`: object は再帰マージ、配列は要素インデックス単位で再帰マージ
 - `--policy array-replace`: object は再帰マージ、配列は overlay 側で全置換
 - 出力は JSON 固定（キー順は決定的にソート）
+
+### 6. `doctor`
+
+実行環境で `jq` / `yq` / `mlr` が利用可能かを、固定順 (`jq`, `yq`, `mlr`) で診断。
+
+- 出力は JSON 固定（stdout）
+- 各ツールの診断項目: `name`, `found`, `version`, `executable`, `message`
+- 終了コード:
+  - `0`: 3ツールすべて起動可能
+  - `3`: 1つ以上が欠如または起動不可
+  - `1`: 予期しない内部エラー
+- `--emit-pipeline` 指定時は stderr に診断ステップ (`doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`) を追加出力
+
+### 7. `recipe run`
+
+レシピファイル（YAML/JSON）を読み込み、`steps` を定義順で実行します。
+
+- 実行コマンド: `dataq recipe run --file <path>`
+- レシピスキーマ（MVP）:
+  - `version`: `dataq.recipe.v1`
+  - `steps[*].kind`: `canon | assert | profile | sdiff`
+  - `steps[*].args`: 各 step の引数オブジェクト
+- step 間データは in-memory で受け渡し
+- stdout は実行サマリ JSON（`matched`, `exit_code`, `steps`）を返す
+- `--emit-pipeline` 有効時は recipe 全体と step 実行トレースを stderr JSON へ出力
+
+例:
+
+```yaml
+version: dataq.recipe.v1
+steps:
+  - kind: canon
+    args:
+      input: ./input.json
+      from: json
+  - kind: assert
+    args:
+      rules:
+        required_keys: [id]
+        fields:
+          id:
+            type: integer
+```
 
 ## 設計ドキュメント
 

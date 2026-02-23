@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -97,6 +98,7 @@ pub fn rules_help_payload() -> Value {
         "schema": "dataq.assert.rules.v1",
         "description": "Rule file schema for `dataq assert --rules`",
         "top_level_keys": {
+            "extends": "string | array<string> (optional, parent-relative path)",
             "required_keys": "array<string>",
             "forbid_keys": "array<string>",
             "fields": "object<string, field_rule>",
@@ -117,12 +119,15 @@ pub fn rules_help_payload() -> Value {
         },
         "path_notation": "dot-delimited object path (example: meta.blocked)",
         "constraints": [
+            "extends entries resolve relative to the referencing rules file",
+            "extends references are applied before the current file (current file wins)",
             "fields.<path> must define at least one of type/nullable/enum/pattern/range",
             "count.min must be <= count.max",
             "fields.<path>.range.min must be <= fields.<path>.range.max",
             "unknown keys are rejected"
         ],
         "example": {
+            "extends": ["./base.rules.yaml"],
             "required_keys": ["id", "status"],
             "forbid_keys": ["debug", "meta.blocked"],
             "fields": {
@@ -272,6 +277,123 @@ fn resolve_validation_source(args: &AssertCommandArgs) -> Result<ValidationSourc
 }
 
 fn load_rules(path: &Path) -> Result<AssertRules, CommandError> {
+    let mut stack = Vec::new();
+    let resolved = load_rules_recursive(path, &mut stack)?;
+    Ok(resolved.rules)
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAssertRules {
+    rules: AssertRules,
+    has_count: bool,
+}
+
+fn load_rules_recursive(
+    path: &Path,
+    stack: &mut Vec<PathBuf>,
+) -> Result<ResolvedAssertRules, CommandError> {
+    let (raw_rules, has_count) = load_rules_file(path)?;
+    let canonical_path = path.canonicalize().map_err(|err| {
+        CommandError::input_usage(format!(
+            "failed to canonicalize rules file `{}`: {err}",
+            path.display()
+        ))
+    })?;
+
+    if let Some(cycle_start) = stack
+        .iter()
+        .position(|existing| existing == &canonical_path)
+    {
+        let mut cycle_chain: Vec<String> = stack[cycle_start..]
+            .iter()
+            .map(|entry| entry.display().to_string())
+            .collect();
+        cycle_chain.push(canonical_path.display().to_string());
+        return Err(CommandError::input_usage(format!(
+            "rules extends cycle detected: {}",
+            cycle_chain.join(" -> ")
+        )));
+    }
+
+    stack.push(canonical_path.clone());
+    let result = (|| {
+        let mut merged = ResolvedAssertRules {
+            rules: AssertRules::default(),
+            has_count: false,
+        };
+        if let Some(extends) = raw_rules.extends.clone() {
+            for extends_entry in extends.into_paths() {
+                let extended_path =
+                    resolve_extended_rules_path(&canonical_path, extends_entry.as_str());
+                let extended = load_rules_recursive(extended_path.as_path(), stack)?;
+                merged = merge_resolved_rules(merged, extended);
+            }
+        }
+
+        let current = ResolvedAssertRules {
+            rules: AssertRules {
+                extends: None,
+                required_keys: raw_rules.required_keys,
+                forbid_keys: raw_rules.forbid_keys,
+                fields: raw_rules.fields,
+                count: raw_rules.count,
+            },
+            has_count,
+        };
+        Ok(merge_resolved_rules(merged, current))
+    })();
+    stack.pop();
+    result
+}
+
+fn resolve_extended_rules_path(current_file_path: &Path, extends_entry: &str) -> PathBuf {
+    let extends_path = Path::new(extends_entry);
+    if extends_path.is_absolute() {
+        extends_path.to_path_buf()
+    } else {
+        current_file_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(extends_path)
+    }
+}
+
+fn merge_resolved_rules(
+    base: ResolvedAssertRules,
+    overlay: ResolvedAssertRules,
+) -> ResolvedAssertRules {
+    let required_keys = merge_unique_paths(base.rules.required_keys, overlay.rules.required_keys);
+    let forbid_keys = merge_unique_paths(base.rules.forbid_keys, overlay.rules.forbid_keys);
+    let mut fields = base.rules.fields;
+    for (path, rule) in overlay.rules.fields {
+        fields.insert(path, rule);
+    }
+    let count = if overlay.has_count {
+        overlay.rules.count
+    } else {
+        base.rules.count
+    };
+
+    ResolvedAssertRules {
+        rules: AssertRules {
+            extends: None,
+            required_keys,
+            forbid_keys,
+            fields,
+            count,
+        },
+        has_count: base.has_count || overlay.has_count,
+    }
+}
+
+fn merge_unique_paths(left: Vec<String>, right: Vec<String>) -> Vec<String> {
+    let mut merged = BTreeSet::new();
+    merged.extend(left);
+    merged.extend(right);
+    merged.into_iter().collect()
+}
+
+fn load_rules_file(path: &Path) -> Result<(AssertRules, bool), CommandError> {
     let format = io::resolve_input_format(None, Some(path)).map_err(|err| {
         CommandError::input_usage(format!(
             "unable to resolve rules format from `{}`: {err}",
@@ -291,8 +413,13 @@ fn load_rules(path: &Path) -> Result<AssertRules, CommandError> {
         ));
     }
     let rules_value = values.into_iter().next().unwrap_or(Value::Null);
-    serde_json::from_value(rules_value)
-        .map_err(|err| CommandError::input_usage(format!("invalid rules schema: {err}")))
+    let has_count = rules_value
+        .as_object()
+        .map(|object| object.contains_key("count"))
+        .unwrap_or(false);
+    let rules: AssertRules = serde_json::from_value(rules_value)
+        .map_err(|err| CommandError::input_usage(format!("invalid rules schema: {err}")))?;
+    Ok((rules, has_count))
 }
 
 fn load_schema(path: &Path) -> Result<Value, CommandError> {

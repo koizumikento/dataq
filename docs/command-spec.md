@@ -15,6 +15,25 @@ dataq [--emit-pipeline] <command> [options]
 - `sdiff`: 2データセットの構造差分を出力
 - `profile`: フィールド統計を決定的JSONで出力
 - `merge`: base + overlays をポリシーマージ
+- `doctor`: `jq` / `yq` / `mlr` の実行前診断
+- `recipe run`: 宣言的レシピを定義順に実行
+
+## `profile` 出力契約
+
+- 既存キーは固定: `record_count`, `field_count`, `fields`, `type_distribution`
+- `fields.<canonical-path>.numeric_stats` は後方互換な追加キー（数値サンプルが存在するときのみ出力）
+- `numeric_stats` スキーマ:
+  - `count`
+  - `min`
+  - `max`
+  - `mean`
+  - `p50`
+  - `p95`
+- 数値サンプル抽出対象は JSON number のみ
+- パーセンタイル規則は nearest-rank で固定:
+  - `rank = ceil(p * n)`（`p` は 0.50 / 0.95）
+  - `index = rank - 1`（0始まり）
+- `numeric_stats` の浮動小数は小数点以下6桁に丸めて出力
 
 ## このCLIの位置づけ
 
@@ -49,8 +68,35 @@ dataq [--emit-pipeline] <command> [options]
 
 - `0`: 成功
 - `2`: 検証失敗（期待仕様に不一致）
-- `3`: 入力不正（フォーマット不正、必須引数不足など）
+- `3`: 入力不正（フォーマット不正、必須引数不足など）または `doctor` の必須ツール不足/起動不可
 - `1`: その他実行時エラー
+
+## `doctor` コマンド契約（MVP）
+
+- コマンド: `dataq doctor`
+- 出力: JSON（stdout）
+- 診断対象ツール順: `jq`, `yq`, `mlr`（固定順）
+- 各ツールの出力項目:
+  - `name`: ツール名
+  - `found`: PATH上に存在するか
+  - `version`: 取得できたバージョン文字列（取得不可時は `null`）
+  - `executable`: `--version` で起動できたか
+  - `message`: 判定理由（失敗時は対処案内を含む）
+- 終了コード:
+  - `0`: 全ツール起動可能
+  - `3`: 1つ以上が欠如または起動不可
+  - `1`: 予期しない内部エラー
+- `--emit-pipeline` 指定時の `steps`: `doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`
+
+### `sdiff` のCIゲート拡張
+
+- `--fail-on-diff`（既定: `false`）:
+  比較処理が成功し、かつ `values.total > 0` のとき終了コード `2` で終了
+- `--value-diff-cap <usize>`（既定: `100`）:
+  レポートの `values.items` 出力件数上限を制御
+- レポートJSON契約（`counts`, `keys`, `ignored_paths`, `values`）は不変
+- `values.total` は実差分件数を維持し、上限超過時のみ `values.truncated=true`
+- `--emit-pipeline` のstderr JSON出力契約は `sdiff` 拡張後も不変
 
 ### `--emit-pipeline`（診断出力）
 
@@ -68,6 +114,7 @@ pipeline JSON schema:
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
 - `deterministic_guards`: 適用した決定性ガード
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
+- `recipe run` では `steps` に `load_recipe_file`, `validate_recipe_schema`, `execute_step_<index>_<kind>` が入る
 
 ```bash
 cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.json
@@ -77,6 +124,20 @@ cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.jso
 
 - `dataq` は外部ツールを運用上の依存として扱い、CLI契約（JSON/終了コード）をRust層で統一する
 - ユーザー入力はシェル文字列展開せず、外部ツール連携時も明示的な引数配列で扱う
+
+## `recipe run` MVP スキーマ
+
+- 実行形式: `dataq recipe run --file <path>`
+- レシピファイル形式: 拡張子解決で JSON / YAML をサポート
+- `version`: `dataq.recipe.v1` 固定
+- `steps`: 実行順配列（定義順で処理）
+- `steps[*].kind`: `canon | assert | profile | sdiff`
+- `steps[*].args`: 各 step の引数オブジェクト
+- step 間データ受け渡し: in-memory
+- サマリ出力: stdout JSON に `matched`, `exit_code`, `steps`
+- 異常時契約:
+  - スキーマ不正 / 未知step / 引数不正は exit `3`
+  - `assert` / `sdiff` の不一致は exit `2`
 
 ## 関連ドキュメント
 
