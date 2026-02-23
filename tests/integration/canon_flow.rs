@@ -2,6 +2,7 @@ use std::io::Cursor;
 
 use dataq::cmd::canon::{CanonCommandOptions, run};
 use dataq::io::Format;
+use predicates::prelude::predicate;
 
 #[test]
 fn canon_flow_jsonl_to_jsonl_success() {
@@ -88,4 +89,35 @@ fn canon_flow_preserves_fractional_seconds_and_precision_sensitive_numbers() {
             "ts": "2026-02-23T11:15:30.123456Z"
         })
     );
+}
+
+#[test]
+fn canon_cli_autodetects_stdin_jsonl_when_from_omitted() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["canon", "--to", "jsonl"])
+        .write_stdin(
+            r#"{"z":"3","a":"true"}
+{"z":"2","a":"false"}
+"#,
+        )
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines, vec![r#"{"a":true,"z":3}"#, r#"{"a":false,"z":2}"#]);
+}
+
+#[test]
+fn canon_cli_stdin_autodetect_failure_returns_exit_three() {
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["canon", "--to", "jsonl"])
+        .write_stdin(vec![0xff, 0xfe, 0xfd])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""))
+        .stderr(predicate::str::contains(
+            "could not autodetect stdin input format",
+        ));
 }

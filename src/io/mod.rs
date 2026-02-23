@@ -57,6 +57,10 @@ pub fn resolve_input_format(
     resolve_format(explicit, input, "input")
 }
 
+pub fn autodetect_stdin_input_format(input: &[u8]) -> Result<Format, IoError> {
+    reader::autodetect_stdin_format(input)
+}
+
 pub fn resolve_output_format(
     explicit: Option<Format>,
     output: Option<&Path>,

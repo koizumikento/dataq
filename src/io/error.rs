@@ -11,6 +11,9 @@ pub enum IoError {
     #[error("unsupported {kind} file extension: {path}")]
     UnsupportedPathExtension { kind: &'static str, path: String },
 
+    #[error("could not autodetect stdin input format; tried JSONL -> JSON -> YAML -> CSV")]
+    StdinAutodetectFailed,
+
     #[error("json parse error: {0}")]
     JsonParse(#[from] serde_json::Error),
 
