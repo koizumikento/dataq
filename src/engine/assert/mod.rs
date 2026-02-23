@@ -1,3 +1,4 @@
+pub mod schema;
 pub mod validator;
 
 use serde_json::Value;
@@ -12,4 +13,12 @@ pub fn execute_assert(
     rules: &AssertRules,
 ) -> Result<AssertReport, AssertValidationError> {
     validator::validate(values, rules)
+}
+
+/// Executes assert validation against loaded input values and JSON Schema.
+pub fn execute_assert_with_schema(
+    values: &[Value],
+    schema: &Value,
+) -> Result<AssertReport, AssertValidationError> {
+    self::schema::validate(values, schema)
 }
