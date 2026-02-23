@@ -5,10 +5,12 @@ use std::process;
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
-use dataq::cmd::{r#assert, canon, doctor, merge, profile, recipe, sdiff};
+use dataq::cmd::{aggregate, r#assert, canon, doctor, join, merge, profile, recipe, sdiff};
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
+use dataq::engine::aggregate::AggregateMetric;
 use dataq::engine::canon::canonicalize_value;
+use dataq::engine::join::JoinHow;
 use dataq::engine::merge::MergePolicy;
 use dataq::io::format::jsonl::JsonlStreamError;
 use dataq::io::{self as dataq_io, Format, IoError};
@@ -39,6 +41,10 @@ enum Commands {
     Sdiff(SdiffArgs),
     /// Generate deterministic field profile statistics.
     Profile(ProfileArgs),
+    /// Join two datasets by key using deterministic JSON output.
+    Join(JoinArgs),
+    /// Aggregate grouped metrics with deterministic JSON output.
+    Aggregate(AggregateArgs),
     /// Merge base and overlays with a deterministic merge policy.
     Merge(MergeArgs),
     /// Execute a declarative deterministic recipe.
@@ -138,6 +144,36 @@ struct MergeArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct JoinArgs {
+    #[arg(long)]
+    left: PathBuf,
+
+    #[arg(long)]
+    right: PathBuf,
+
+    #[arg(long)]
+    on: String,
+
+    #[arg(long, value_enum)]
+    how: CliJoinHow,
+}
+
+#[derive(Debug, clap::Args)]
+struct AggregateArgs {
+    #[arg(long)]
+    input: PathBuf,
+
+    #[arg(long)]
+    group_by: String,
+
+    #[arg(long, value_enum)]
+    metric: CliAggregateMetric,
+
+    #[arg(long)]
+    target: String,
+}
+
+#[derive(Debug, clap::Args)]
 struct RecipeArgs {
     #[command(subcommand)]
     command: RecipeSubcommand,
@@ -177,6 +213,19 @@ enum CliMergePolicy {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliJoinHow {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliAggregateMetric {
+    Count,
+    Sum,
+    Avg,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliAssertNormalizeMode {
     GithubActionsJobs,
     GitlabCiJobs,
@@ -208,6 +257,25 @@ impl From<CliMergePolicy> for MergePolicy {
             CliMergePolicy::LastWins => Self::LastWins,
             CliMergePolicy::DeepMerge => Self::DeepMerge,
             CliMergePolicy::ArrayReplace => Self::ArrayReplace,
+        }
+    }
+}
+
+impl From<CliJoinHow> for JoinHow {
+    fn from(value: CliJoinHow) -> Self {
+        match value {
+            CliJoinHow::Inner => Self::Inner,
+            CliJoinHow::Left => Self::Left,
+        }
+    }
+}
+
+impl From<CliAggregateMetric> for AggregateMetric {
+    fn from(value: CliAggregateMetric) -> Self {
+        match value {
+            CliAggregateMetric::Count => Self::Count,
+            CliAggregateMetric::Sum => Self::Sum,
+            CliAggregateMetric::Avg => Self::Avg,
         }
     }
 }
@@ -245,6 +313,8 @@ fn run() -> i32 {
         Commands::Assert(args) => run_assert(args, emit_pipeline),
         Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
         Commands::Profile(args) => run_profile(args, emit_pipeline),
+        Commands::Join(args) => run_join(args, emit_pipeline),
+        Commands::Aggregate(args) => run_aggregate(args, emit_pipeline),
         Commands::Merge(args) => run_merge(args, emit_pipeline),
         Commands::Recipe(args) => run_recipe(args, emit_pipeline),
         Commands::Doctor => run_doctor(emit_pipeline),
@@ -631,6 +701,117 @@ fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
     };
 
     if emit_pipeline {
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn run_join(args: JoinArgs, emit_pipeline: bool) -> i32 {
+    let left_format = dataq_io::resolve_input_format(None, Some(args.left.as_path())).ok();
+    let right_format = dataq_io::resolve_input_format(None, Some(args.right.as_path())).ok();
+    let command_args = join::JoinCommandArgs {
+        left: args.left.clone(),
+        right: args.right.clone(),
+        on: args.on.clone(),
+        how: args.how.into(),
+    };
+    let (response, trace) = join::run_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize join output".to_string(),
+                    json!({"command": "join"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 => {
+            if emit_json_stderr(&response.payload) {
+                3
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize join error".to_string(),
+                    json!({"command": "join"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected join exit code: {other}"),
+                json!({"command": "join"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_join_pipeline_report(&args, left_format, right_format, &trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn run_aggregate(args: AggregateArgs, emit_pipeline: bool) -> i32 {
+    let input_format = dataq_io::resolve_input_format(None, Some(args.input.as_path())).ok();
+    let command_args = aggregate::AggregateCommandArgs {
+        input: args.input.clone(),
+        group_by: args.group_by.clone(),
+        metric: args.metric.into(),
+        target: args.target.clone(),
+    };
+    let (response, trace) = aggregate::run_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize aggregate output".to_string(),
+                    json!({"command": "aggregate"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 => {
+            if emit_json_stderr(&response.payload) {
+                3
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize aggregate error".to_string(),
+                    json!({"command": "aggregate"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected aggregate exit code: {other}"),
+                json!({"command": "aggregate"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_aggregate_pipeline_report(&args, input_format, &trace);
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
@@ -1277,6 +1458,56 @@ fn build_merge_pipeline_report(
         merge::pipeline_steps(),
         merge::deterministic_guards(),
     )
+}
+
+fn build_join_pipeline_report(
+    args: &JoinArgs,
+    left_format: Option<Format>,
+    right_format: Option<Format>,
+    trace: &join::JoinPipelineTrace,
+) -> PipelineReport {
+    let mut report = PipelineReport::new(
+        "join",
+        PipelineInput::new(vec![
+            PipelineInputSource::path(
+                "left",
+                args.left.display().to_string(),
+                format_label(left_format),
+            ),
+            PipelineInputSource::path(
+                "right",
+                args.right.display().to_string(),
+                format_label(right_format),
+            ),
+        ]),
+        join::pipeline_steps(),
+        join::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
+fn build_aggregate_pipeline_report(
+    args: &AggregateArgs,
+    input_format: Option<Format>,
+    trace: &aggregate::AggregatePipelineTrace,
+) -> PipelineReport {
+    let mut report = PipelineReport::new(
+        "aggregate",
+        PipelineInput::new(vec![PipelineInputSource::path(
+            "input",
+            args.input.display().to_string(),
+            format_label(input_format),
+        )]),
+        aggregate::pipeline_steps(),
+        aggregate::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
 fn build_doctor_pipeline_report() -> PipelineReport {

@@ -1,6 +1,8 @@
+pub mod aggregate;
 pub mod assert;
 pub mod canon;
 pub mod doctor;
+pub mod join;
 pub mod merge;
 pub mod profile;
 pub mod recipe;
