@@ -70,6 +70,8 @@ pub struct PipelineReport {
     pub external_tools: Vec<ExternalToolUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage_diagnostics: Option<Vec<PipelineStageDiagnostic>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<PipelineFingerprint>,
     pub deterministic_guards: Vec<String>,
 }
 
@@ -86,6 +88,7 @@ impl PipelineReport {
             steps,
             external_tools: ExternalToolUsage::default_set(),
             stage_diagnostics: None,
+            fingerprint: None,
             deterministic_guards,
         }
     }
@@ -110,6 +113,22 @@ impl PipelineReport {
         }
         self
     }
+
+    pub fn with_fingerprint(mut self, fingerprint: PipelineFingerprint) -> Self {
+        self.fingerprint = Some(fingerprint);
+        self
+    }
+}
+
+/// Deterministic execution fingerprint emitted in pipeline diagnostics.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PipelineFingerprint {
+    pub command: String,
+    pub args_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_hash: Option<String>,
+    pub tool_versions: BTreeMap<String, String>,
+    pub dataq_version: String,
 }
 
 /// Input-source descriptors used in pipeline diagnostics.

@@ -133,6 +133,37 @@ fn doctor_emit_pipeline_writes_doctor_steps_to_stderr() {
     assert_eq!(tools[2]["used"], json!(true));
 }
 
+#[test]
+fn doctor_emit_pipeline_fingerprint_reuses_probe_versions() {
+    let dir = tempdir().expect("tempdir");
+    let jq_counter = dir.path().join("jq.counter");
+    let jq_script = format!(
+        "#!/bin/sh\ncount_file='{}'\ncount=0\nif [ -f \"$count_file\" ]; then count=$(cat \"$count_file\"); fi\ncount=$((count + 1))\necho \"$count\" > \"$count_file\"\necho \"jq-v$count\"\n",
+        jq_counter.display()
+    );
+    write_exec_script(&dir.path().join("jq"), &jq_script);
+    write_exec_script(&dir.path().join("yq"), "#!/bin/sh\necho 'yq-v1'\n");
+    write_exec_script(&dir.path().join("mlr"), "#!/bin/sh\necho 'mlr-v1'\n");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", dir.path())
+        .args(["--emit-pipeline", "doctor"])
+        .output()
+        .expect("run doctor");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    let tools = stdout_json["tools"].as_array().expect("tools array");
+    assert_eq!(tools[0]["name"], json!("jq"));
+    assert_eq!(tools[0]["version"], json!("jq-v1"));
+
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"]["jq"],
+        json!("jq-v1")
+    );
+}
+
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
     let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
     let line = text

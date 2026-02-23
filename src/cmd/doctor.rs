@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,12 @@ use std::ffi::OsString;
 pub struct DoctorCommandResponse {
     pub exit_code: i32,
     pub payload: Value,
+}
+
+/// Trace details from doctor probe execution used by pipeline fingerprinting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DoctorPipelineTrace {
+    pub tool_versions: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -47,15 +54,31 @@ const TOOL_SPECS: [ToolSpec; 3] = [
 ];
 
 pub fn run() -> DoctorCommandResponse {
+    run_with_trace().0
+}
+
+pub fn run_with_trace() -> (DoctorCommandResponse, DoctorPipelineTrace) {
     let reports: Vec<DoctorToolReport> = TOOL_SPECS.iter().map(diagnose_tool).collect();
     let all_executable = reports.iter().all(|report| report.executable);
+    let tool_versions = reports
+        .iter()
+        .filter_map(|report| {
+            report
+                .version
+                .as_ref()
+                .map(|version| (report.name.clone(), version.clone()))
+        })
+        .collect();
 
-    DoctorCommandResponse {
-        exit_code: if all_executable { 0 } else { 3 },
-        payload: json!({
-            "tools": reports,
-        }),
-    }
+    (
+        DoctorCommandResponse {
+            exit_code: if all_executable { 0 } else { 3 },
+            payload: json!({
+                "tools": reports,
+            }),
+        },
+        DoctorPipelineTrace { tool_versions },
+    )
 }
 
 /// Ordered pipeline-step names used for `--emit-pipeline` diagnostics.
