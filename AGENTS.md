@@ -31,6 +31,13 @@ Core goals:
 - Prefer integrating by merging the split feature branches (`git merge`) into the target branch.
 - Avoid integration via cherry-pick aggregation as the default path.
 - If a temporary integration branch is needed for validation, merge feature branches into it, then merge that branch to `main`.
+- After integration is complete and `main` is green, clean up temporary worktrees and branches.
+- Cleanup order:
+  - remove feature worktrees (`git worktree remove <path>`)
+  - prune stale worktree metadata (`git worktree prune`)
+  - delete merged local feature/integration branches (`git branch -d <branch>`; use `-D` only when necessary)
+  - delete remote temporary branches when no longer needed (`git push origin --delete <branch>`)
+- Keep long-lived branches (`main` and active release branches) intact during cleanup.
 
 ## Skill usage
 
