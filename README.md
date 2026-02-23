@@ -48,6 +48,17 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - 値差分（パス単位）
 - パス表記は曖昧さ回避のため canonical 形式（例: `$["a.b"]`, `$[0]["quote\"key"]`）
 
+### 4. `profile`
+
+データ品質の概要を決定的な JSON で返す。
+
+- `record_count`: レコード件数
+- `field_count`: フィールドパス件数
+- `fields`: canonical path ごとの集計
+  - `null_ratio`（0.0-1.0）
+  - `unique_count`
+  - `type_distribution`（`null|boolean|number|string|array|object`）
+
 ## CLI I/O 契約
 
 ### 出力モード
@@ -73,6 +84,9 @@ dataq assert --input out.jsonl --rules rules.yaml
 
 # 差分確認
 dataq sdiff --left before.jsonl --right after.jsonl
+
+# 品質プロファイル
+dataq profile --from json --input out.jsonl
 ```
 
 ## Rust 実装メモ

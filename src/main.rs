@@ -5,7 +5,7 @@ use std::process;
 
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
-use dataq::cmd::{r#assert, canon, sdiff};
+use dataq::cmd::{r#assert, canon, profile, sdiff};
 use dataq::domain::error::CanonError;
 use dataq::io::{self as dataq_io, Format, IoError};
 use serde::Serialize;
@@ -30,6 +30,8 @@ enum Commands {
     Assert(AssertArgs),
     /// Compare structural differences across two datasets.
     Sdiff(SdiffArgs),
+    /// Generate deterministic field profile statistics.
+    Profile(ProfileArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -66,6 +68,15 @@ struct SdiffArgs {
 
     #[arg(long)]
     right: PathBuf,
+}
+
+#[derive(Debug, clap::Args)]
+struct ProfileArgs {
+    #[arg(long)]
+    input: Option<PathBuf>,
+
+    #[arg(long, value_enum)]
+    from: CliInputFormat,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -124,6 +135,7 @@ fn run() -> i32 {
         Commands::Canon(args) => run_canon(args),
         Commands::Assert(args) => run_assert(args),
         Commands::Sdiff(args) => run_sdiff(args),
+        Commands::Profile(args) => run_profile(args),
     }
 }
 
@@ -310,6 +322,54 @@ fn run_sdiff(args: SdiffArgs) -> i32 {
                 "internal_error",
                 format!("failed to serialize diff report: {error}"),
                 json!({"command": "sdiff"}),
+                1,
+            );
+            1
+        }
+    }
+}
+
+fn run_profile(args: ProfileArgs) -> i32 {
+    let command_args = profile::ProfileCommandArgs {
+        input: args.input,
+        from: Some(args.from.into()),
+    };
+
+    let stdin = io::stdin();
+    let response = profile::run_with_stdin(&command_args, stdin.lock());
+
+    match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize profile response".to_string(),
+                    json!({"command": "profile"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize profile error".to_string(),
+                    json!({"command": "profile"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected profile exit code: {other}"),
+                json!({"command": "profile"}),
                 1,
             );
             1
