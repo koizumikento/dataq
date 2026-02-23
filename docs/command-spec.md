@@ -92,6 +92,7 @@ dataq [--emit-pipeline] <command> [options]
   - `policy` は `last-wins | deep-merge | array-replace`
 - ポリシー解決順:
   - 現在マージ中の値パスに対して、最長一致する `--policy-path` を適用
+  - 最長一致が同一深さで複数ある場合は、後ろに指定した `--policy-path` を優先
   - 一致がなければ `--policy` を適用
 - 入力不正:
   - `--policy-path` の path が非canonical、または policy が未知値の場合は exit `3`

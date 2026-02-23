@@ -662,9 +662,8 @@ fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
         base: args.base.clone(),
         overlays: args.overlay.clone(),
         policy: args.policy.into(),
-        policy_paths: args.policy_path.clone(),
     };
-    let response = merge::run(&command_args);
+    let response = merge::run_with_policy_paths(&command_args, &args.policy_path);
 
     let exit_code = match response.exit_code {
         0 => {

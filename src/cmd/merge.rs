@@ -14,7 +14,6 @@ pub struct MergeCommandArgs {
     pub base: PathBuf,
     pub overlays: Vec<PathBuf>,
     pub policy: MergePolicy,
-    pub policy_paths: Vec<String>,
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -25,7 +24,15 @@ pub struct MergeCommandResponse {
 }
 
 pub fn run(args: &MergeCommandArgs) -> MergeCommandResponse {
-    match execute(args) {
+    run_with_policy_paths(args, &[])
+}
+
+/// Runs merge command with optional path-scoped policy overrides.
+pub fn run_with_policy_paths(
+    args: &MergeCommandArgs,
+    policy_paths: &[String],
+) -> MergeCommandResponse {
+    match execute(args, policy_paths) {
         Ok(merged) => MergeCommandResponse {
             exit_code: 0,
             payload: merged,
@@ -40,7 +47,7 @@ pub fn run(args: &MergeCommandArgs) -> MergeCommandResponse {
     }
 }
 
-fn execute(args: &MergeCommandArgs) -> Result<Value, CommandError> {
+fn execute(args: &MergeCommandArgs, policy_paths: &[String]) -> Result<Value, CommandError> {
     if args.overlays.is_empty() {
         return Err(CommandError::InputUsage(
             "at least one --overlay is required".to_string(),
@@ -52,7 +59,7 @@ fn execute(args: &MergeCommandArgs) -> Result<Value, CommandError> {
     for overlay_path in &args.overlays {
         overlays.push(load_document(overlay_path, "overlay")?);
     }
-    let path_policies = parse_policy_paths(&args.policy_paths)?;
+    let path_policies = parse_policy_paths(policy_paths)?;
 
     Ok(merge::merge_with_path_policies(
         &base,
@@ -156,7 +163,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::cmd::merge::{MergeCommandArgs, run};
+    use crate::cmd::merge::{MergeCommandArgs, run, run_with_policy_paths};
     use crate::engine::merge::MergePolicy;
 
     #[test]
@@ -179,7 +186,6 @@ cfg:
             base,
             overlays: vec![overlay],
             policy: MergePolicy::ArrayReplace,
-            policy_paths: Vec::new(),
         };
 
         let response = run(&args);
@@ -202,7 +208,6 @@ cfg:
             base,
             overlays: vec![overlay],
             policy: MergePolicy::LastWins,
-            policy_paths: Vec::new(),
         };
 
         let response = run(&args);
@@ -222,7 +227,6 @@ cfg:
             base,
             overlays: vec![overlay],
             policy: MergePolicy::DeepMerge,
-            policy_paths: Vec::new(),
         };
 
         let response = run(&args);
@@ -240,7 +244,6 @@ cfg:
             base,
             overlays: Vec::new(),
             policy: MergePolicy::DeepMerge,
-            policy_paths: Vec::new(),
         };
 
         let response = run(&args);
@@ -257,14 +260,24 @@ cfg:
         std::fs::write(&overlay, "{}").expect("write overlay");
 
         let args = MergeCommandArgs {
-            base,
-            overlays: vec![overlay],
+            base: base.clone(),
+            overlays: vec![overlay.clone()],
             policy: MergePolicy::DeepMerge,
-            policy_paths: vec!["$[\"cfg\"]=bad-policy".to_string()],
         };
+        let invalid_policy_response =
+            run_with_policy_paths(&args, &["$[\"cfg\"]=bad-policy".to_string()]);
+        assert_eq!(invalid_policy_response.exit_code, 3);
+        assert_eq!(
+            invalid_policy_response.payload["error"],
+            json!("input_usage_error")
+        );
 
-        let response = run(&args);
-        assert_eq!(response.exit_code, 3);
-        assert_eq!(response.payload["error"], json!("input_usage_error"));
+        let invalid_path_response =
+            run_with_policy_paths(&args, &["$[cfg]=deep-merge".to_string()]);
+        assert_eq!(invalid_path_response.exit_code, 3);
+        assert_eq!(
+            invalid_path_response.payload["error"],
+            json!("input_usage_error")
+        );
     }
 }

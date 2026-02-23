@@ -366,4 +366,41 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn equal_depth_path_policy_uses_last_definition() {
+        let base = json!({
+            "cfg": {
+                "items": [{"left": 1}, 2]
+            }
+        });
+        let overlays = vec![json!({
+            "cfg": {
+                "items": [{"right": 2}]
+            }
+        })];
+        let path_policies = vec![
+            PathMergePolicy {
+                path: ValuePath::parse_canonical(r#"$["cfg"]["items"]"#).expect("parse path"),
+                policy: MergePolicy::ArrayReplace,
+            },
+            PathMergePolicy {
+                path: ValuePath::parse_canonical(r#"$["cfg"]["items"]"#)
+                    .expect("parse same-depth path"),
+                policy: MergePolicy::DeepMerge,
+            },
+        ];
+
+        let actual =
+            merge_with_path_policies(&base, &overlays, MergePolicy::DeepMerge, &path_policies);
+
+        assert_eq!(
+            actual,
+            json!({
+                "cfg": {
+                    "items": [{"left": 1, "right": 2}, 2]
+                }
+            })
+        );
+    }
 }

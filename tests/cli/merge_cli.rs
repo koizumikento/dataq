@@ -1,6 +1,6 @@
 use std::fs;
 
-use dataq::cmd::merge::{MergeCommandArgs, run};
+use dataq::cmd::merge::{MergeCommandArgs, run, run_with_policy_paths};
 use dataq::engine::merge::MergePolicy;
 use predicates::prelude::predicate;
 use serde_json::json;
@@ -27,19 +27,16 @@ fn merge_command_policies_produce_expected_differences() {
         base: base.clone(),
         overlays: vec![overlay.clone()],
         policy: MergePolicy::LastWins,
-        policy_paths: Vec::new(),
     });
     let deep = run(&MergeCommandArgs {
         base: base.clone(),
         overlays: vec![overlay.clone()],
         policy: MergePolicy::DeepMerge,
-        policy_paths: Vec::new(),
     });
     let replace = run(&MergeCommandArgs {
         base,
         overlays: vec![overlay],
         policy: MergePolicy::ArrayReplace,
-        policy_paths: Vec::new(),
     });
 
     assert_eq!(last.exit_code, 0);
@@ -120,12 +117,14 @@ fn policy_path_applies_to_subtree_only() {
     )
     .expect("write overlay");
 
-    let response = run(&MergeCommandArgs {
-        base,
-        overlays: vec![overlay],
-        policy: MergePolicy::DeepMerge,
-        policy_paths: vec![r#"$["cfg"]["items"]=array-replace"#.to_string()],
-    });
+    let response = run_with_policy_paths(
+        &MergeCommandArgs {
+            base,
+            overlays: vec![overlay],
+            policy: MergePolicy::DeepMerge,
+        },
+        &[r#"$["cfg"]["items"]=array-replace"#.to_string()],
+    );
 
     assert_eq!(response.exit_code, 0);
     assert_eq!(
@@ -140,6 +139,46 @@ fn policy_path_applies_to_subtree_only() {
 }
 
 #[test]
+fn policy_path_same_depth_uses_last_definition() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("base.json");
+    let overlay = dir.path().join("overlay.json");
+    fs::write(
+        &base,
+        r#"{"cfg":{"items":[{"left":1},2],"obj":{"left":1}}}"#,
+    )
+    .expect("write base");
+    fs::write(
+        &overlay,
+        r#"{"cfg":{"items":[{"right":2}],"obj":{"right":2}}}"#,
+    )
+    .expect("write overlay");
+
+    let response = run_with_policy_paths(
+        &MergeCommandArgs {
+            base,
+            overlays: vec![overlay],
+            policy: MergePolicy::DeepMerge,
+        },
+        &[
+            r#"$["cfg"]["items"]=array-replace"#.to_string(),
+            r#"$["cfg"]["items"]=deep-merge"#.to_string(),
+        ],
+    );
+
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(
+        response.payload,
+        json!({
+            "cfg": {
+                "items": [{"left": 1, "right": 2}, 2],
+                "obj": {"left": 1, "right": 2}
+            }
+        })
+    );
+}
+
+#[test]
 fn invalid_policy_path_definition_returns_exit_code_three() {
     let dir = tempdir().expect("tempdir");
     let base = dir.path().join("base.json");
@@ -147,21 +186,16 @@ fn invalid_policy_path_definition_returns_exit_code_three() {
     fs::write(&base, "{}").expect("write base");
     fs::write(&overlay, "{}").expect("write overlay");
 
-    let invalid_path = run(&MergeCommandArgs {
-        base: base.clone(),
-        overlays: vec![overlay.clone()],
-        policy: MergePolicy::DeepMerge,
-        policy_paths: vec![r#"$[cfg]=deep-merge"#.to_string()],
-    });
-    assert_eq!(invalid_path.exit_code, 3);
-    assert_eq!(invalid_path.payload["error"], json!("input_usage_error"));
-
-    let invalid_policy = run(&MergeCommandArgs {
+    let args = MergeCommandArgs {
         base,
         overlays: vec![overlay],
         policy: MergePolicy::DeepMerge,
-        policy_paths: vec![r#"$["cfg"]=not-a-policy"#.to_string()],
-    });
+    };
+    let invalid_path = run_with_policy_paths(&args, &[r#"$[cfg]=deep-merge"#.to_string()]);
+    assert_eq!(invalid_path.exit_code, 3);
+    assert_eq!(invalid_path.payload["error"], json!("input_usage_error"));
+
+    let invalid_policy = run_with_policy_paths(&args, &[r#"$["cfg"]=not-a-policy"#.to_string()]);
     assert_eq!(invalid_policy.exit_code, 3);
     assert_eq!(invalid_policy.payload["error"], json!("input_usage_error"));
 }

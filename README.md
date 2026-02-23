@@ -316,7 +316,7 @@ dataq assert \
 - `--policy array-replace`: object は再帰マージ、配列は overlay 側で全置換
 - `--policy-path <canonical-path=policy>`（複数指定可）で subtree ごとのポリシーを上書き
   - 例: `--policy-path '$["spec"]["containers"]=array-replace'`
-  - 解決順: 最長一致する `--policy-path` を優先し、一致なしは `--policy` を適用
+  - 解決順: 最長一致する `--policy-path` を優先し、同一深さの一致は後ろに指定した定義を優先。一致なしは `--policy` を適用
 - 出力は JSON 固定（キー順は決定的にソート）
 
 ### 8. `doctor`
