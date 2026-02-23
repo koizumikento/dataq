@@ -24,6 +24,25 @@ pub struct AssertCommandResponse {
     pub payload: Value,
 }
 
+/// Ordered pipeline-step names used for `--emit-pipeline` diagnostics.
+pub fn pipeline_steps() -> Vec<String> {
+    vec![
+        "load_rules".to_string(),
+        "resolve_input_format".to_string(),
+        "read_input_values".to_string(),
+        "validate_assert_rules".to_string(),
+    ]
+}
+
+/// Determinism guards applied by the `assert` command.
+pub fn deterministic_guards() -> Vec<String> {
+    vec![
+        "rust_native_execution".to_string(),
+        "no_shell_interpolation_for_user_input".to_string(),
+        "rules_schema_deny_unknown_fields".to_string(),
+    ]
+}
+
 pub fn run_with_stdin<R: Read>(args: &AssertCommandArgs, stdin: R) -> AssertCommandResponse {
     match execute(args, stdin) {
         Ok(report) => report_response(report),

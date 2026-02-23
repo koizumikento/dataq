@@ -62,6 +62,29 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - `3`: 入力不正（フォーマット不正、必須引数不足など）
 - `1`: その他実行時エラー
 
+### `--emit-pipeline`（診断出力）
+
+- グローバル引数として利用可能: `dataq --emit-pipeline <subcommand> ...`
+- サブコマンド側でも利用可能: `dataq <subcommand> ... --emit-pipeline`
+- 有効時は stderr に pipeline JSON を1行追加出力
+- 本処理の stdout は従来どおり（既存出力互換）
+
+pipeline JSON schema:
+
+- `command`: 実行サブコマンド名
+- `input`: 入力ソース情報（stdin/path, format）
+- `steps`: 実行ステップ配列
+- `external_tools`: `jq|yq|mlr` の使用有無
+- `deterministic_guards`: 適用した決定性ガード
+
+```bash
+cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.json
+```
+
+方針:
+
+- ユーザー入力はシェル文字列展開せず、外部ツール連携時も明示的な引数配列で扱う
+
 ### 例
 
 ```bash
