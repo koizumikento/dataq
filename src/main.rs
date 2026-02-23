@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io;
+use std::io::{self, BufRead, Cursor, Read};
 use std::path::PathBuf;
 use std::process;
 
@@ -8,7 +8,9 @@ use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{r#assert, canon, doctor, merge, profile, recipe, sdiff};
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
+use dataq::engine::canon::canonicalize_value;
 use dataq::engine::merge::MergePolicy;
+use dataq::io::format::jsonl::JsonlStreamError;
 use dataq::io::{self as dataq_io, Format, IoError};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -51,7 +53,7 @@ struct CanonArgs {
     input: Option<PathBuf>,
 
     #[arg(long, value_enum)]
-    from: CliInputFormat,
+    from: Option<CliInputFormat>,
 
     #[arg(long, value_enum)]
     to: Option<CanonOutputFormat>,
@@ -268,19 +270,47 @@ fn handle_parse_error(error: clap::Error) -> i32 {
 }
 
 fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
-    let input_format: Format = args.from.into();
     let output_format = args.to.map(Into::into).unwrap_or(Format::Json);
     let options = canon::CanonCommandOptions {
         sort_keys: args.sort_keys,
         normalize_time: args.normalize_time,
     };
-    let pipeline_report = build_canon_pipeline_report(&args, input_format, options);
+    let mut input_format = args.from.map(Into::into);
 
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    let exit_code = if let Some(path) = args.input {
-        match File::open(&path) {
-            Ok(file) => match canon::run(file, &mut output, input_format, output_format, options) {
+    let exit_code = if let Some(path) = args.input.as_ref() {
+        if input_format.is_none() {
+            match dataq_io::resolve_input_format(None, Some(path.as_path())) {
+                Ok(resolved) => input_format = Some(resolved),
+                Err(error) => {
+                    emit_error(
+                        "input_usage_error",
+                        error.to_string(),
+                        json!({"command": "canon", "input": path}),
+                        3,
+                    );
+                    if emit_pipeline {
+                        emit_pipeline_report(&build_canon_pipeline_report(
+                            &args,
+                            input_format,
+                            options,
+                        ));
+                    }
+                    return 3;
+                }
+            }
+        }
+
+        let resolved_input_format = input_format.expect("input format must be resolved");
+        match File::open(path) {
+            Ok(file) => match run_canon_with_format(
+                file,
+                &mut output,
+                resolved_input_format,
+                output_format,
+                options,
+            ) {
                 Ok(()) => 0,
                 Err(error) => {
                     let (exit_code, error_kind) = map_canon_error(&error);
@@ -293,10 +323,10 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
                     exit_code
                 }
             },
-            Err(err) => {
+            Err(error) => {
                 emit_error(
                     "input_usage_error",
-                    format!("failed to open input file `{}`: {err}", path.display()),
+                    format!("failed to open input file `{}`: {error}", path.display()),
                     json!({"command": "canon", "input": path}),
                     3,
                 );
@@ -304,30 +334,109 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
             }
         }
     } else {
-        let stdin = io::stdin();
-        match canon::run(
-            stdin.lock(),
-            &mut output,
-            input_format,
-            output_format,
-            options,
-        ) {
-            Ok(()) => 0,
-            Err(error) => {
-                let (exit_code, error_kind) = map_canon_error(&error);
-                emit_error(
-                    error_kind,
-                    error.to_string(),
-                    json!({"command": "canon"}),
-                    exit_code,
-                );
-                exit_code
+        match input_format {
+            Some(resolved_input_format) => {
+                let stdin = io::stdin();
+                match run_canon_with_format(
+                    stdin.lock(),
+                    &mut output,
+                    resolved_input_format,
+                    output_format,
+                    options,
+                ) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        let (exit_code, error_kind) = map_canon_error(&error);
+                        emit_error(
+                            error_kind,
+                            error.to_string(),
+                            json!({"command": "canon"}),
+                            exit_code,
+                        );
+                        exit_code
+                    }
+                }
+            }
+            None => {
+                if output_format == Format::Jsonl {
+                    match run_canon_jsonl_autodetect_stdin(&mut output, options) {
+                        Ok(detected) => {
+                            input_format = Some(detected);
+                            0
+                        }
+                        Err(CanonStdinAutodetectError::Input(error)) => {
+                            emit_error(
+                                "input_usage_error",
+                                error.to_string(),
+                                json!({"command": "canon"}),
+                                3,
+                            );
+                            3
+                        }
+                        Err(CanonStdinAutodetectError::Canon(error)) => {
+                            let (exit_code, error_kind) = map_canon_error(&error);
+                            emit_error(
+                                error_kind,
+                                error.to_string(),
+                                json!({"command": "canon"}),
+                                exit_code,
+                            );
+                            exit_code
+                        }
+                    }
+                } else {
+                    let stdin = io::stdin();
+                    let mut input = Vec::new();
+                    if let Err(error) = stdin.lock().read_to_end(&mut input) {
+                        emit_error(
+                            "input_usage_error",
+                            format!("failed to read stdin: {error}"),
+                            json!({"command": "canon"}),
+                            3,
+                        );
+                        3
+                    } else {
+                        match dataq_io::autodetect_stdin_input_format(&input) {
+                            Ok(detected) => {
+                                input_format = Some(detected);
+                                match run_canon_with_format(
+                                    Cursor::new(input),
+                                    &mut output,
+                                    detected,
+                                    output_format,
+                                    options,
+                                ) {
+                                    Ok(()) => 0,
+                                    Err(error) => {
+                                        let (exit_code, error_kind) = map_canon_error(&error);
+                                        emit_error(
+                                            error_kind,
+                                            error.to_string(),
+                                            json!({"command": "canon"}),
+                                            exit_code,
+                                        );
+                                        exit_code
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                emit_error(
+                                    "input_usage_error",
+                                    error.to_string(),
+                                    json!({"command": "canon"}),
+                                    3,
+                                );
+                                3
+                            }
+                        }
+                    }
+                }
             }
         }
     };
 
     if emit_pipeline {
-        emit_pipeline_report(&pipeline_report);
+        emit_pipeline_report(&build_canon_pipeline_report(&args, input_format, options));
     }
     exit_code
 }
@@ -846,6 +955,171 @@ fn read_values_from_path(path: &PathBuf, format: Format) -> Result<Vec<Value>, S
     dataq_io::reader::read_values(file, format).map_err(|error| error.to_string())
 }
 
+fn run_canon_with_format<R: Read, W: io::Write>(
+    input: R,
+    output: W,
+    input_format: Format,
+    output_format: Format,
+    options: canon::CanonCommandOptions,
+) -> Result<(), CanonError> {
+    if output_format == Format::Jsonl {
+        return run_canon_jsonl_stream(input, output, input_format, options);
+    }
+    canon::run(input, output, input_format, output_format, options)
+}
+
+#[derive(Debug)]
+enum CanonStdinAutodetectError {
+    Input(IoError),
+    Canon(CanonError),
+}
+
+fn run_canon_jsonl_autodetect_stdin<W: io::Write>(
+    mut output: W,
+    options: canon::CanonCommandOptions,
+) -> Result<Format, CanonStdinAutodetectError> {
+    let stdin = io::stdin();
+    let mut reader = io::BufReader::new(stdin.lock());
+    let mut buffered_input = Vec::new();
+    let mut prefetched_values = Vec::new();
+    let mut non_empty_lines = 0usize;
+
+    while non_empty_lines < 2 {
+        let mut line = Vec::new();
+        let bytes_read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(IoError::from)
+            .map_err(CanonStdinAutodetectError::Input)?;
+        if bytes_read == 0 {
+            break;
+        }
+        buffered_input.extend_from_slice(&line);
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        non_empty_lines += 1;
+        let trimmed = trim_ascii_whitespace(&line);
+        match serde_json::from_slice(trimmed) {
+            Ok(parsed) => prefetched_values.push(parsed),
+            Err(_) => {
+                return run_canon_jsonl_with_buffered_stdin(
+                    reader,
+                    buffered_input,
+                    output,
+                    options,
+                );
+            }
+        }
+    }
+
+    if non_empty_lines >= 2 {
+        let canon_options = options.into();
+        for value in prefetched_values {
+            let canonical = canonicalize_value(value, canon_options);
+            write_jsonl_stream_value(&mut output, &canonical)
+                .map_err(CanonStdinAutodetectError::Canon)?;
+        }
+        dataq_io::reader::read_jsonl_stream(reader, |value| {
+            let canonical = canonicalize_value(value, canon_options);
+            write_jsonl_stream_value(&mut output, &canonical)
+        })
+        .map_err(|error| match error {
+            JsonlStreamError::Read(source) => {
+                CanonStdinAutodetectError::Canon(CanonError::ReadInput {
+                    format: Format::Jsonl,
+                    source,
+                })
+            }
+            JsonlStreamError::Emit(source) => CanonStdinAutodetectError::Canon(source),
+        })?;
+        return Ok(Format::Jsonl);
+    }
+
+    run_canon_jsonl_with_buffered_stdin(reader, buffered_input, output, options)
+}
+
+fn run_canon_jsonl_with_buffered_stdin<R: Read, W: io::Write>(
+    mut reader: R,
+    mut buffered_input: Vec<u8>,
+    output: W,
+    options: canon::CanonCommandOptions,
+) -> Result<Format, CanonStdinAutodetectError> {
+    reader
+        .read_to_end(&mut buffered_input)
+        .map_err(IoError::from)
+        .map_err(CanonStdinAutodetectError::Input)?;
+    let detected = dataq_io::autodetect_stdin_input_format(&buffered_input)
+        .map_err(CanonStdinAutodetectError::Input)?;
+    run_canon_with_format(
+        Cursor::new(buffered_input),
+        output,
+        detected,
+        Format::Jsonl,
+        options,
+    )
+    .map_err(CanonStdinAutodetectError::Canon)?;
+    Ok(detected)
+}
+
+fn trim_ascii_whitespace(input: &[u8]) -> &[u8] {
+    let Some(start) = input.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return &input[0..0];
+    };
+    let end = input
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .expect("start implies end")
+        + 1;
+    &input[start..end]
+}
+
+fn run_canon_jsonl_stream<R: Read, W: io::Write>(
+    input: R,
+    mut output: W,
+    input_format: Format,
+    options: canon::CanonCommandOptions,
+) -> Result<(), CanonError> {
+    let canon_options = options.into();
+    if input_format == Format::Jsonl {
+        return dataq_io::reader::read_jsonl_stream(input, |value| {
+            let canonical = canonicalize_value(value, canon_options);
+            write_jsonl_stream_value(&mut output, &canonical)
+        })
+        .map_err(|error| match error {
+            JsonlStreamError::Read(source) => CanonError::ReadInput {
+                format: Format::Jsonl,
+                source,
+            },
+            JsonlStreamError::Emit(source) => source,
+        });
+    }
+
+    let values = dataq_io::reader::read_values(input, input_format).map_err(|source| {
+        CanonError::ReadInput {
+            format: input_format,
+            source,
+        }
+    })?;
+    for value in values {
+        let canonical = canonicalize_value(value, canon_options);
+        write_jsonl_stream_value(&mut output, &canonical)?;
+    }
+    Ok(())
+}
+
+fn write_jsonl_stream_value<W: io::Write>(output: &mut W, value: &Value) -> Result<(), CanonError> {
+    dataq_io::format::jsonl::write_jsonl_value(&mut *output, value).map_err(|source| {
+        CanonError::WriteOutput {
+            format: Format::Jsonl,
+            source,
+        }
+    })?;
+    output.flush().map_err(|source| CanonError::WriteOutput {
+        format: Format::Jsonl,
+        source: IoError::from(source),
+    })
+}
+
 fn map_canon_error(error: &CanonError) -> (i32, &'static str) {
     match error {
         CanonError::ReadInput { .. } => (3, "input_usage_error"),
@@ -858,17 +1132,17 @@ fn map_canon_error(error: &CanonError) -> (i32, &'static str) {
 
 fn build_canon_pipeline_report(
     args: &CanonArgs,
-    input_format: Format,
+    input_format: Option<Format>,
     options: canon::CanonCommandOptions,
 ) -> PipelineReport {
     let source = if let Some(path) = &args.input {
         PipelineInputSource::path(
             "input",
             path.display().to_string(),
-            Some(input_format.as_str()),
+            format_label(input_format),
         )
     } else {
-        PipelineInputSource::stdin("input", Some(input_format.as_str()))
+        PipelineInputSource::stdin("input", format_label(input_format))
     };
 
     PipelineReport::new(

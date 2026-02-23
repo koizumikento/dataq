@@ -62,7 +62,7 @@ dataq [--emit-pipeline] <command> [options]
 
 | Command | 用途 | 必須オプション |
 | --- | --- | --- |
-| `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>` |
+| `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>`（stdin時は省略可） |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
@@ -81,6 +81,10 @@ dataq [--emit-pipeline] <command> [options]
 ```bash
 # YAMLを正規化してJSONLへ
 cat in.yaml | dataq canon --from yaml --to jsonl > out.jsonl
+
+# stdin入力は --from 省略時に JSONL -> JSON -> YAML -> CSV の順で自動判別
+# ただし非空行が1行のみで全体がJSONとして成立する場合は JSON を優先（曖昧さ回避）
+cat events.jsonl | dataq canon --to jsonl > out.jsonl
 
 # ルール検証
 dataq assert --input out.jsonl --rules rules.yaml
@@ -145,6 +149,11 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 ### 1. `canon`
 
 入力（JSON/YAML/CSV/JSONL）を決定的に正規化し、JSON もしくは JSONL へ変換。
+
+- `--from` 省略時（stdin入力のみ）は固定順で自動判別: `JSONL -> JSON -> YAML -> CSV`
+- 非空行が1行のみで入力全体がJSONとして成立する場合は、曖昧さ回避のため `JSON` として扱う
+- 自動判別できない入力は `input_usage_error`（終了コード `3`）
+- `--to jsonl` かつ JSONL入力ではレコード単位で逐次処理（入力順を保持）
 
 - キー順ソート
 - 型寄せ（数値/真偽値/日時）
