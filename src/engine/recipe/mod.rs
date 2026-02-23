@@ -96,6 +96,10 @@ pub fn run(recipe_path: &Path) -> Result<RecipeExecution, RecipeExecutionError> 
         "load_recipe_file".to_string(),
         "validate_recipe_schema".to_string(),
     ];
+    let recipe_base_dir = recipe_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
 
     let loaded = match load_recipe_value(recipe_path) {
         Ok(value) => value,
@@ -117,11 +121,12 @@ pub fn run(recipe_path: &Path) -> Result<RecipeExecution, RecipeExecutionError> 
         }
     };
 
-    execute_recipe(recipe, &mut pipeline_steps)
+    execute_recipe(recipe, recipe_base_dir.as_path(), &mut pipeline_steps)
 }
 
 fn execute_recipe(
     recipe: RecipeFile,
+    recipe_base_dir: &Path,
     pipeline_steps: &mut Vec<String>,
 ) -> Result<RecipeExecution, RecipeExecutionError> {
     let mut current_values: Option<Vec<Value>> = None;
@@ -131,7 +136,7 @@ fn execute_recipe(
         pipeline_steps.push(format!("execute_step_{index}_{}", step.kind));
 
         let kind = step.kind.clone();
-        let outcome = match execute_step(step, current_values.as_deref()) {
+        let outcome = match execute_step(step, current_values.as_deref(), recipe_base_dir) {
             Ok(outcome) => outcome,
             Err(kind) => {
                 return Err(RecipeExecutionError {
@@ -178,12 +183,13 @@ fn execute_recipe(
 fn execute_step(
     step: RecipeStep,
     current_values: Option<&[Value]>,
+    recipe_base_dir: &Path,
 ) -> Result<StepOutcome, RecipeExecutionErrorKind> {
     match step.kind.as_str() {
-        "canon" => execute_canon_step(step.args, current_values),
-        "assert" => execute_assert_step(step.args, current_values),
+        "canon" => execute_canon_step(step.args, current_values, recipe_base_dir),
+        "assert" => execute_assert_step(step.args, current_values, recipe_base_dir),
         "profile" => execute_profile_step(step.args, current_values),
-        "sdiff" => execute_sdiff_step(step.args, current_values),
+        "sdiff" => execute_sdiff_step(step.args, current_values, recipe_base_dir),
         other => Err(RecipeExecutionErrorKind::InputUsage(format!(
             "unknown recipe step kind `{other}`"
         ))),
@@ -193,12 +199,18 @@ fn execute_step(
 fn execute_canon_step(
     args: Map<String, Value>,
     current_values: Option<&[Value]>,
+    recipe_base_dir: &Path,
 ) -> Result<StepOutcome, RecipeExecutionErrorKind> {
     let args: CanonStepArgs = parse_step_args("canon", args)?;
 
     let input_values = if let Some(path) = args.input.as_deref() {
-        let format = resolve_step_input_format(args.from.as_deref(), path, "canon.args.input")?;
-        read_values_from_path(path, format)?
+        let resolved_path = resolve_recipe_path(recipe_base_dir, path);
+        let format = resolve_step_input_format(
+            args.from.as_deref(),
+            resolved_path.as_path(),
+            "canon.args.input",
+        )?;
+        read_values_from_path(resolved_path.as_path(), format)?
     } else if let Some(values) = current_values {
         values.to_vec()
     } else {
@@ -230,6 +242,7 @@ fn execute_canon_step(
 fn execute_assert_step(
     args: Map<String, Value>,
     current_values: Option<&[Value]>,
+    recipe_base_dir: &Path,
 ) -> Result<StepOutcome, RecipeExecutionErrorKind> {
     let args: AssertStepArgs = parse_step_args("assert", args)?;
     let values = current_values.ok_or_else(|| {
@@ -239,7 +252,7 @@ fn execute_assert_step(
         )
     })?;
 
-    let report = match resolve_assert_source(args)? {
+    let report = match resolve_assert_source(args, recipe_base_dir)? {
         AssertSource::Rules(rules) => {
             r#assert::execute_assert(values, &rules).map_err(map_assert_error)?
         }
@@ -289,6 +302,7 @@ fn execute_profile_step(
 fn execute_sdiff_step(
     args: Map<String, Value>,
     current_values: Option<&[Value]>,
+    recipe_base_dir: &Path,
 ) -> Result<StepOutcome, RecipeExecutionErrorKind> {
     let args: SdiffStepArgs = parse_step_args("sdiff", args)?;
     let left_values = current_values.ok_or_else(|| {
@@ -298,12 +312,13 @@ fn execute_sdiff_step(
         )
     })?;
 
+    let right_path = resolve_recipe_path(recipe_base_dir, args.right.as_path());
     let right_format = resolve_step_input_format(
         args.right_from.as_deref(),
-        args.right.as_path(),
+        right_path.as_path(),
         "sdiff.args.right",
     )?;
-    let right_values = read_values_from_path(args.right.as_path(), right_format)?;
+    let right_values = read_values_from_path(right_path.as_path(), right_format)?;
 
     let parsed_key = args
         .key
@@ -354,13 +369,19 @@ fn execute_sdiff_step(
     })
 }
 
-fn resolve_assert_source(args: AssertStepArgs) -> Result<AssertSource, RecipeExecutionErrorKind> {
+fn resolve_assert_source(
+    args: AssertStepArgs,
+    recipe_base_dir: &Path,
+) -> Result<AssertSource, RecipeExecutionErrorKind> {
     let rules_value = match (args.rules, args.rules_file) {
         (Some(value), None) => Some(value),
-        (None, Some(path)) => Some(read_single_value_from_path(
-            path.as_path(),
-            "assert.rules_file",
-        )?),
+        (None, Some(path)) => {
+            let resolved_path = resolve_recipe_path(recipe_base_dir, path.as_path());
+            Some(read_single_value_from_path(
+                resolved_path.as_path(),
+                "assert.rules_file",
+            )?)
+        }
         (Some(_), Some(_)) => {
             return Err(RecipeExecutionErrorKind::InputUsage(
                 "assert step args `rules` and `rules_file` are mutually exclusive".to_string(),
@@ -371,10 +392,13 @@ fn resolve_assert_source(args: AssertStepArgs) -> Result<AssertSource, RecipeExe
 
     let schema_value = match (args.schema, args.schema_file) {
         (Some(value), None) => Some(value),
-        (None, Some(path)) => Some(read_single_value_from_path(
-            path.as_path(),
-            "assert.schema_file",
-        )?),
+        (None, Some(path)) => {
+            let resolved_path = resolve_recipe_path(recipe_base_dir, path.as_path());
+            Some(read_single_value_from_path(
+                resolved_path.as_path(),
+                "assert.schema_file",
+            )?)
+        }
         (Some(_), Some(_)) => {
             return Err(RecipeExecutionErrorKind::InputUsage(
                 "assert step args `schema` and `schema_file` are mutually exclusive".to_string(),
@@ -507,6 +531,14 @@ fn read_values_from_path(
             path.display()
         ))
     })
+}
+
+fn resolve_recipe_path(recipe_base_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        recipe_base_dir.join(path)
+    }
 }
 
 fn map_assert_error(error: AssertValidationError) -> RecipeExecutionErrorKind {
