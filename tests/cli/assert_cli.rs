@@ -72,6 +72,7 @@ fn assert_api_reports_mismatch_shape() {
     for mismatch in mismatches {
         let obj = mismatch.as_object().expect("mismatch object");
         assert!(obj.contains_key("path"));
+        assert!(obj.contains_key("rule_kind"));
         assert!(obj.contains_key("reason"));
         assert!(obj.contains_key("actual"));
         assert!(obj.contains_key("expected"));
@@ -173,4 +174,93 @@ fn assert_api_compares_large_integer_ranges_exactly() {
         response.payload["mismatches"][0]["reason"],
         Value::from("above_max")
     );
+    assert_eq!(
+        response.payload["mismatches"][0]["rule_kind"],
+        Value::from("ranges")
+    );
+}
+
+#[test]
+fn assert_api_supports_enum_pattern_forbid_keys_and_nullable() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    std::fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": [],
+            "forbid_keys": ["meta.blocked"],
+            "types": {},
+            "nullable": {"optional": true},
+            "enum": {"status": ["ok", "done"]},
+            "pattern": {"name": "^[a-z]+_[0-9]+$"},
+            "count": {},
+            "ranges": {}
+        }"#,
+    )
+    .expect("write rules");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: rules_path,
+    };
+
+    let response = run_with_stdin(
+        &args,
+        Cursor::new(
+            r#"[{"status":"pending","name":"User-1","meta":{"blocked":true},"optional":null}]"#,
+        ),
+    );
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(response.payload["matched"], Value::Bool(false));
+    assert_eq!(response.payload["mismatch_count"], Value::from(3));
+    assert_eq!(
+        response.payload["mismatches"][0]["rule_kind"],
+        Value::from("forbid_keys")
+    );
+    assert_eq!(
+        response.payload["mismatches"][1]["rule_kind"],
+        Value::from("enum")
+    );
+    assert_eq!(
+        response.payload["mismatches"][2]["rule_kind"],
+        Value::from("pattern")
+    );
+}
+
+#[test]
+fn assert_api_rejects_invalid_pattern_rules() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    std::fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": [],
+            "forbid_keys": [],
+            "types": {},
+            "nullable": {},
+            "enum": {},
+            "pattern": {"name": "[a-z"},
+            "count": {},
+            "ranges": {}
+        }"#,
+    )
+    .expect("write rules");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: rules_path,
+    };
+
+    let response = run_with_stdin(&args, Cursor::new("[]"));
+    assert_eq!(response.exit_code, 3);
+    assert_eq!(
+        response.payload["error"],
+        Value::String("input_usage_error".to_string())
+    );
+    let message = response.payload["message"]
+        .as_str()
+        .expect("input usage message");
+    assert!(message.contains("invalid pattern"));
 }

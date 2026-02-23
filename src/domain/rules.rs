@@ -3,14 +3,22 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 
-/// Rule schema for the `assert` command MVP.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+/// Rule schema for the `assert` command.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct AssertRules {
     #[serde(default)]
     pub required_keys: Vec<String>,
     #[serde(default)]
+    pub forbid_keys: Vec<String>,
+    #[serde(default)]
     pub types: BTreeMap<String, RuleType>,
+    #[serde(default)]
+    pub nullable: BTreeMap<String, bool>,
+    #[serde(default, rename = "enum")]
+    pub enum_values: BTreeMap<String, Vec<Value>>,
+    #[serde(default, rename = "pattern")]
+    pub patterns: BTreeMap<String, String>,
     #[serde(default)]
     pub count: CountRule,
     #[serde(default)]
@@ -76,6 +84,7 @@ pub struct NumericRangeRule {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MismatchEntry {
     pub path: String,
+    pub rule_kind: String,
     pub reason: String,
     pub actual: Value,
     pub expected: Value,
