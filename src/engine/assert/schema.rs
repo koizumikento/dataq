@@ -19,6 +19,7 @@ pub fn validate(values: &[Value], schema: &Value) -> Result<AssertReport, Assert
 
             mismatches.push(MismatchEntry {
                 path: row_path_from_json_pointer(row_index, value, &instance_pointer),
+                rule_kind: "schema".to_string(),
                 reason: "schema_mismatch".to_string(),
                 actual: value_at_pointer(value, &instance_pointer),
                 expected: json!({
@@ -112,12 +113,14 @@ fn sort_mismatches(mismatches: &mut [MismatchEntry]) {
     mismatches.sort_by(|left, right| {
         let left_key = (
             left.path.clone(),
+            left.rule_kind.clone(),
             left.reason.clone(),
             stable_value_key(&left.actual),
             stable_value_key(&left.expected),
         );
         let right_key = (
             right.path.clone(),
+            right.rule_kind.clone(),
             right.reason.clone(),
             stable_value_key(&right.actual),
             stable_value_key(&right.expected),

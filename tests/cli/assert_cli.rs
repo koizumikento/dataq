@@ -207,7 +207,8 @@ fn assert_api_supports_enum_pattern_forbid_keys_and_nullable() {
     let args = AssertCommandArgs {
         input: None,
         from: Some(Format::Json),
-        rules: rules_path,
+        rules: Some(rules_path),
+        schema: None,
     };
 
     let response = run_with_stdin(
@@ -255,7 +256,8 @@ fn assert_api_rejects_invalid_pattern_rules() {
     let args = AssertCommandArgs {
         input: None,
         from: Some(Format::Json),
-        rules: rules_path,
+        rules: Some(rules_path),
+        schema: None,
     };
 
     let response = run_with_stdin(&args, Cursor::new("[]"));

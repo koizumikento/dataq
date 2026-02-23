@@ -9,6 +9,27 @@ use crate::{
 
 pub use crate::engine::sdiff::DEFAULT_VALUE_DIFF_CAP;
 
+/// Ordered pipeline-step names used for `--emit-pipeline` diagnostics.
+pub fn pipeline_steps() -> Vec<String> {
+    vec![
+        "resolve_input_formats".to_string(),
+        "read_left_values".to_string(),
+        "read_right_values".to_string(),
+        "compute_structural_diff".to_string(),
+        "write_diff_report".to_string(),
+    ]
+}
+
+/// Determinism guards applied by the `sdiff` command.
+pub fn deterministic_guards() -> Vec<String> {
+    vec![
+        "rust_native_execution".to_string(),
+        "no_shell_interpolation_for_user_input".to_string(),
+        "canonical_json_path_escaping".to_string(),
+        "deterministic_diff_item_ordering".to_string(),
+    ]
+}
+
 /// Runs structural diff with default options.
 ///
 /// This function expects both datasets to already be parsed into JSON values
