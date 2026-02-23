@@ -3,7 +3,9 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use dataq::cmd::r#assert::{AssertCommandArgs, AssertCommandResponse, run_with_stdin};
+use dataq::cmd::r#assert::{
+    AssertCommandArgs, AssertCommandResponse, rules_help_payload, run_with_stdin,
+};
 use dataq::io::Format;
 use serde_json::Value;
 use tempfile::tempdir;
@@ -408,6 +410,253 @@ count:
     assert_eq!(response.exit_code, 0);
     assert_eq!(response.payload["matched"], Value::Bool(true));
     assert_eq!(response.payload["mismatch_count"], Value::from(0));
+}
+
+#[test]
+fn assert_api_supports_single_extends_with_parent_relative_resolution() {
+    let dir = tempdir().expect("tempdir");
+    let shared_dir = dir.path().join("shared");
+    let leaf_dir = dir.path().join("leaf");
+    std::fs::create_dir_all(&shared_dir).expect("create shared dir");
+    std::fs::create_dir_all(&leaf_dir).expect("create leaf dir");
+
+    let base_rules_path = shared_dir.join("base.rules.yaml");
+    std::fs::write(
+        &base_rules_path,
+        r#"
+required_keys: [id]
+fields:
+  id:
+    type: integer
+count:
+  min: 1
+  max: 1
+"#,
+    )
+    .expect("write base rules");
+
+    let leaf_rules_path = leaf_dir.join("leaf.rules.yaml");
+    std::fs::write(
+        &leaf_rules_path,
+        r#"
+extends: ../shared/base.rules.yaml
+required_keys: [status]
+fields:
+  status:
+    enum: [ok, done]
+"#,
+    )
+    .expect("write leaf rules");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(leaf_rules_path),
+        schema: None,
+    };
+
+    let response = run_with_stdin(&args, Cursor::new(r#"[{"id":1,"status":"ok"}]"#));
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(response.payload["matched"], Value::Bool(true));
+    assert_eq!(response.payload["mismatch_count"], Value::from(0));
+}
+
+#[test]
+fn assert_api_merges_multi_extends_in_order_with_last_wins() {
+    let dir = tempdir().expect("tempdir");
+    let base_a = dir.path().join("base-a.yaml");
+    let base_b = dir.path().join("base-b.yaml");
+    let leaf = dir.path().join("leaf.yaml");
+
+    std::fs::write(
+        &base_a,
+        r#"
+required_keys: [id]
+forbid_keys: [debug]
+fields:
+  score:
+    range:
+      max: 100
+count:
+  max: 10
+"#,
+    )
+    .expect("write base a");
+
+    std::fs::write(
+        &base_b,
+        r#"
+required_keys: [status]
+forbid_keys: [trace]
+fields:
+  score:
+    range:
+      max: 5
+count:
+  max: 3
+"#,
+    )
+    .expect("write base b");
+
+    std::fs::write(
+        &leaf,
+        r#"
+extends: [./base-a.yaml, ./base-b.yaml]
+fields:
+  score:
+    range:
+      max: 2
+"#,
+    )
+    .expect("write leaf");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(leaf),
+        schema: None,
+    };
+
+    let response = run_with_stdin(&args, Cursor::new(r#"[{"id":1,"status":"ok","score":3}]"#));
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(response.payload["mismatch_count"], Value::from(1));
+    assert_eq!(
+        response.payload["mismatches"][0]["path"],
+        Value::from("$[0].score")
+    );
+    assert_eq!(
+        response.payload["mismatches"][0]["reason"],
+        Value::from("above_max")
+    );
+    assert_eq!(
+        response.payload["mismatches"][0]["expected"],
+        Value::from(2),
+    );
+}
+
+#[test]
+fn assert_api_rejects_extends_cycles() {
+    let dir = tempdir().expect("tempdir");
+    let a = dir.path().join("a.yaml");
+    let b = dir.path().join("b.yaml");
+
+    std::fs::write(&a, "extends: ./b.yaml\nrequired_keys: [id]\ncount: {}\n").expect("write a");
+    std::fs::write(&b, "extends: ./a.yaml\nrequired_keys: [id]\ncount: {}\n").expect("write b");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(a),
+        schema: None,
+    };
+
+    let response = run_with_stdin(&args, Cursor::new("[]"));
+    assert_eq!(response.exit_code, 3);
+    assert_eq!(
+        response.payload["error"],
+        Value::String("input_usage_error".to_string())
+    );
+    assert!(
+        response.payload["message"]
+            .as_str()
+            .expect("message")
+            .contains("cycle")
+    );
+}
+
+#[test]
+fn assert_api_rejects_missing_extends_reference() {
+    let dir = tempdir().expect("tempdir");
+    let leaf = dir.path().join("leaf.yaml");
+    std::fs::write(
+        &leaf,
+        r#"
+extends: ./missing.rules.yaml
+required_keys: [id]
+count: {}
+"#,
+    )
+    .expect("write rules");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(leaf),
+        schema: None,
+    };
+
+    let response = run_with_stdin(&args, Cursor::new("[]"));
+    assert_eq!(response.exit_code, 3);
+    assert_eq!(
+        response.payload["error"],
+        Value::String("input_usage_error".to_string())
+    );
+    assert!(
+        response.payload["message"]
+            .as_str()
+            .expect("message")
+            .contains("failed to open rules file")
+    );
+}
+
+#[test]
+fn assert_rules_help_payload_includes_extends_key() {
+    let payload = rules_help_payload();
+    assert_eq!(
+        payload["top_level_keys"]["extends"],
+        Value::from("string | array<string> (optional, parent-relative path)")
+    );
+}
+
+#[test]
+fn assert_api_extends_merge_is_deterministic() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("base.yaml");
+    let leaf = dir.path().join("leaf.yaml");
+
+    std::fs::write(
+        &base,
+        r#"
+required_keys: [z, a, z]
+count: {}
+"#,
+    )
+    .expect("write base");
+    std::fs::write(
+        &leaf,
+        r#"
+extends: ./base.yaml
+required_keys: [b, a]
+count: {}
+"#,
+    )
+    .expect("write leaf");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(leaf),
+        schema: None,
+    };
+
+    let first = run_with_stdin(&args, Cursor::new("[{}]"));
+    let second = run_with_stdin(&args, Cursor::new("[{}]"));
+
+    assert_eq!(first.exit_code, 2);
+    assert_eq!(second.exit_code, 2);
+    assert_eq!(first.payload, second.payload);
+    assert_eq!(
+        first.payload["mismatches"][0]["path"],
+        Value::from("$[0].a")
+    );
+    assert_eq!(
+        first.payload["mismatches"][1]["path"],
+        Value::from("$[0].b")
+    );
+    assert_eq!(
+        first.payload["mismatches"][2]["path"],
+        Value::from("$[0].z")
+    );
 }
 
 #[test]

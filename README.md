@@ -158,6 +158,8 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 - フィールド制約（`fields.<path>` に `type` / `enum` / `pattern` / `nullable` / `range` を集約）
 - 最小/最大件数
 - `--rules <path>`: dataq ルールで検証（ルールスキーマは厳密。未知キーは入力不正）
+- ルールは `extends` で再利用可能（親相対パス解決、循環/欠損/不正形式は入力不正）
+- `extends` マージ: `required_keys`/`forbid_keys` は和集合、`fields` はパス後勝ち、`count` は最後に定義された値を採用
 - `--schema <path>`: JSON Schema で検証
 - `--normalize <github-actions-jobs|gitlab-ci-jobs>`: 生のCI定義を `yq -> jq -> mlr` の3段でジョブ単位レコードへ正規化してから検証（`yq`/`jq`/`mlr` 必須）
 - `--rules` と `--schema` は同時指定不可（入力不正として終了コード `3`）
@@ -170,6 +172,7 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 `assert` ルール例:
 
 ```yaml
+extends: [./base.rules.yaml]
 required_keys: [id, status]
 forbid_keys: [debug, meta.blocked]
 fields:
