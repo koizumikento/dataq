@@ -67,6 +67,7 @@ dataq [--emit-pipeline] <command> [options]
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` |
+| `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
 
 グローバルオプション:
 
@@ -94,6 +95,9 @@ dataq profile --from json --input out.jsonl
 
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
+
+# 依存ツール診断
+dataq doctor
 
 # ID で対応付けし、更新時刻は差分対象外
 dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-path '$["updated_at"]'
@@ -248,6 +252,18 @@ dataq assert \
 - `--policy deep-merge`: object は再帰マージ、配列は要素インデックス単位で再帰マージ
 - `--policy array-replace`: object は再帰マージ、配列は overlay 側で全置換
 - 出力は JSON 固定（キー順は決定的にソート）
+
+### 6. `doctor`
+
+実行環境で `jq` / `yq` / `mlr` が利用可能かを、固定順 (`jq`, `yq`, `mlr`) で診断。
+
+- 出力は JSON 固定（stdout）
+- 各ツールの診断項目: `name`, `found`, `version`, `executable`, `message`
+- 終了コード:
+  - `0`: 3ツールすべて起動可能
+  - `3`: 1つ以上が欠如または起動不可
+  - `1`: 予期しない内部エラー
+- `--emit-pipeline` 指定時は stderr に診断ステップ (`doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`) を追加出力
 
 ## 設計ドキュメント
 

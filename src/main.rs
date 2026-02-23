@@ -5,7 +5,7 @@ use std::process;
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
-use dataq::cmd::{r#assert, canon, merge, profile, sdiff};
+use dataq::cmd::{r#assert, canon, doctor, merge, profile, sdiff};
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
 use dataq::engine::merge::MergePolicy;
@@ -39,6 +39,8 @@ enum Commands {
     Profile(ProfileArgs),
     /// Merge base and overlays with a deterministic merge policy.
     Merge(MergeArgs),
+    /// Diagnose jq/yq/mlr availability and executability.
+    Doctor,
 }
 
 #[derive(Debug, clap::Args)]
@@ -216,6 +218,7 @@ fn run() -> i32 {
         Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
         Commands::Profile(args) => run_profile(args, emit_pipeline),
         Commands::Merge(args) => run_merge(args, emit_pipeline),
+        Commands::Doctor => run_doctor(emit_pipeline),
     }
 }
 
@@ -703,6 +706,54 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
+fn run_doctor(emit_pipeline: bool) -> i32 {
+    let response = doctor::run();
+    let exit_code = match response.exit_code {
+        0 | 3 => {
+            if emit_json_stdout(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize doctor response".to_string(),
+                    json!({"command": "doctor"}),
+                    1,
+                );
+                1
+            }
+        }
+        1 => {
+            if emit_json_stderr(&response.payload) {
+                1
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize doctor error".to_string(),
+                    json!({"command": "doctor"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected doctor exit code: {other}"),
+                json!({"command": "doctor"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_doctor_pipeline_report();
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
+}
+
 fn read_values_from_path(path: &PathBuf, format: Format) -> Result<Vec<Value>, String> {
     let file = File::open(path)
         .map_err(|error| format!("failed to open input file `{}`: {error}", path.display()))?;
@@ -866,6 +917,19 @@ fn build_merge_pipeline_report(
         merge::pipeline_steps(),
         merge::deterministic_guards(),
     )
+}
+
+fn build_doctor_pipeline_report() -> PipelineReport {
+    let mut report = PipelineReport::new(
+        "doctor",
+        PipelineInput::new(Vec::new()),
+        doctor::pipeline_steps(),
+        doctor::deterministic_guards(),
+    );
+    for tool in ["jq", "yq", "mlr"] {
+        report = report.mark_external_tool_used(tool);
+    }
+    report
 }
 
 fn format_label(format: Option<Format>) -> Option<&'static str> {
