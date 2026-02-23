@@ -18,7 +18,7 @@ pub fn validate(values: &[Value], schema: &Value) -> Result<AssertReport, Assert
             let message = error.to_string();
 
             mismatches.push(MismatchEntry {
-                path: row_path_from_json_pointer(row_index, &instance_pointer),
+                path: row_path_from_json_pointer(row_index, value, &instance_pointer),
                 reason: "schema_mismatch".to_string(),
                 actual: value_at_pointer(value, &instance_pointer),
                 expected: json!({
@@ -45,28 +45,35 @@ fn value_at_pointer(root: &Value, pointer: &str) -> Value {
     root.pointer(pointer).cloned().unwrap_or(Value::Null)
 }
 
-fn row_path_from_json_pointer(row_index: usize, pointer: &str) -> String {
+fn row_path_from_json_pointer(row_index: usize, root: &Value, pointer: &str) -> String {
     let mut path = format!("$[{row_index}]");
     if pointer.is_empty() {
         return path;
     }
 
+    let mut current = Some(root);
     for token in pointer.trim_start_matches('/').split('/') {
         let segment = decode_pointer_token(token);
-        if is_simple_identifier(&segment) {
-            path.push('.');
-            path.push_str(&segment);
-        } else if is_array_index(&segment) {
-            path.push('[');
-            path.push_str(&segment);
-            path.push(']');
-        } else {
-            path.push('[');
-            path.push_str(
-                &serde_json::to_string(&segment)
-                    .unwrap_or_else(|_| "\"<invalid-segment>\"".to_string()),
-            );
-            path.push(']');
+        match current {
+            Some(Value::Array(items)) => {
+                if let Ok(index) = segment.parse::<usize>() {
+                    path.push('[');
+                    path.push_str(&index.to_string());
+                    path.push(']');
+                    current = items.get(index);
+                } else {
+                    push_object_key_segment(&mut path, &segment);
+                    current = None;
+                }
+            }
+            Some(Value::Object(map)) => {
+                push_object_key_segment(&mut path, &segment);
+                current = map.get(&segment);
+            }
+            _ => {
+                push_object_key_segment(&mut path, &segment);
+                current = None;
+            }
         }
     }
 
@@ -88,8 +95,17 @@ fn is_simple_identifier(value: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn is_array_index(value: &str) -> bool {
-    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+fn push_object_key_segment(path: &mut String, segment: &str) {
+    if is_simple_identifier(segment) {
+        path.push('.');
+        path.push_str(segment);
+    } else {
+        path.push('[');
+        path.push_str(
+            &serde_json::to_string(segment).unwrap_or_else(|_| "\"<invalid-segment>\"".to_string()),
+        );
+        path.push(']');
+    }
 }
 
 fn sort_mismatches(mismatches: &mut [MismatchEntry]) {
@@ -147,5 +163,22 @@ mod tests {
 
         let error = validate(&values, &schema).expect_err("schema should be invalid");
         assert!(error.to_string().contains("invalid schema"));
+    }
+
+    #[test]
+    fn keeps_numeric_object_keys_unambiguous_in_paths() {
+        let values = vec![json!({"0":"x"})];
+        let schema = json!({
+            "type": "object",
+            "required": ["0"],
+            "properties": {
+                "0": {"type": "integer"}
+            }
+        });
+
+        let report = validate(&values, &schema).expect("schema validation result");
+        assert!(!report.matched);
+        assert_eq!(report.mismatch_count, 1);
+        assert_eq!(report.mismatches[0].path, "$[0][\"0\"]");
     }
 }

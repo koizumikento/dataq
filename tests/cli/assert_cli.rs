@@ -274,3 +274,34 @@ fn assert_api_maps_schema_parse_errors_to_exit_three() {
         Value::String("input_usage_error".to_string())
     );
 }
+
+#[test]
+fn assert_api_schema_mode_keeps_numeric_object_key_paths_unambiguous() {
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    std::fs::write(
+        &schema_path,
+        r#"{
+            "type": "object",
+            "required": ["0"],
+            "properties": {
+                "0": {"type": "integer"}
+            }
+        }"#,
+    )
+    .expect("write schema");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: None,
+        schema: Some(schema_path),
+    };
+
+    let response = run_with_stdin(&args, Cursor::new(r#"[{"0":"x"}]"#));
+    assert_eq!(response.exit_code, 2);
+    assert_eq!(
+        response.payload["mismatches"][0]["path"],
+        Value::from("$[0][\"0\"]")
+    );
+}
