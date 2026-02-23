@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
 
+use regex::Regex;
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -14,102 +14,33 @@ pub enum AssertValidationError {
     Internal(String),
 }
 
+struct CompiledPattern {
+    path: String,
+    source: String,
+    regex: Regex,
+}
+
 pub fn validate(
     values: &[Value],
     rules: &AssertRules,
 ) -> Result<AssertReport, AssertValidationError> {
-    validate_rules(rules)?;
+    let compiled_patterns = validate_rules(rules)?;
+
+    let required_keys = sorted_unique_paths(&rules.required_keys);
+    let forbid_keys = sorted_unique_paths(&rules.forbid_keys);
 
     let mut mismatches = Vec::new();
     validate_count(values, rules, &mut mismatches);
 
-    let required_keys: BTreeSet<String> = rules.required_keys.iter().cloned().collect();
-
     for (index, row) in values.iter().enumerate() {
-        for key in &required_keys {
-            if get_value_at_path(row, key).is_none() {
-                mismatches.push(MismatchEntry {
-                    path: row_path(index, key),
-                    reason: "missing_key".to_string(),
-                    actual: Value::Null,
-                    expected: Value::String("present".to_string()),
-                });
-            }
-        }
-
-        for (path, expected_type) in &rules.types {
-            match get_value_at_path(row, path) {
-                Some(actual) => {
-                    if !expected_type.matches(actual) {
-                        mismatches.push(MismatchEntry {
-                            path: row_path(index, path),
-                            reason: "type_mismatch".to_string(),
-                            actual: Value::String(json_type_name(actual).to_string()),
-                            expected: Value::String(expected_type.as_str().to_string()),
-                        });
-                    }
-                }
-                None => mismatches.push(MismatchEntry {
-                    path: row_path(index, path),
-                    reason: "missing_key".to_string(),
-                    actual: Value::Null,
-                    expected: Value::String(expected_type.as_str().to_string()),
-                }),
-            }
-        }
-
-        for (path, range) in &rules.ranges {
-            match get_value_at_path(row, path) {
-                Some(actual) => {
-                    let Some(number) = actual.as_number() else {
-                        mismatches.push(MismatchEntry {
-                            path: row_path(index, path),
-                            reason: "not_numeric".to_string(),
-                            actual: Value::String(json_type_name(actual).to_string()),
-                            expected: json!({
-                                "type": "number",
-                                "min": range.min,
-                                "max": range.max
-                            }),
-                        });
-                        continue;
-                    };
-
-                    if let Some(min) = &range.min {
-                        if compare_numbers(number, min) == Ordering::Less {
-                            mismatches.push(MismatchEntry {
-                                path: row_path(index, path),
-                                reason: "below_min".to_string(),
-                                actual: actual.clone(),
-                                expected: Value::Number(min.clone()),
-                            });
-                        }
-                    }
-                    if let Some(max) = &range.max {
-                        if compare_numbers(number, max) == Ordering::Greater {
-                            mismatches.push(MismatchEntry {
-                                path: row_path(index, path),
-                                reason: "above_max".to_string(),
-                                actual: actual.clone(),
-                                expected: Value::Number(max.clone()),
-                            });
-                        }
-                    }
-                }
-                None => mismatches.push(MismatchEntry {
-                    path: row_path(index, path),
-                    reason: "missing_key".to_string(),
-                    actual: Value::Null,
-                    expected: json!({
-                        "min": range.min,
-                        "max": range.max
-                    }),
-                }),
-            }
-        }
+        validate_required_keys(index, row, &required_keys, &mut mismatches);
+        validate_forbid_keys(index, row, &forbid_keys, &mut mismatches);
+        validate_types(index, row, rules, &mut mismatches);
+        validate_nullable(index, row, rules, &mut mismatches);
+        validate_enum(index, row, rules, &mut mismatches);
+        validate_patterns(index, row, rules, &compiled_patterns, &mut mismatches);
+        validate_ranges(index, row, rules, &mut mismatches);
     }
-
-    sort_mismatches(&mut mismatches);
 
     Ok(AssertReport {
         matched: mismatches.is_empty(),
@@ -118,7 +49,7 @@ pub fn validate(
     })
 }
 
-fn validate_rules(rules: &AssertRules) -> Result<(), AssertValidationError> {
+fn validate_rules(rules: &AssertRules) -> Result<Vec<CompiledPattern>, AssertValidationError> {
     if let (Some(min), Some(max)) = (rules.count.min, rules.count.max)
         && min > max
     {
@@ -127,12 +58,37 @@ fn validate_rules(rules: &AssertRules) -> Result<(), AssertValidationError> {
         ));
     }
 
-    for path in &rules.required_keys {
-        validate_path(path)?;
+    for path in sorted_unique_paths(&rules.required_keys) {
+        validate_path(&path)?;
+    }
+
+    for path in sorted_unique_paths(&rules.forbid_keys) {
+        validate_path(&path)?;
     }
 
     for path in rules.types.keys() {
         validate_path(path)?;
+    }
+
+    for path in rules.nullable.keys() {
+        validate_path(path)?;
+    }
+
+    for path in rules.enum_values.keys() {
+        validate_path(path)?;
+    }
+
+    let mut compiled_patterns = Vec::new();
+    for (path, pattern) in &rules.patterns {
+        validate_path(path)?;
+        let regex = Regex::new(pattern).map_err(|err| {
+            AssertValidationError::InputUsage(format!("invalid pattern for pattern.{path}: {err}"))
+        })?;
+        compiled_patterns.push(CompiledPattern {
+            path: path.clone(),
+            source: pattern.clone(),
+            regex,
+        });
     }
 
     for (path, range) in &rules.ranges {
@@ -146,7 +102,7 @@ fn validate_rules(rules: &AssertRules) -> Result<(), AssertValidationError> {
         }
     }
 
-    Ok(())
+    Ok(compiled_patterns)
 }
 
 fn validate_count(values: &[Value], rules: &AssertRules, mismatches: &mut Vec<MismatchEntry>) {
@@ -154,23 +110,280 @@ fn validate_count(values: &[Value], rules: &AssertRules, mismatches: &mut Vec<Mi
     if let Some(min) = rules.count.min
         && actual_len < min
     {
-        mismatches.push(MismatchEntry {
-            path: "$".to_string(),
-            reason: "below_min_count".to_string(),
-            actual: json!(actual_len),
-            expected: json!(min),
-        });
+        push_mismatch(
+            mismatches,
+            "$".to_string(),
+            "count",
+            "below_min_count",
+            json!(actual_len),
+            json!(min),
+        );
     }
 
     if let Some(max) = rules.count.max
         && actual_len > max
     {
-        mismatches.push(MismatchEntry {
-            path: "$".to_string(),
-            reason: "above_max_count".to_string(),
-            actual: json!(actual_len),
-            expected: json!(max),
-        });
+        push_mismatch(
+            mismatches,
+            "$".to_string(),
+            "count",
+            "above_max_count",
+            json!(actual_len),
+            json!(max),
+        );
+    }
+}
+
+fn validate_required_keys(
+    index: usize,
+    row: &Value,
+    required_keys: &[String],
+    mismatches: &mut Vec<MismatchEntry>,
+) {
+    for key in required_keys {
+        if get_value_at_path(row, key).is_none() {
+            push_mismatch(
+                mismatches,
+                row_path(index, key),
+                "required_keys",
+                "missing_key",
+                Value::Null,
+                Value::String("present".to_string()),
+            );
+        }
+    }
+}
+
+fn validate_forbid_keys(
+    index: usize,
+    row: &Value,
+    forbid_keys: &[String],
+    mismatches: &mut Vec<MismatchEntry>,
+) {
+    for key in forbid_keys {
+        if let Some(actual) = get_value_at_path(row, key) {
+            push_mismatch(
+                mismatches,
+                row_path(index, key),
+                "forbid_keys",
+                "forbidden_key",
+                actual.clone(),
+                Value::String("absent".to_string()),
+            );
+        }
+    }
+}
+
+fn validate_types(
+    index: usize,
+    row: &Value,
+    rules: &AssertRules,
+    mismatches: &mut Vec<MismatchEntry>,
+) {
+    for (path, expected_type) in &rules.types {
+        match get_value_at_path(row, path) {
+            Some(actual) => {
+                if actual.is_null() && is_nullable(rules, path) {
+                    continue;
+                }
+                if !expected_type.matches(actual) {
+                    push_mismatch(
+                        mismatches,
+                        row_path(index, path),
+                        "types",
+                        "type_mismatch",
+                        Value::String(json_type_name(actual).to_string()),
+                        Value::String(expected_type.as_str().to_string()),
+                    );
+                }
+            }
+            None => push_mismatch(
+                mismatches,
+                row_path(index, path),
+                "types",
+                "missing_key",
+                Value::Null,
+                Value::String(expected_type.as_str().to_string()),
+            ),
+        }
+    }
+}
+
+fn validate_nullable(
+    index: usize,
+    row: &Value,
+    rules: &AssertRules,
+    mismatches: &mut Vec<MismatchEntry>,
+) {
+    for (path, allow_null) in &rules.nullable {
+        if *allow_null {
+            continue;
+        }
+        if let Some(actual) = get_value_at_path(row, path)
+            && actual.is_null()
+        {
+            push_mismatch(
+                mismatches,
+                row_path(index, path),
+                "nullable",
+                "null_not_allowed",
+                Value::Null,
+                Value::Bool(false),
+            );
+        }
+    }
+}
+
+fn validate_enum(
+    index: usize,
+    row: &Value,
+    rules: &AssertRules,
+    mismatches: &mut Vec<MismatchEntry>,
+) {
+    for (path, allowed_values) in &rules.enum_values {
+        match get_value_at_path(row, path) {
+            Some(actual) => {
+                if actual.is_null() && is_nullable(rules, path) {
+                    continue;
+                }
+                if !allowed_values.iter().any(|allowed| allowed == actual) {
+                    push_mismatch(
+                        mismatches,
+                        row_path(index, path),
+                        "enum",
+                        "enum_mismatch",
+                        actual.clone(),
+                        Value::Array(allowed_values.clone()),
+                    );
+                }
+            }
+            None => push_mismatch(
+                mismatches,
+                row_path(index, path),
+                "enum",
+                "missing_key",
+                Value::Null,
+                Value::Array(allowed_values.clone()),
+            ),
+        }
+    }
+}
+
+fn validate_patterns(
+    index: usize,
+    row: &Value,
+    rules: &AssertRules,
+    compiled_patterns: &[CompiledPattern],
+    mismatches: &mut Vec<MismatchEntry>,
+) {
+    for compiled in compiled_patterns {
+        match get_value_at_path(row, &compiled.path) {
+            Some(actual) => {
+                if actual.is_null() && is_nullable(rules, &compiled.path) {
+                    continue;
+                }
+
+                let Some(actual_string) = actual.as_str() else {
+                    push_mismatch(
+                        mismatches,
+                        row_path(index, &compiled.path),
+                        "pattern",
+                        "pattern_not_string",
+                        Value::String(json_type_name(actual).to_string()),
+                        Value::String(compiled.source.clone()),
+                    );
+                    continue;
+                };
+
+                if !compiled.regex.is_match(actual_string) {
+                    push_mismatch(
+                        mismatches,
+                        row_path(index, &compiled.path),
+                        "pattern",
+                        "pattern_mismatch",
+                        Value::String(actual_string.to_string()),
+                        Value::String(compiled.source.clone()),
+                    );
+                }
+            }
+            None => push_mismatch(
+                mismatches,
+                row_path(index, &compiled.path),
+                "pattern",
+                "missing_key",
+                Value::Null,
+                Value::String(compiled.source.clone()),
+            ),
+        }
+    }
+}
+
+fn validate_ranges(
+    index: usize,
+    row: &Value,
+    rules: &AssertRules,
+    mismatches: &mut Vec<MismatchEntry>,
+) {
+    for (path, range) in &rules.ranges {
+        match get_value_at_path(row, path) {
+            Some(actual) => {
+                if actual.is_null() && is_nullable(rules, path) {
+                    continue;
+                }
+
+                let Some(number) = actual.as_number() else {
+                    push_mismatch(
+                        mismatches,
+                        row_path(index, path),
+                        "ranges",
+                        "not_numeric",
+                        Value::String(json_type_name(actual).to_string()),
+                        json!({
+                            "type": "number",
+                            "min": range.min,
+                            "max": range.max
+                        }),
+                    );
+                    continue;
+                };
+
+                if let Some(min) = &range.min
+                    && compare_numbers(number, min) == Ordering::Less
+                {
+                    push_mismatch(
+                        mismatches,
+                        row_path(index, path),
+                        "ranges",
+                        "below_min",
+                        actual.clone(),
+                        Value::Number(min.clone()),
+                    );
+                }
+                if let Some(max) = &range.max
+                    && compare_numbers(number, max) == Ordering::Greater
+                {
+                    push_mismatch(
+                        mismatches,
+                        row_path(index, path),
+                        "ranges",
+                        "above_max",
+                        actual.clone(),
+                        Value::Number(max.clone()),
+                    );
+                }
+            }
+            None => push_mismatch(
+                mismatches,
+                row_path(index, path),
+                "ranges",
+                "missing_key",
+                Value::Null,
+                json!({
+                    "min": range.min,
+                    "max": range.max
+                }),
+            ),
+        }
     }
 }
 
@@ -186,6 +399,34 @@ fn validate_path(path: &str) -> Result<(), AssertValidationError> {
         )));
     }
     Ok(())
+}
+
+fn is_nullable(rules: &AssertRules, path: &str) -> bool {
+    rules.nullable.get(path).copied().unwrap_or(false)
+}
+
+fn sorted_unique_paths(paths: &[String]) -> Vec<String> {
+    let mut sorted = paths.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    sorted
+}
+
+fn push_mismatch(
+    mismatches: &mut Vec<MismatchEntry>,
+    path: String,
+    rule_kind: &str,
+    reason: &str,
+    actual: Value,
+    expected: Value,
+) {
+    mismatches.push(MismatchEntry {
+        path,
+        rule_kind: rule_kind.to_string(),
+        reason: reason.to_string(),
+        actual,
+        expected,
+    });
 }
 
 fn row_path(index: usize, path: &str) -> String {
@@ -253,28 +494,6 @@ fn compare_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Ord
         .expect("serde_json::Number is always finite")
 }
 
-fn sort_mismatches(mismatches: &mut [MismatchEntry]) {
-    mismatches.sort_by(|left, right| {
-        let left_key = (
-            left.path.clone(),
-            left.reason.clone(),
-            stable_value_key(&left.actual),
-            stable_value_key(&left.expected),
-        );
-        let right_key = (
-            right.path.clone(),
-            right.reason.clone(),
-            stable_value_key(&right.actual),
-            stable_value_key(&right.expected),
-        );
-        left_key.cmp(&right_key)
-    });
-}
-
-fn stable_value_key(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "<serialization-error>".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -306,6 +525,7 @@ mod tests {
                 max: Some(1),
             },
             ranges,
+            ..AssertRules::default()
         };
 
         let report = validate(&values, &rules).expect("valid result");
@@ -331,13 +551,99 @@ mod tests {
             types,
             count: CountRule::default(),
             ranges,
+            ..AssertRules::default()
         };
 
         let report = validate(&values, &rules).expect("validation report");
         assert!(!report.matched);
         assert_eq!(report.mismatch_count, 2);
         assert_eq!(report.mismatches[0].reason, "type_mismatch");
+        assert_eq!(report.mismatches[0].rule_kind, "types");
         assert_eq!(report.mismatches[1].reason, "above_max");
+        assert_eq!(report.mismatches[1].rule_kind, "ranges");
+    }
+
+    #[test]
+    fn validates_enum_pattern_forbid_keys_and_nullable() {
+        let values = vec![json!({
+            "status": "pending",
+            "name": "User-1",
+            "meta": {"blocked": true},
+            "optional": null
+        })];
+
+        let mut enum_values = BTreeMap::new();
+        enum_values.insert("status".to_string(), vec![json!("open"), json!("closed")]);
+
+        let mut patterns = BTreeMap::new();
+        patterns.insert("name".to_string(), "^[a-z]+_[0-9]+$".to_string());
+
+        let mut nullable = BTreeMap::new();
+        nullable.insert("optional".to_string(), true);
+
+        let rules = AssertRules {
+            forbid_keys: vec!["meta.blocked".to_string()],
+            nullable,
+            enum_values,
+            patterns,
+            ..AssertRules::default()
+        };
+
+        let report = validate(&values, &rules).expect("validation report");
+        assert!(!report.matched);
+        assert_eq!(report.mismatch_count, 3);
+
+        assert_eq!(report.mismatches[0].rule_kind, "forbid_keys");
+        assert_eq!(report.mismatches[0].reason, "forbidden_key");
+        assert_eq!(report.mismatches[1].rule_kind, "enum");
+        assert_eq!(report.mismatches[1].reason, "enum_mismatch");
+        assert_eq!(report.mismatches[2].rule_kind, "pattern");
+        assert_eq!(report.mismatches[2].reason, "pattern_mismatch");
+    }
+
+    #[test]
+    fn nullable_true_allows_null_across_other_rules() {
+        let values = vec![json!({
+            "nickname": null,
+            "score": null,
+            "status": null
+        })];
+
+        let mut types = BTreeMap::new();
+        types.insert("nickname".to_string(), RuleType::String);
+
+        let mut ranges = BTreeMap::new();
+        ranges.insert(
+            "score".to_string(),
+            NumericRangeRule {
+                min: Some(float_number(0.0)),
+                max: Some(float_number(10.0)),
+            },
+        );
+
+        let mut enum_values = BTreeMap::new();
+        enum_values.insert("status".to_string(), vec![json!("ok")]);
+
+        let mut patterns = BTreeMap::new();
+        patterns.insert("nickname".to_string(), "^[a-z]+$".to_string());
+
+        let mut nullable = BTreeMap::new();
+        nullable.insert("nickname".to_string(), true);
+        nullable.insert("score".to_string(), true);
+        nullable.insert("status".to_string(), true);
+
+        let rules = AssertRules {
+            types,
+            nullable,
+            enum_values,
+            patterns,
+            ranges,
+            ..AssertRules::default()
+        };
+
+        let report = validate(&values, &rules).expect("validation report");
+        assert!(report.matched);
+        assert_eq!(report.mismatch_count, 0);
     }
 
     #[test]
@@ -350,12 +656,33 @@ mod tests {
                 max: Some(1),
             },
             ranges: BTreeMap::new(),
+            ..AssertRules::default()
         };
 
         let err = validate(&[], &rules).expect_err("must fail");
         match err {
             AssertValidationError::InputUsage(message) => {
                 assert!(message.contains("count.min"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_pattern() {
+        let mut patterns = BTreeMap::new();
+        patterns.insert("name".to_string(), "[a-z".to_string());
+
+        let rules = AssertRules {
+            patterns,
+            ..AssertRules::default()
+        };
+
+        let err = validate(&[], &rules).expect_err("must fail");
+        match err {
+            AssertValidationError::InputUsage(message) => {
+                assert!(message.contains("invalid pattern"));
+                assert!(message.contains("pattern.name"));
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -377,12 +704,14 @@ mod tests {
             types: BTreeMap::new(),
             count: CountRule::default(),
             ranges,
+            ..AssertRules::default()
         };
 
         let report = validate(&values, &rules).expect("validation report");
         assert!(!report.matched);
         assert_eq!(report.mismatch_count, 1);
         assert_eq!(report.mismatches[0].reason, "above_max");
+        assert_eq!(report.mismatches[0].rule_kind, "ranges");
         assert_eq!(report.mismatches[0].path, "$[0].value");
     }
 
