@@ -1,15 +1,12 @@
 use std::cmp::Ordering;
-use std::fs;
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use serde_json::Value;
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::util::sort::sort_value_keys;
-
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub enum MlrError {
@@ -35,11 +32,6 @@ pub enum MlrError {
     Serialize(serde_json::Error),
     #[error("failed to create temporary mlr input file: {0}")]
     TempFile(std::io::Error),
-    #[error("failed to write temporary mlr input file `{path}`: {source}")]
-    TempFileWrite {
-        path: String,
-        source: std::io::Error,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +129,7 @@ fn join_rows_with_bin(
     how: MlrJoinHow,
     bin: &str,
 ) -> Result<Vec<Value>, MlrError> {
-    let right_path = write_temp_values_file(right)?;
+    let left_file = write_temp_values_file(left)?;
 
     let mut args = vec![
         "--ijson".to_string(),
@@ -146,15 +138,13 @@ fn join_rows_with_bin(
         "-j".to_string(),
         on.to_string(),
         "-f".to_string(),
-        right_path.to_string_lossy().into_owned(),
+        left_file.path().to_string_lossy().into_owned(),
     ];
     if matches!(how, MlrJoinHow::Left) {
         args.push("--ul".to_string());
     }
 
-    let result = run_mlr_with_stdin_values(left, &args, bin);
-    let _ = fs::remove_file(right_path);
-    result
+    run_mlr_with_stdin_values(right, &args, bin)
 }
 
 fn aggregate_rows_with_bin(
@@ -228,19 +218,11 @@ fn wait_and_collect_rows(child: Child) -> Result<Vec<Value>, MlrError> {
     }
 }
 
-fn write_temp_values_file(values: &[Value]) -> Result<std::path::PathBuf, MlrError> {
-    let filename = format!(
-        "dataq-mlr-{}-{}.json",
-        std::process::id(),
-        TEMP_FILE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
-    );
-    let path = std::env::temp_dir().join(filename);
-    let bytes = serde_json::to_vec(values).map_err(MlrError::Serialize)?;
-    fs::write(&path, bytes).map_err(|source| MlrError::TempFileWrite {
-        path: path.display().to_string(),
-        source,
-    })?;
-    Ok(path)
+fn write_temp_values_file(values: &[Value]) -> Result<NamedTempFile, MlrError> {
+    let mut file = NamedTempFile::new().map_err(MlrError::TempFile)?;
+    serde_json::to_writer(file.as_file_mut(), values).map_err(MlrError::Serialize)?;
+    file.as_file_mut().flush().map_err(MlrError::TempFile)?;
+    Ok(file)
 }
 
 fn normalize_aggregate_rows(
@@ -433,6 +415,69 @@ printf '[{"id":1}]'
         )
         .expect("join should succeed");
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn left_join_wires_user_left_rows_to_mlr_left_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = write_test_script(
+            dir.path().join("fake-mlr"),
+            r#"
+left_file=""
+capture_next=0
+for arg in "$@"; do
+  if [ "$capture_next" = "1" ]; then
+    left_file="$arg"
+    capture_next=0
+    continue
+  fi
+  if [ "$arg" = "-f" ]; then
+    capture_next=1
+    continue
+  fi
+  if [ "$arg" = "--ul" ]; then
+    saw_left=1
+  fi
+done
+
+if [ -z "$left_file" ]; then
+  echo 'missing -f value' 1>&2
+  exit 9
+fi
+if ! grep -q '"left_marker":"L"' "$left_file"; then
+  echo 'left file was not wired from user-left input' 1>&2
+  exit 9
+fi
+
+stdin_payload="$(cat)"
+if ! printf '%s' "$stdin_payload" | grep -q '"right_marker":"R"'; then
+  echo 'stdin was not wired from user-right input' 1>&2
+  exit 9
+fi
+
+if [ -n "$saw_left" ]; then
+  printf '[{"id":1,"left_marker":"L","right_marker":"R"},{"id":2,"left_marker":"L","right_marker":null}]'
+  exit 0
+fi
+
+printf '[{"id":1,"left_marker":"L","right_marker":"R"}]'
+"#,
+        );
+
+        let rows = join_rows_with_bin(
+            &[
+                serde_json::json!({"id":1,"left_marker":"L"}),
+                serde_json::json!({"id":2,"left_marker":"L"}),
+            ],
+            &[serde_json::json!({"id":1,"right_marker":"R"})],
+            "id",
+            MlrJoinHow::Left,
+            bin.to_str().expect("utf8 path"),
+        )
+        .expect("left join should succeed");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["right_marker"], serde_json::Value::Null);
     }
 
     #[test]

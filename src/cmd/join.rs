@@ -76,10 +76,10 @@ pub fn run_with_trace(args: &JoinCommandArgs) -> (JoinCommandResponse, JoinPipel
         }
     };
 
-    trace.mark_tool_used("mlr");
     let input_records = left.len() + right.len();
     match join::join_values(&left, &right, &args.on, args.how) {
         Ok(rows) => {
+            trace.mark_tool_used("mlr");
             trace
                 .stage_diagnostics
                 .push(PipelineStageDiagnostic::success(
@@ -98,6 +98,7 @@ pub fn run_with_trace(args: &JoinCommandArgs) -> (JoinCommandResponse, JoinPipel
             )
         }
         Err(JoinError::Mlr(error)) => {
+            trace.mark_tool_used("mlr");
             trace
                 .stage_diagnostics
                 .push(PipelineStageDiagnostic::failure(

@@ -62,10 +62,10 @@ pub fn run_with_trace(
         }
     };
 
-    trace.mark_tool_used("mlr");
     let input_records = values.len();
     match aggregate::aggregate_values(&values, &args.group_by, args.metric, &args.target) {
         Ok(rows) => {
+            trace.mark_tool_used("mlr");
             trace
                 .stage_diagnostics
                 .push(PipelineStageDiagnostic::success(
@@ -84,6 +84,7 @@ pub fn run_with_trace(
             )
         }
         Err(AggregateError::Mlr(error)) => {
+            trace.mark_tool_used("mlr");
             trace
                 .stage_diagnostics
                 .push(PipelineStageDiagnostic::failure(

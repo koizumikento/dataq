@@ -210,6 +210,55 @@ fn join_missing_key_returns_exit_three() {
 }
 
 #[test]
+fn join_validation_failure_does_not_mark_mlr_used() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let left = dir.path().join("left.json");
+    let right = dir.path().join("right.json");
+    fs::write(&left, r#"[{"id":1},{"name":"missing-id"}]"#).expect("write left");
+    fs::write(&right, r#"[{"id":1}]"#).expect("write right");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "join",
+            "--emit-pipeline",
+            "--left",
+            left.to_str().expect("utf8 left path"),
+            "--right",
+            right.to_str().expect("utf8 right path"),
+            "--on",
+            "id",
+            "--how",
+            "inner",
+        ])
+        .output()
+        .expect("run join command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+
+    let tools = stderr_json["external_tools"]
+        .as_array()
+        .expect("external tools array");
+    let mlr_entry = tools
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some("mlr"))
+        .expect("mlr entry");
+    assert_eq!(mlr_entry["used"], Value::Bool(false));
+
+    let stage_steps: Vec<String> = stderr_json["stage_diagnostics"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| entry["step"].as_str().map(ToString::to_string))
+        .collect();
+    assert!(!stage_steps.iter().any(|step| step == "join_mlr_execute"));
+}
+
+#[test]
 fn join_emit_pipeline_reports_stage_diagnostics() {
     let dir = tempdir().expect("tempdir");
     let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
@@ -276,14 +325,35 @@ fn write_fake_mlr_script(path: PathBuf) -> PathBuf {
     let script = r#"#!/bin/sh
 mode=""
 action=""
+left_file=""
+capture_next_f=0
 for arg in "$@"; do
+  if [ "$capture_next_f" = "1" ]; then
+    left_file="$arg"
+    capture_next_f=0
+    continue
+  fi
   if [ "$arg" = "join" ]; then mode="join"; fi
   if [ "$arg" = "stats1" ]; then mode="stats1"; fi
   if [ "$arg" = "count" ] || [ "$arg" = "sum" ] || [ "$arg" = "mean" ]; then action="$arg"; fi
+  if [ "$arg" = "-f" ]; then capture_next_f=1; fi
   if [ "$arg" = "--ul" ]; then left_join="1"; fi
 done
 
 if [ "$mode" = "join" ]; then
+  if [ -z "$left_file" ]; then
+    echo 'missing -f left file' 1>&2
+    exit 9
+  fi
+  if ! grep -q '"l":"L' "$left_file"; then
+    echo 'left file does not contain expected left records' 1>&2
+    exit 9
+  fi
+  stdin_payload="$(cat)"
+  if ! printf '%s' "$stdin_payload" | grep -q '"r":"R1"'; then
+    echo 'stdin does not contain expected right records' 1>&2
+    exit 9
+  fi
   if [ -n "$left_join" ]; then
     printf '[{"id":1,"l":"L1","r":"R1"},{"id":2,"l":"L2","r":null}]'
   else
