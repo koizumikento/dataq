@@ -44,6 +44,67 @@ pub fn deterministic_guards() -> Vec<String> {
     ]
 }
 
+/// Machine-readable help payload for `assert --rules` rule files.
+pub fn rules_help_payload() -> Value {
+    json!({
+        "schema": "dataq.assert.rules.v1",
+        "description": "Rule file schema for `dataq assert --rules`",
+        "top_level_keys": {
+            "required_keys": "array<string>",
+            "forbid_keys": "array<string>",
+            "fields": "object<string, field_rule>",
+            "count": {
+                "min": "usize (optional)",
+                "max": "usize (optional)"
+            }
+        },
+        "field_rule": {
+            "type": "string|number|integer|boolean|object|array|null (optional)",
+            "nullable": "bool (optional)",
+            "enum": "array<any> (optional)",
+            "pattern": "string regex (optional)",
+            "range": {
+                "min": "number (optional)",
+                "max": "number (optional)"
+            }
+        },
+        "path_notation": "dot-delimited object path (example: meta.blocked)",
+        "constraints": [
+            "fields.<path> must define at least one of type/nullable/enum/pattern/range",
+            "count.min must be <= count.max",
+            "fields.<path>.range.min must be <= fields.<path>.range.max",
+            "unknown keys are rejected"
+        ],
+        "example": {
+            "required_keys": ["id", "status"],
+            "forbid_keys": ["debug", "meta.blocked"],
+            "fields": {
+                "id": {
+                    "type": "integer"
+                },
+                "score": {
+                    "type": "number",
+                    "nullable": true,
+                    "range": {
+                        "min": 0,
+                        "max": 100
+                    }
+                },
+                "status": {
+                    "enum": ["active", "archived"]
+                },
+                "name": {
+                    "pattern": "^[a-z]+_[0-9]+$"
+                }
+            },
+            "count": {
+                "min": 1,
+                "max": 1000
+            }
+        }
+    })
+}
+
 pub fn run_with_stdin<R: Read>(args: &AssertCommandArgs, stdin: R) -> AssertCommandResponse {
     match execute(args, stdin) {
         Ok(report) => report_response(report),
@@ -208,9 +269,9 @@ mod tests {
             &rules_path,
             r#"{
                 "required_keys": ["id"],
-                "types": {"id": "integer"},
+                "fields": {"id": {"type": "integer"}},
                 "count": {"min": 1, "max": 1},
-                "ranges": {}
+                "forbid_keys": []
             }"#,
         )
         .expect("write rules");
@@ -234,9 +295,9 @@ mod tests {
             &rules_path,
             r#"{
                 "required_keys": ["id"],
-                "types": {"id": "integer"},
+                "fields": {"id": {"type": "integer"}},
                 "count": {"min": 1, "max": 1},
-                "ranges": {}
+                "forbid_keys": []
             }"#,
         )
         .expect("write rules");

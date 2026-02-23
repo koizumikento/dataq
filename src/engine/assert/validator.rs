@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 use regex::Regex;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::domain::rules::{AssertReport, AssertRules, MismatchEntry};
+use crate::domain::rules::{AssertReport, AssertRules, MismatchEntry, NumericRangeRule, RuleType};
 
 #[derive(Debug, Error)]
 pub enum AssertValidationError {
@@ -20,11 +21,21 @@ struct CompiledPattern {
     regex: Regex,
 }
 
+#[derive(Debug, Default)]
+struct EffectiveFieldRules {
+    types: BTreeMap<String, RuleType>,
+    nullable: BTreeMap<String, bool>,
+    enum_values: BTreeMap<String, Vec<Value>>,
+    patterns: BTreeMap<String, String>,
+    ranges: BTreeMap<String, NumericRangeRule>,
+}
+
 pub fn validate(
     values: &[Value],
     rules: &AssertRules,
 ) -> Result<AssertReport, AssertValidationError> {
-    let compiled_patterns = validate_rules(rules)?;
+    let effective = merge_field_rules(rules)?;
+    let compiled_patterns = validate_rules(rules, &effective)?;
 
     let required_keys = sorted_unique_paths(&rules.required_keys);
     let forbid_keys = sorted_unique_paths(&rules.forbid_keys);
@@ -35,11 +46,11 @@ pub fn validate(
     for (index, row) in values.iter().enumerate() {
         validate_required_keys(index, row, &required_keys, &mut mismatches);
         validate_forbid_keys(index, row, &forbid_keys, &mut mismatches);
-        validate_types(index, row, rules, &mut mismatches);
-        validate_nullable(index, row, rules, &mut mismatches);
-        validate_enum(index, row, rules, &mut mismatches);
-        validate_patterns(index, row, rules, &compiled_patterns, &mut mismatches);
-        validate_ranges(index, row, rules, &mut mismatches);
+        validate_types(index, row, &effective, &mut mismatches);
+        validate_nullable(index, row, &effective, &mut mismatches);
+        validate_enum(index, row, &effective, &mut mismatches);
+        validate_patterns(index, row, &effective, &compiled_patterns, &mut mismatches);
+        validate_ranges(index, row, &effective, &mut mismatches);
     }
 
     Ok(AssertReport {
@@ -49,7 +60,47 @@ pub fn validate(
     })
 }
 
-fn validate_rules(rules: &AssertRules) -> Result<Vec<CompiledPattern>, AssertValidationError> {
+fn merge_field_rules(rules: &AssertRules) -> Result<EffectiveFieldRules, AssertValidationError> {
+    let mut effective = EffectiveFieldRules::default();
+
+    for (path, field) in &rules.fields {
+        if field.expected_type.is_none()
+            && field.nullable.is_none()
+            && field.enum_values.is_none()
+            && field.pattern.is_none()
+            && field.range.is_none()
+        {
+            return Err(AssertValidationError::InputUsage(format!(
+                "fields.{path} must define at least one of type/nullable/enum/pattern/range"
+            )));
+        }
+
+        if let Some(expected_type) = &field.expected_type {
+            effective.types.insert(path.clone(), expected_type.clone());
+        }
+        if let Some(allow_null) = field.nullable {
+            effective.nullable.insert(path.clone(), allow_null);
+        }
+        if let Some(enum_values) = &field.enum_values {
+            effective
+                .enum_values
+                .insert(path.clone(), enum_values.clone());
+        }
+        if let Some(pattern) = &field.pattern {
+            effective.patterns.insert(path.clone(), pattern.clone());
+        }
+        if let Some(range) = &field.range {
+            effective.ranges.insert(path.clone(), range.clone());
+        }
+    }
+
+    Ok(effective)
+}
+
+fn validate_rules(
+    rules: &AssertRules,
+    effective: &EffectiveFieldRules,
+) -> Result<Vec<CompiledPattern>, AssertValidationError> {
     if let (Some(min), Some(max)) = (rules.count.min, rules.count.max)
         && min > max
     {
@@ -66,23 +117,29 @@ fn validate_rules(rules: &AssertRules) -> Result<Vec<CompiledPattern>, AssertVal
         validate_path(&path)?;
     }
 
-    for path in rules.types.keys() {
+    for path in rules.fields.keys() {
         validate_path(path)?;
     }
 
-    for path in rules.nullable.keys() {
+    for path in effective.types.keys() {
         validate_path(path)?;
     }
 
-    for path in rules.enum_values.keys() {
+    for path in effective.nullable.keys() {
+        validate_path(path)?;
+    }
+
+    for path in effective.enum_values.keys() {
         validate_path(path)?;
     }
 
     let mut compiled_patterns = Vec::new();
-    for (path, pattern) in &rules.patterns {
+    for (path, pattern) in &effective.patterns {
         validate_path(path)?;
         let regex = Regex::new(pattern).map_err(|err| {
-            AssertValidationError::InputUsage(format!("invalid pattern for pattern.{path}: {err}"))
+            AssertValidationError::InputUsage(format!(
+                "invalid pattern for fields.{path}.pattern: {err}"
+            ))
         })?;
         compiled_patterns.push(CompiledPattern {
             path: path.clone(),
@@ -91,13 +148,13 @@ fn validate_rules(rules: &AssertRules) -> Result<Vec<CompiledPattern>, AssertVal
         });
     }
 
-    for (path, range) in &rules.ranges {
+    for (path, range) in &effective.ranges {
         validate_path(path)?;
         if let (Some(min), Some(max)) = (&range.min, &range.max)
             && compare_numbers(min, max) == Ordering::Greater
         {
             return Err(AssertValidationError::InputUsage(format!(
-                "ranges.{path}.min must be <= ranges.{path}.max"
+                "fields.{path}.range.min must be <= fields.{path}.range.max"
             )));
         }
     }
@@ -177,13 +234,13 @@ fn validate_forbid_keys(
 fn validate_types(
     index: usize,
     row: &Value,
-    rules: &AssertRules,
+    effective: &EffectiveFieldRules,
     mismatches: &mut Vec<MismatchEntry>,
 ) {
-    for (path, expected_type) in &rules.types {
+    for (path, expected_type) in &effective.types {
         match get_value_at_path(row, path) {
             Some(actual) => {
-                if actual.is_null() && is_nullable(rules, path) {
+                if actual.is_null() && is_nullable(effective, path) {
                     continue;
                 }
                 if !expected_type.matches(actual) {
@@ -212,10 +269,10 @@ fn validate_types(
 fn validate_nullable(
     index: usize,
     row: &Value,
-    rules: &AssertRules,
+    effective: &EffectiveFieldRules,
     mismatches: &mut Vec<MismatchEntry>,
 ) {
-    for (path, allow_null) in &rules.nullable {
+    for (path, allow_null) in &effective.nullable {
         if *allow_null {
             continue;
         }
@@ -237,13 +294,13 @@ fn validate_nullable(
 fn validate_enum(
     index: usize,
     row: &Value,
-    rules: &AssertRules,
+    effective: &EffectiveFieldRules,
     mismatches: &mut Vec<MismatchEntry>,
 ) {
-    for (path, allowed_values) in &rules.enum_values {
+    for (path, allowed_values) in &effective.enum_values {
         match get_value_at_path(row, path) {
             Some(actual) => {
-                if actual.is_null() && is_nullable(rules, path) {
+                if actual.is_null() && is_nullable(effective, path) {
                     continue;
                 }
                 if !allowed_values.iter().any(|allowed| allowed == actual) {
@@ -272,14 +329,14 @@ fn validate_enum(
 fn validate_patterns(
     index: usize,
     row: &Value,
-    rules: &AssertRules,
+    effective: &EffectiveFieldRules,
     compiled_patterns: &[CompiledPattern],
     mismatches: &mut Vec<MismatchEntry>,
 ) {
     for compiled in compiled_patterns {
         match get_value_at_path(row, &compiled.path) {
             Some(actual) => {
-                if actual.is_null() && is_nullable(rules, &compiled.path) {
+                if actual.is_null() && is_nullable(effective, &compiled.path) {
                     continue;
                 }
 
@@ -321,13 +378,13 @@ fn validate_patterns(
 fn validate_ranges(
     index: usize,
     row: &Value,
-    rules: &AssertRules,
+    effective: &EffectiveFieldRules,
     mismatches: &mut Vec<MismatchEntry>,
 ) {
-    for (path, range) in &rules.ranges {
+    for (path, range) in &effective.ranges {
         match get_value_at_path(row, path) {
             Some(actual) => {
-                if actual.is_null() && is_nullable(rules, path) {
+                if actual.is_null() && is_nullable(effective, path) {
                     continue;
                 }
 
@@ -401,8 +458,8 @@ fn validate_path(path: &str) -> Result<(), AssertValidationError> {
     Ok(())
 }
 
-fn is_nullable(rules: &AssertRules, path: &str) -> bool {
-    rules.nullable.get(path).copied().unwrap_or(false)
+fn is_nullable(effective: &EffectiveFieldRules, path: &str) -> bool {
+    effective.nullable.get(path).copied().unwrap_or(false)
 }
 
 fn sorted_unique_paths(paths: &[String]) -> Vec<String> {
@@ -500,31 +557,38 @@ mod tests {
 
     use serde_json::{Number, json};
 
-    use crate::domain::rules::{AssertRules, CountRule, NumericRangeRule, RuleType};
+    use crate::domain::rules::{AssertRules, CountRule, FieldRule, NumericRangeRule, RuleType};
 
     use super::{AssertValidationError, validate};
 
     #[test]
     fn validates_count_and_field_rules() {
         let values = vec![json!({"id": 1, "score": 1.5})];
-        let mut types = BTreeMap::new();
-        types.insert("id".to_string(), RuleType::Integer);
-        let mut ranges = BTreeMap::new();
-        ranges.insert(
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "id".to_string(),
+            FieldRule {
+                expected_type: Some(RuleType::Integer),
+                ..FieldRule::default()
+            },
+        );
+        fields.insert(
             "score".to_string(),
-            NumericRangeRule {
-                min: Some(float_number(1.0)),
-                max: Some(float_number(2.0)),
+            FieldRule {
+                range: Some(NumericRangeRule {
+                    min: Some(float_number(1.0)),
+                    max: Some(float_number(2.0)),
+                }),
+                ..FieldRule::default()
             },
         );
         let rules = AssertRules {
             required_keys: vec!["id".to_string(), "score".to_string()],
-            types,
+            fields,
             count: CountRule {
                 min: Some(1),
                 max: Some(1),
             },
-            ranges,
             ..AssertRules::default()
         };
 
@@ -536,21 +600,28 @@ mod tests {
     #[test]
     fn reports_type_and_range_mismatches() {
         let values = vec![json!({"id": "1", "score": 5.0})];
-        let mut types = BTreeMap::new();
-        types.insert("id".to_string(), RuleType::Integer);
-        let mut ranges = BTreeMap::new();
-        ranges.insert(
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "id".to_string(),
+            FieldRule {
+                expected_type: Some(RuleType::Integer),
+                ..FieldRule::default()
+            },
+        );
+        fields.insert(
             "score".to_string(),
-            NumericRangeRule {
-                min: Some(float_number(1.0)),
-                max: Some(float_number(3.0)),
+            FieldRule {
+                range: Some(NumericRangeRule {
+                    min: Some(float_number(1.0)),
+                    max: Some(float_number(3.0)),
+                }),
+                ..FieldRule::default()
             },
         );
         let rules = AssertRules {
             required_keys: vec![],
-            types,
+            fields,
             count: CountRule::default(),
-            ranges,
             ..AssertRules::default()
         };
 
@@ -572,20 +643,32 @@ mod tests {
             "optional": null
         })];
 
-        let mut enum_values = BTreeMap::new();
-        enum_values.insert("status".to_string(), vec![json!("open"), json!("closed")]);
-
-        let mut patterns = BTreeMap::new();
-        patterns.insert("name".to_string(), "^[a-z]+_[0-9]+$".to_string());
-
-        let mut nullable = BTreeMap::new();
-        nullable.insert("optional".to_string(), true);
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "status".to_string(),
+            FieldRule {
+                enum_values: Some(vec![json!("open"), json!("closed")]),
+                ..FieldRule::default()
+            },
+        );
+        fields.insert(
+            "name".to_string(),
+            FieldRule {
+                pattern: Some("^[a-z]+_[0-9]+$".to_string()),
+                ..FieldRule::default()
+            },
+        );
+        fields.insert(
+            "optional".to_string(),
+            FieldRule {
+                nullable: Some(true),
+                ..FieldRule::default()
+            },
+        );
 
         let rules = AssertRules {
             forbid_keys: vec!["meta.blocked".to_string()],
-            nullable,
-            enum_values,
-            patterns,
+            fields,
             ..AssertRules::default()
         };
 
@@ -609,35 +692,38 @@ mod tests {
             "status": null
         })];
 
-        let mut types = BTreeMap::new();
-        types.insert("nickname".to_string(), RuleType::String);
-
-        let mut ranges = BTreeMap::new();
-        ranges.insert(
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "nickname".to_string(),
+            FieldRule {
+                expected_type: Some(RuleType::String),
+                nullable: Some(true),
+                pattern: Some("^[a-z]+$".to_string()),
+                ..FieldRule::default()
+            },
+        );
+        fields.insert(
             "score".to_string(),
-            NumericRangeRule {
-                min: Some(float_number(0.0)),
-                max: Some(float_number(10.0)),
+            FieldRule {
+                nullable: Some(true),
+                range: Some(NumericRangeRule {
+                    min: Some(float_number(0.0)),
+                    max: Some(float_number(10.0)),
+                }),
+                ..FieldRule::default()
+            },
+        );
+        fields.insert(
+            "status".to_string(),
+            FieldRule {
+                nullable: Some(true),
+                enum_values: Some(vec![json!("ok")]),
+                ..FieldRule::default()
             },
         );
 
-        let mut enum_values = BTreeMap::new();
-        enum_values.insert("status".to_string(), vec![json!("ok")]);
-
-        let mut patterns = BTreeMap::new();
-        patterns.insert("nickname".to_string(), "^[a-z]+$".to_string());
-
-        let mut nullable = BTreeMap::new();
-        nullable.insert("nickname".to_string(), true);
-        nullable.insert("score".to_string(), true);
-        nullable.insert("status".to_string(), true);
-
         let rules = AssertRules {
-            types,
-            nullable,
-            enum_values,
-            patterns,
-            ranges,
+            fields,
             ..AssertRules::default()
         };
 
@@ -650,12 +736,11 @@ mod tests {
     fn rejects_invalid_rule_bounds() {
         let rules = AssertRules {
             required_keys: vec![],
-            types: BTreeMap::new(),
+            fields: BTreeMap::new(),
             count: CountRule {
                 min: Some(3),
                 max: Some(1),
             },
-            ranges: BTreeMap::new(),
             ..AssertRules::default()
         };
 
@@ -670,11 +755,17 @@ mod tests {
 
     #[test]
     fn rejects_invalid_pattern() {
-        let mut patterns = BTreeMap::new();
-        patterns.insert("name".to_string(), "[a-z".to_string());
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            FieldRule {
+                pattern: Some("[a-z".to_string()),
+                ..FieldRule::default()
+            },
+        );
 
         let rules = AssertRules {
-            patterns,
+            fields,
             ..AssertRules::default()
         };
 
@@ -682,7 +773,7 @@ mod tests {
         match err {
             AssertValidationError::InputUsage(message) => {
                 assert!(message.contains("invalid pattern"));
-                assert!(message.contains("pattern.name"));
+                assert!(message.contains("fields.name.pattern"));
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -691,19 +782,21 @@ mod tests {
     #[test]
     fn compares_large_integer_ranges_exactly() {
         let values = vec![json!({"value": 9_007_199_254_740_993u64})];
-        let mut ranges = BTreeMap::new();
-        ranges.insert(
+        let mut fields = BTreeMap::new();
+        fields.insert(
             "value".to_string(),
-            NumericRangeRule {
-                min: None,
-                max: Some(Number::from(9_007_199_254_740_992u64)),
+            FieldRule {
+                range: Some(NumericRangeRule {
+                    min: None,
+                    max: Some(Number::from(9_007_199_254_740_992u64)),
+                }),
+                ..FieldRule::default()
             },
         );
         let rules = AssertRules {
             required_keys: vec![],
-            types: BTreeMap::new(),
+            fields,
             count: CountRule::default(),
-            ranges,
             ..AssertRules::default()
         };
 

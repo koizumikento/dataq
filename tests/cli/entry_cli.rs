@@ -71,9 +71,9 @@ fn assert_command_reports_validation_mismatch() {
         &rules_path,
         r#"{
             "required_keys": ["id"],
-            "types": {"id": "integer"},
+            "fields": {"id": {"type": "integer"}},
             "count": {"min": 1, "max": 1},
-            "ranges": {}
+            "forbid_keys": []
         }"#,
     )
     .expect("write rules");
@@ -84,6 +84,38 @@ fn assert_command_reports_validation_mismatch() {
         .assert()
         .code(2)
         .stdout(predicate::str::contains("\"mismatch_count\":1"));
+}
+
+#[test]
+fn assert_rules_help_outputs_machine_readable_json() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["assert", "--rules-help"])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(stdout_json["schema"], Value::from("dataq.assert.rules.v1"));
+    assert!(stdout_json["top_level_keys"]["fields"].is_string());
+    assert!(stdout_json["example"]["fields"]["id"]["type"].is_string());
+}
+
+#[test]
+fn assert_rules_help_conflicts_with_rules_source() {
+    let dir = tempdir().expect("temp dir");
+    let rules_path = dir.path().join("rules.json");
+    fs::write(&rules_path, r#"{"required_keys":[],"count":{}}"#).expect("write rules");
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "assert",
+            "--rules-help",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
 }
 
 #[test]
@@ -121,9 +153,9 @@ fn emit_pipeline_preserves_assert_exit_code_contract() {
         &rules_path,
         r#"{
             "required_keys": ["id"],
-            "types": {"id": "integer"},
+            "fields": {"id": {"type": "integer"}},
             "count": {"min": 1, "max": 1},
-            "ranges": {}
+            "forbid_keys": []
         }"#,
     )
     .expect("write rules");

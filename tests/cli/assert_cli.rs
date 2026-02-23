@@ -13,16 +13,17 @@ fn assert_api_success_with_stdin_input() {
         &rules_path,
         r#"
 required_keys: [id, score]
-types:
-  id: integer
-  score: number
+fields:
+  id:
+    type: integer
+  score:
+    type: number
+    range:
+      min: 0
+      max: 100
 count:
   min: 1
   max: 2
-ranges:
-  score:
-    min: 0
-    max: 100
 "#,
     )
     .expect("write rules");
@@ -41,6 +42,43 @@ ranges:
 }
 
 #[test]
+fn assert_api_supports_field_centric_rule_schema() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.yaml");
+    std::fs::write(
+        &rules_path,
+        r#"
+required_keys: [id, score]
+fields:
+  id:
+    type: integer
+  score:
+    type: number
+    nullable: true
+    range:
+      min: 0
+      max: 100
+count:
+  min: 1
+  max: 2
+"#,
+    )
+    .expect("write rules");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(rules_path),
+        schema: None,
+    };
+
+    let response = run_with_stdin(&args, Cursor::new(r#"[{"id":1,"score":null}]"#));
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(response.payload["matched"], Value::Bool(true));
+    assert_eq!(response.payload["mismatch_count"], Value::from(0));
+}
+
+#[test]
 fn assert_api_reports_mismatch_shape() {
     let dir = tempdir().expect("tempdir");
     let rules_path = dir.path().join("rules.json");
@@ -48,9 +86,12 @@ fn assert_api_reports_mismatch_shape() {
         &rules_path,
         r#"{
             "required_keys": ["id", "score"],
-            "types": {"id": "integer", "score": "number"},
+            "fields": {
+                "id": {"type": "integer"},
+                "score": {"type": "number", "range": {"min": 0.0, "max": 1.0}}
+            },
             "count": {"min": 1, "max": 1},
-            "ranges": {"score": {"min": 0.0, "max": 1.0}}
+            "forbid_keys": []
         }"#,
     )
     .expect("write rules");
@@ -82,6 +123,72 @@ fn assert_api_reports_mismatch_shape() {
 }
 
 #[test]
+fn assert_api_rejects_legacy_top_level_rule_keys() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    std::fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": [],
+            "types": {"id": "integer"},
+            "count": {}
+        }"#,
+    )
+    .expect("write rules");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(rules_path),
+        schema: None,
+    };
+
+    let response = run_with_stdin(&args, Cursor::new("[]"));
+    assert_eq!(response.exit_code, 3);
+    assert_eq!(
+        response.payload["error"],
+        Value::String("input_usage_error".to_string())
+    );
+    let message = response.payload["message"]
+        .as_str()
+        .expect("input usage message");
+    assert!(message.contains("unknown field"));
+}
+
+#[test]
+fn assert_api_rejects_empty_field_rule_entry() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    std::fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": [],
+            "fields": {"id": {}},
+            "count": {}
+        }"#,
+    )
+    .expect("write rules");
+
+    let args = AssertCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        rules: Some(rules_path),
+        schema: None,
+    };
+
+    let response = run_with_stdin(&args, Cursor::new("[]"));
+    assert_eq!(response.exit_code, 3);
+    assert_eq!(
+        response.payload["error"],
+        Value::String("input_usage_error".to_string())
+    );
+    let message = response.payload["message"]
+        .as_str()
+        .expect("input usage message");
+    assert!(message.contains("must define at least one"));
+}
+
+#[test]
 fn assert_api_reports_input_usage_errors() {
     let dir = tempdir().expect("tempdir");
     let rules_path = dir.path().join("rules.json");
@@ -89,9 +196,7 @@ fn assert_api_reports_input_usage_errors() {
         &rules_path,
         r#"{
             "required_keys": [],
-            "types": {},
-            "count": {},
-            "ranges": {}
+            "count": {}
         }"#,
     )
     .expect("write rules");
@@ -119,9 +224,8 @@ fn assert_api_rejects_unknown_rule_keys() {
         &rules_path,
         r#"{
             "required_keys": [],
-            "types": {},
             "count": {"min": 0, "max": 1, "oops": 2},
-            "ranges": {},
+            "fields": {},
             "unexpected": true
         }"#,
     )
@@ -154,9 +258,10 @@ fn assert_api_compares_large_integer_ranges_exactly() {
         &rules_path,
         r#"{
             "required_keys": [],
-            "types": {},
             "count": {},
-            "ranges": {"value": {"max": 9007199254740992}}
+            "fields": {
+                "value": {"range": {"max": 9007199254740992}}
+            }
         }"#,
     )
     .expect("write rules");
@@ -194,12 +299,12 @@ fn assert_api_supports_enum_pattern_forbid_keys_and_nullable() {
         r#"{
             "required_keys": [],
             "forbid_keys": ["meta.blocked"],
-            "types": {},
-            "nullable": {"optional": true},
-            "enum": {"status": ["ok", "done"]},
-            "pattern": {"name": "^[a-z]+_[0-9]+$"},
-            "count": {},
-            "ranges": {}
+            "fields": {
+                "optional": {"nullable": true},
+                "status": {"enum": ["ok", "done"]},
+                "name": {"pattern": "^[a-z]+_[0-9]+$"}
+            },
+            "count": {}
         }"#,
     )
     .expect("write rules");
@@ -243,12 +348,10 @@ fn assert_api_rejects_invalid_pattern_rules() {
         r#"{
             "required_keys": [],
             "forbid_keys": [],
-            "types": {},
-            "nullable": {},
-            "enum": {},
-            "pattern": {"name": "[a-z"},
-            "count": {},
-            "ranges": {}
+            "fields": {
+                "name": {"pattern": "[a-z"}
+            },
+            "count": {}
         }"#,
     )
     .expect("write rules");
@@ -270,6 +373,7 @@ fn assert_api_rejects_invalid_pattern_rules() {
         .as_str()
         .expect("input usage message");
     assert!(message.contains("invalid pattern"));
+    assert!(message.contains("fields.name.pattern"));
 }
 
 #[test]
@@ -323,11 +427,7 @@ fn assert_api_rejects_rules_and_schema_together() {
     let dir = tempdir().expect("tempdir");
     let rules_path = dir.path().join("rules.json");
     let schema_path = dir.path().join("schema.json");
-    std::fs::write(
-        &rules_path,
-        r#"{"required_keys":[],"types":{},"count":{},"ranges":{}}"#,
-    )
-    .expect("write rules");
+    std::fs::write(&rules_path, r#"{"required_keys":[],"count":{}}"#).expect("write rules");
     std::fs::write(&schema_path, r#"{"type":"object"}"#).expect("write schema");
 
     let args = AssertCommandArgs {

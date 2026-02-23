@@ -123,6 +123,7 @@ Prefer `Cargo.toml` lint tables instead of ad-hoc per-file allowances where prac
 ## Documentation and tests
 
 - Public functions/types should include rustdoc that states input/output expectations.
+- When design/contract changes, update corresponding docs in `docs/*.md` and keep README links in sync.
 - Add targeted unit tests for parser/normalizer/diff edge cases.
 - Keep fixture-based tests deterministic and easy to diff.
 

@@ -11,18 +11,24 @@ pub struct AssertRules {
     pub required_keys: Vec<String>,
     #[serde(default)]
     pub forbid_keys: Vec<String>,
+    /// Path-centric field constraints.
     #[serde(default)]
-    pub types: BTreeMap<String, RuleType>,
-    #[serde(default)]
-    pub nullable: BTreeMap<String, bool>,
-    #[serde(default, rename = "enum")]
-    pub enum_values: BTreeMap<String, Vec<Value>>,
-    #[serde(default, rename = "pattern")]
-    pub patterns: BTreeMap<String, String>,
+    pub fields: BTreeMap<String, FieldRule>,
     #[serde(default)]
     pub count: CountRule,
-    #[serde(default)]
-    pub ranges: BTreeMap<String, NumericRangeRule>,
+}
+
+/// Field-level rule bundle for one path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct FieldRule {
+    #[serde(rename = "type")]
+    pub expected_type: Option<RuleType>,
+    pub nullable: Option<bool>,
+    #[serde(rename = "enum")]
+    pub enum_values: Option<Vec<Value>>,
+    pub pattern: Option<String>,
+    pub range: Option<NumericRangeRule>,
 }
 
 /// Record count boundaries.

@@ -62,7 +62,7 @@ struct CanonArgs {
 #[derive(Debug, clap::Args)]
 #[command(group(
     ArgGroup::new("assert_source")
-        .args(["rules", "schema"])
+        .args(["rules", "schema", "rules_help"])
         .required(true)
         .multiple(false)
 ))]
@@ -73,8 +73,12 @@ struct AssertArgs {
     #[arg(long)]
     schema: Option<PathBuf>,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with = "rules_help")]
     input: Option<PathBuf>,
+
+    /// Print machine-readable rules help for `--rules` and exit.
+    #[arg(long, default_value_t = false)]
+    rules_help: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -276,6 +280,19 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
 }
 
 fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
+    if args.rules_help {
+        if emit_json_stdout(&r#assert::rules_help_payload()) {
+            return 0;
+        }
+        emit_error(
+            "internal_error",
+            "failed to serialize assert rules help".to_string(),
+            json!({"command": "assert"}),
+            1,
+        );
+        return 1;
+    }
+
     let input = args.input.clone();
     let input_format = input
         .as_deref()

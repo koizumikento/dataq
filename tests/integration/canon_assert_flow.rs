@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use dataq::domain::rules::{AssertRules, CountRule, NumericRangeRule, RuleType};
+use dataq::domain::rules::{AssertRules, CountRule, FieldRule, NumericRangeRule, RuleType};
 use dataq::engine::r#assert::execute_assert;
 use dataq::util::sort::sort_value_keys;
 use serde_json::{Number, json};
@@ -13,27 +13,33 @@ fn canon_then_assert_success_flow() {
     ];
     let canonized: Vec<_> = raw.iter().map(sort_value_keys).collect();
 
-    let mut types = BTreeMap::new();
-    types.insert("id".to_string(), RuleType::Integer);
-    types.insert("score".to_string(), RuleType::Number);
-
-    let mut ranges = BTreeMap::new();
-    ranges.insert(
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "id".to_string(),
+        FieldRule {
+            expected_type: Some(RuleType::Integer),
+            ..FieldRule::default()
+        },
+    );
+    fields.insert(
         "score".to_string(),
-        NumericRangeRule {
-            min: Some(float_number(1.0)),
-            max: Some(float_number(3.0)),
+        FieldRule {
+            expected_type: Some(RuleType::Number),
+            range: Some(NumericRangeRule {
+                min: Some(float_number(1.0)),
+                max: Some(float_number(3.0)),
+            }),
+            ..FieldRule::default()
         },
     );
 
     let rules = AssertRules {
         required_keys: vec!["id".to_string(), "score".to_string()],
-        types,
+        fields,
         count: CountRule {
             min: Some(2),
             max: Some(2),
         },
-        ranges,
         ..AssertRules::default()
     };
 
@@ -47,23 +53,29 @@ fn canon_then_assert_success_flow() {
 fn mismatch_report_order_is_deterministic() {
     let values = vec![json!({"id": "x", "score": 10}), json!({"score": -1})];
 
-    let mut types = BTreeMap::new();
-    types.insert("id".to_string(), RuleType::Integer);
-
-    let mut ranges = BTreeMap::new();
-    ranges.insert(
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "id".to_string(),
+        FieldRule {
+            expected_type: Some(RuleType::Integer),
+            ..FieldRule::default()
+        },
+    );
+    fields.insert(
         "score".to_string(),
-        NumericRangeRule {
-            min: Some(float_number(0.0)),
-            max: Some(float_number(5.0)),
+        FieldRule {
+            range: Some(NumericRangeRule {
+                min: Some(float_number(0.0)),
+                max: Some(float_number(5.0)),
+            }),
+            ..FieldRule::default()
         },
     );
 
     let rules = AssertRules {
         required_keys: vec!["id".to_string(), "score".to_string()],
-        types,
+        fields,
         count: CountRule::default(),
-        ranges,
         ..AssertRules::default()
     };
 
@@ -82,24 +94,33 @@ fn mixed_rule_report_order_is_stable() {
     let values =
         vec![json!({"id": null, "name": "User-1", "status": "pending", "meta": {"blocked": true}})];
 
-    let mut types = BTreeMap::new();
-    types.insert("id".to_string(), RuleType::Integer);
-
-    let mut nullable = BTreeMap::new();
-    nullable.insert("id".to_string(), false);
-
-    let mut enum_values = BTreeMap::new();
-    enum_values.insert("status".to_string(), vec![json!("ok"), json!("done")]);
-
-    let mut patterns = BTreeMap::new();
-    patterns.insert("name".to_string(), "^[a-z]+_[0-9]+$".to_string());
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "id".to_string(),
+        FieldRule {
+            expected_type: Some(RuleType::Integer),
+            nullable: Some(false),
+            ..FieldRule::default()
+        },
+    );
+    fields.insert(
+        "status".to_string(),
+        FieldRule {
+            enum_values: Some(vec![json!("ok"), json!("done")]),
+            ..FieldRule::default()
+        },
+    );
+    fields.insert(
+        "name".to_string(),
+        FieldRule {
+            pattern: Some("^[a-z]+_[0-9]+$".to_string()),
+            ..FieldRule::default()
+        },
+    );
 
     let rules = AssertRules {
         forbid_keys: vec!["meta.blocked".to_string()],
-        types,
-        nullable,
-        enum_values,
-        patterns,
+        fields,
         ..AssertRules::default()
     };
 
