@@ -1,8 +1,5 @@
 # Rust build artifacts
 /target/
 
-# local working notes
-.work/
-
 # macOS
 .DS_Store
