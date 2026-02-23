@@ -27,16 +27,19 @@ fn merge_command_policies_produce_expected_differences() {
         base: base.clone(),
         overlays: vec![overlay.clone()],
         policy: MergePolicy::LastWins,
+        policy_paths: Vec::new(),
     });
     let deep = run(&MergeCommandArgs {
         base: base.clone(),
         overlays: vec![overlay.clone()],
         policy: MergePolicy::DeepMerge,
+        policy_paths: Vec::new(),
     });
     let replace = run(&MergeCommandArgs {
         base,
         overlays: vec![overlay],
         policy: MergePolicy::ArrayReplace,
+        policy_paths: Vec::new(),
     });
 
     assert_eq!(last.exit_code, 0);
@@ -99,4 +102,66 @@ fn unsupported_policy_returns_exit_code_three() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
+}
+
+#[test]
+fn policy_path_applies_to_subtree_only() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("base.json");
+    let overlay = dir.path().join("overlay.json");
+    fs::write(
+        &base,
+        r#"{"cfg":{"items":[{"left":1},2],"obj":{"left":1}}}"#,
+    )
+    .expect("write base");
+    fs::write(
+        &overlay,
+        r#"{"cfg":{"items":[{"right":2}],"obj":{"right":2}}}"#,
+    )
+    .expect("write overlay");
+
+    let response = run(&MergeCommandArgs {
+        base,
+        overlays: vec![overlay],
+        policy: MergePolicy::DeepMerge,
+        policy_paths: vec![r#"$["cfg"]["items"]=array-replace"#.to_string()],
+    });
+
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(
+        response.payload,
+        json!({
+            "cfg": {
+                "items": [{"right": 2}],
+                "obj": {"left": 1, "right": 2}
+            }
+        })
+    );
+}
+
+#[test]
+fn invalid_policy_path_definition_returns_exit_code_three() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("base.json");
+    let overlay = dir.path().join("overlay.json");
+    fs::write(&base, "{}").expect("write base");
+    fs::write(&overlay, "{}").expect("write overlay");
+
+    let invalid_path = run(&MergeCommandArgs {
+        base: base.clone(),
+        overlays: vec![overlay.clone()],
+        policy: MergePolicy::DeepMerge,
+        policy_paths: vec![r#"$[cfg]=deep-merge"#.to_string()],
+    });
+    assert_eq!(invalid_path.exit_code, 3);
+    assert_eq!(invalid_path.payload["error"], json!("input_usage_error"));
+
+    let invalid_policy = run(&MergeCommandArgs {
+        base,
+        overlays: vec![overlay],
+        policy: MergePolicy::DeepMerge,
+        policy_paths: vec![r#"$["cfg"]=not-a-policy"#.to_string()],
+    });
+    assert_eq!(invalid_policy.exit_code, 3);
+    assert_eq!(invalid_policy.payload["error"], json!("input_usage_error"));
 }

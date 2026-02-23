@@ -150,3 +150,88 @@ fn re_run_with_same_input_is_deterministic() {
 
     assert_eq!(first, second);
 }
+
+#[test]
+fn merge_without_policy_path_preserves_existing_behavior() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("base.json");
+    let overlay = dir.path().join("overlay.json");
+
+    fs::write(
+        &base,
+        r#"{"cfg":{"items":[{"left":1},2],"obj":{"left":1}}}"#,
+    )
+    .expect("write base");
+    fs::write(
+        &overlay,
+        r#"{"cfg":{"items":[{"right":2}],"obj":{"right":2}}}"#,
+    )
+    .expect("write overlay");
+
+    let stdout = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "merge",
+            "--base",
+            base.to_str().expect("utf8 base path"),
+            "--overlay",
+            overlay.to_str().expect("utf8 overlay path"),
+            "--policy",
+            "deep-merge",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&stdout).expect("merge output json");
+    assert_eq!(
+        actual,
+        json!({
+            "cfg": {
+                "items": [{"left": 1, "right": 2}, 2],
+                "obj": {"left": 1, "right": 2}
+            }
+        })
+    );
+}
+
+#[test]
+fn longest_matching_policy_path_wins() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("base.json");
+    let overlay = dir.path().join("overlay.json");
+
+    fs::write(&base, r#"{"cfg":{"items":[{"left":1},2]}}"#).expect("write base");
+    fs::write(&overlay, r#"{"cfg":{"items":[{"right":2}]}}"#).expect("write overlay");
+
+    let stdout = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "merge",
+            "--base",
+            base.to_str().expect("utf8 base path"),
+            "--overlay",
+            overlay.to_str().expect("utf8 overlay path"),
+            "--policy",
+            "deep-merge",
+            "--policy-path",
+            r#"$["cfg"]=array-replace"#,
+            "--policy-path",
+            r#"$["cfg"]["items"]=deep-merge"#,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&stdout).expect("merge output json");
+    assert_eq!(
+        actual,
+        json!({
+            "cfg": {
+                "items": [{"left": 1, "right": 2}, 2]
+            }
+        })
+    );
+}

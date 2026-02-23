@@ -16,7 +16,7 @@ dataq [--emit-pipeline] <command> [options]
 - `profile`: フィールド統計を決定的JSONで出力
 - `join`: 2入力をキー結合してJSON配列を出力
 - `aggregate`: グループ集計をJSON配列で出力
-- `merge`: base + overlays をポリシーマージ
+- `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
 - `doctor`: `jq` / `yq` / `mlr` の実行前診断
 - `recipe run`: 宣言的レシピを定義順に実行
 
@@ -82,6 +82,20 @@ dataq [--emit-pipeline] <command> [options]
 - `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
 - `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義を `yq -> jq -> mlr` の固定3段でジョブ単位レコードへ正規化してから `--rules` 検証可能（`yq`/`jq`/`mlr` 必須）
+
+## `merge` パス別ポリシー（MVP）
+
+- 既存 `--policy` は全体デフォルトポリシーとして動作
+- 追加 `--policy-path <canonical-path=policy>` は複数指定可能
+  - 例: `--policy-path '$["spec"]["containers"]=array-replace'`
+  - `canonical-path` は `$["field"][0]...` 形式を要求
+  - `policy` は `last-wins | deep-merge | array-replace`
+- ポリシー解決順:
+  - 現在マージ中の値パスに対して、最長一致する `--policy-path` を適用
+  - 一致がなければ `--policy` を適用
+- 入力不正:
+  - `--policy-path` の path が非canonical、または policy が未知値の場合は exit `3`
+  - `--policy-path` 未指定時の挙動は従来どおり
 
 ## 外部ツール多段連携（契約方針）
 

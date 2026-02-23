@@ -141,6 +141,9 @@ struct MergeArgs {
 
     #[arg(long, value_enum)]
     policy: CliMergePolicy,
+
+    #[arg(long = "policy-path", value_name = "path=policy")]
+    policy_path: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -659,6 +662,7 @@ fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
         base: args.base.clone(),
         overlays: args.overlay.clone(),
         policy: args.policy.into(),
+        policy_paths: args.policy_path.clone(),
     };
     let response = merge::run(&command_args);
 

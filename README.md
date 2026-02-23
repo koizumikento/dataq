@@ -68,7 +68,7 @@ dataq [--emit-pipeline] <command> [options]
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
-| `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` |
+| `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
 | `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
 
@@ -314,6 +314,9 @@ dataq assert \
 - `--policy last-wins`: 同一キーは overlay 側で上書き（shallow）
 - `--policy deep-merge`: object は再帰マージ、配列は要素インデックス単位で再帰マージ
 - `--policy array-replace`: object は再帰マージ、配列は overlay 側で全置換
+- `--policy-path <canonical-path=policy>`（複数指定可）で subtree ごとのポリシーを上書き
+  - 例: `--policy-path '$["spec"]["containers"]=array-replace'`
+  - 解決順: 最長一致する `--policy-path` を優先し、一致なしは `--policy` を適用
 - 出力は JSON 固定（キー順は決定的にソート）
 
 ### 8. `doctor`
