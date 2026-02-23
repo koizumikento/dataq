@@ -1,0 +1,1 @@
+// Canon type coercion logic.

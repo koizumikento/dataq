@@ -1,0 +1,7 @@
+interface:
+  display_name: "Rust Feature Add"
+  short_description: "Add scoped features to Rust CLI"
+  default_prompt: "Use $feat-add as a sub-agent workflow to add or extend one dataq feature with matching tests."
+
+policy:
+  allow_implicit_invocation: false
