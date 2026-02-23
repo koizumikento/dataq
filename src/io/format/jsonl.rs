@@ -19,6 +19,13 @@ pub fn looks_like_jsonl(input: &[u8]) -> bool {
     matches!(result, Ok(())) && has_value
 }
 
+pub fn non_empty_line_count(input: &[u8]) -> usize {
+    input
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .count()
+}
+
 pub fn read_jsonl_stream<R: Read, F, E>(reader: R, mut emit: F) -> Result<(), JsonlStreamError<E>>
 where
     F: FnMut(Value) -> Result<(), E>,

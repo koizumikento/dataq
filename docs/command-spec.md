@@ -71,6 +71,7 @@ dataq [--emit-pipeline] <command> [options]
 - `--from` 未指定かつ `--input <path>` 指定時は拡張子で解決（`.json|.yaml|.yml|.csv|.jsonl|.ndjson`）
 - `--from` 未指定かつ stdin入力時は固定順で自動判別:
   - `JSONL -> JSON -> YAML -> CSV`
+- 非空行が1行のみで入力全体がJSONとして成立する場合は `JSON` を優先（JSON/JSONLの曖昧さ回避）
 - 自動判別失敗は `input_usage_error` で終了コード `3`
 
 ### 終了コード

@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Cursor, Read};
+use std::io::{self, BufRead, Cursor, Read};
 use std::path::PathBuf;
 use std::process;
 
@@ -358,41 +358,13 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
                 }
             }
             None => {
-                let stdin = io::stdin();
-                let mut input = Vec::new();
-                if let Err(error) = stdin.lock().read_to_end(&mut input) {
-                    emit_error(
-                        "input_usage_error",
-                        format!("failed to read stdin: {error}"),
-                        json!({"command": "canon"}),
-                        3,
-                    );
-                    3
-                } else {
-                    match dataq_io::autodetect_stdin_input_format(&input) {
+                if output_format == Format::Jsonl {
+                    match run_canon_jsonl_autodetect_stdin(&mut output, options) {
                         Ok(detected) => {
                             input_format = Some(detected);
-                            match run_canon_with_format(
-                                Cursor::new(input),
-                                &mut output,
-                                detected,
-                                output_format,
-                                options,
-                            ) {
-                                Ok(()) => 0,
-                                Err(error) => {
-                                    let (exit_code, error_kind) = map_canon_error(&error);
-                                    emit_error(
-                                        error_kind,
-                                        error.to_string(),
-                                        json!({"command": "canon"}),
-                                        exit_code,
-                                    );
-                                    exit_code
-                                }
-                            }
+                            0
                         }
-                        Err(error) => {
+                        Err(CanonStdinAutodetectError::Input(error)) => {
                             emit_error(
                                 "input_usage_error",
                                 error.to_string(),
@@ -400,6 +372,62 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
                                 3,
                             );
                             3
+                        }
+                        Err(CanonStdinAutodetectError::Canon(error)) => {
+                            let (exit_code, error_kind) = map_canon_error(&error);
+                            emit_error(
+                                error_kind,
+                                error.to_string(),
+                                json!({"command": "canon"}),
+                                exit_code,
+                            );
+                            exit_code
+                        }
+                    }
+                } else {
+                    let stdin = io::stdin();
+                    let mut input = Vec::new();
+                    if let Err(error) = stdin.lock().read_to_end(&mut input) {
+                        emit_error(
+                            "input_usage_error",
+                            format!("failed to read stdin: {error}"),
+                            json!({"command": "canon"}),
+                            3,
+                        );
+                        3
+                    } else {
+                        match dataq_io::autodetect_stdin_input_format(&input) {
+                            Ok(detected) => {
+                                input_format = Some(detected);
+                                match run_canon_with_format(
+                                    Cursor::new(input),
+                                    &mut output,
+                                    detected,
+                                    output_format,
+                                    options,
+                                ) {
+                                    Ok(()) => 0,
+                                    Err(error) => {
+                                        let (exit_code, error_kind) = map_canon_error(&error);
+                                        emit_error(
+                                            error_kind,
+                                            error.to_string(),
+                                            json!({"command": "canon"}),
+                                            exit_code,
+                                        );
+                                        exit_code
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                emit_error(
+                                    "input_usage_error",
+                                    error.to_string(),
+                                    json!({"command": "canon"}),
+                                    3,
+                                );
+                                3
+                            }
                         }
                     }
                 }
@@ -940,6 +968,111 @@ fn run_canon_with_format<R: Read, W: io::Write>(
     canon::run(input, output, input_format, output_format, options)
 }
 
+#[derive(Debug)]
+enum CanonStdinAutodetectError {
+    Input(IoError),
+    Canon(CanonError),
+}
+
+fn run_canon_jsonl_autodetect_stdin<W: io::Write>(
+    mut output: W,
+    options: canon::CanonCommandOptions,
+) -> Result<Format, CanonStdinAutodetectError> {
+    let stdin = io::stdin();
+    let mut reader = io::BufReader::new(stdin.lock());
+    let mut buffered_input = Vec::new();
+    let mut prefetched_values = Vec::new();
+    let mut non_empty_lines = 0usize;
+
+    while non_empty_lines < 2 {
+        let mut line = Vec::new();
+        let bytes_read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(IoError::from)
+            .map_err(CanonStdinAutodetectError::Input)?;
+        if bytes_read == 0 {
+            break;
+        }
+        buffered_input.extend_from_slice(&line);
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        non_empty_lines += 1;
+        let trimmed = trim_ascii_whitespace(&line);
+        match serde_json::from_slice(trimmed) {
+            Ok(parsed) => prefetched_values.push(parsed),
+            Err(_) => {
+                return run_canon_jsonl_with_buffered_stdin(
+                    reader,
+                    buffered_input,
+                    output,
+                    options,
+                );
+            }
+        }
+    }
+
+    if non_empty_lines >= 2 {
+        let canon_options = options.into();
+        for value in prefetched_values {
+            let canonical = canonicalize_value(value, canon_options);
+            write_jsonl_stream_value(&mut output, &canonical)
+                .map_err(CanonStdinAutodetectError::Canon)?;
+        }
+        dataq_io::reader::read_jsonl_stream(reader, |value| {
+            let canonical = canonicalize_value(value, canon_options);
+            write_jsonl_stream_value(&mut output, &canonical)
+        })
+        .map_err(|error| match error {
+            JsonlStreamError::Read(source) => {
+                CanonStdinAutodetectError::Canon(CanonError::ReadInput {
+                    format: Format::Jsonl,
+                    source,
+                })
+            }
+            JsonlStreamError::Emit(source) => CanonStdinAutodetectError::Canon(source),
+        })?;
+        return Ok(Format::Jsonl);
+    }
+
+    run_canon_jsonl_with_buffered_stdin(reader, buffered_input, output, options)
+}
+
+fn run_canon_jsonl_with_buffered_stdin<R: Read, W: io::Write>(
+    mut reader: R,
+    mut buffered_input: Vec<u8>,
+    output: W,
+    options: canon::CanonCommandOptions,
+) -> Result<Format, CanonStdinAutodetectError> {
+    reader
+        .read_to_end(&mut buffered_input)
+        .map_err(IoError::from)
+        .map_err(CanonStdinAutodetectError::Input)?;
+    let detected = dataq_io::autodetect_stdin_input_format(&buffered_input)
+        .map_err(CanonStdinAutodetectError::Input)?;
+    run_canon_with_format(
+        Cursor::new(buffered_input),
+        output,
+        detected,
+        Format::Jsonl,
+        options,
+    )
+    .map_err(CanonStdinAutodetectError::Canon)?;
+    Ok(detected)
+}
+
+fn trim_ascii_whitespace(input: &[u8]) -> &[u8] {
+    let Some(start) = input.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return &input[0..0];
+    };
+    let end = input
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .expect("start implies end")
+        + 1;
+    &input[start..end]
+}
+
 fn run_canon_jsonl_stream<R: Read, W: io::Write>(
     input: R,
     mut output: W,
@@ -950,12 +1083,7 @@ fn run_canon_jsonl_stream<R: Read, W: io::Write>(
     if input_format == Format::Jsonl {
         return dataq_io::reader::read_jsonl_stream(input, |value| {
             let canonical = canonicalize_value(value, canon_options);
-            dataq_io::format::jsonl::write_jsonl_value(&mut output, &canonical).map_err(|source| {
-                CanonError::WriteOutput {
-                    format: Format::Jsonl,
-                    source,
-                }
-            })
+            write_jsonl_stream_value(&mut output, &canonical)
         })
         .map_err(|error| match error {
             JsonlStreamError::Read(source) => CanonError::ReadInput {
@@ -974,14 +1102,22 @@ fn run_canon_jsonl_stream<R: Read, W: io::Write>(
     })?;
     for value in values {
         let canonical = canonicalize_value(value, canon_options);
-        dataq_io::format::jsonl::write_jsonl_value(&mut output, &canonical).map_err(|source| {
-            CanonError::WriteOutput {
-                format: Format::Jsonl,
-                source,
-            }
-        })?;
+        write_jsonl_stream_value(&mut output, &canonical)?;
     }
     Ok(())
+}
+
+fn write_jsonl_stream_value<W: io::Write>(output: &mut W, value: &Value) -> Result<(), CanonError> {
+    dataq_io::format::jsonl::write_jsonl_value(&mut *output, value).map_err(|source| {
+        CanonError::WriteOutput {
+            format: Format::Jsonl,
+            source,
+        }
+    })?;
+    output.flush().map_err(|source| CanonError::WriteOutput {
+        format: Format::Jsonl,
+        source: IoError::from(source),
+    })
 }
 
 fn map_canon_error(error: &CanonError) -> (i32, &'static str) {

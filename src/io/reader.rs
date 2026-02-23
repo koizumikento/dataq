@@ -19,10 +19,14 @@ pub fn autodetect_stdin_format(input: &[u8]) -> Result<Format, IoError> {
     if input.iter().all(u8::is_ascii_whitespace) {
         return Err(IoError::StdinAutodetectFailed);
     }
+    let is_json = json::read_json(Cursor::new(input)).is_ok();
     if jsonl::looks_like_jsonl(input) {
+        if is_json && jsonl::non_empty_line_count(input) == 1 {
+            return Ok(Format::Json);
+        }
         return Ok(Format::Jsonl);
     }
-    if json::read_json(Cursor::new(input)).is_ok() {
+    if is_json {
         return Ok(Format::Json);
     }
     if looks_like_yaml(input) {

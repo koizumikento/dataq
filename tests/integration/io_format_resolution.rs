@@ -42,9 +42,17 @@ fn missing_path_and_explicit_format_is_error() {
 
 #[test]
 fn autodetect_stdin_prefers_jsonl_before_json() {
-    let input = br#"{"id":"1","enabled":"true"}"#;
+    let input = br#"{"id":"1","enabled":"true"}
+{"id":"2","enabled":"false"}"#;
     let format = autodetect_stdin_input_format(input).expect("autodetect should succeed");
     assert_eq!(format, Format::Jsonl);
+}
+
+#[test]
+fn autodetect_stdin_uses_json_for_single_compact_json_value() {
+    let input = br#"{"id":"1","enabled":"true"}"#;
+    let format = autodetect_stdin_input_format(input).expect("autodetect should succeed");
+    assert_eq!(format, Format::Json);
 }
 
 #[test]
