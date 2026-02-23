@@ -70,3 +70,23 @@ fn contract_command_unknown_value_returns_exit_three() {
         .code(3)
         .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
 }
+
+#[test]
+fn contract_doctor_command_exit_three_describes_dependency_failure() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "doctor"])
+        .output()
+        .expect("run contract doctor");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], json!("doctor"));
+    assert_eq!(
+        payload["exit_codes"]["3"],
+        json!(
+            "tool/dependency availability failure (missing or non-executable `jq`, `yq`, or `mlr`)"
+        )
+    );
+}

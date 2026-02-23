@@ -83,6 +83,8 @@ const DOCTOR_NOTES: &[&str] = &[
     "Tool reports are always ordered as `jq`, `yq`, `mlr`.",
     "Exit code 3 indicates missing or non-executable dependencies.",
 ];
+const DOCTOR_EXIT_CODE_3: &str =
+    "tool/dependency availability failure (missing or non-executable `jq`, `yq`, or `mlr`)";
 const RECIPE_NOTES: &[&str] = &[
     "`steps` preserves recipe definition order.",
     "Step-level unmatched results map to exit code 2.",
@@ -158,7 +160,10 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             command: "doctor",
             schema: "dataq.doctor.output.v1",
             output_fields: DOCTOR_FIELDS,
-            exit_codes: exit_codes("validation mismatch is not used by this command"),
+            exit_codes: exit_codes_with_code_three(
+                "validation mismatch is not used by this command",
+                DOCTOR_EXIT_CODE_3,
+            ),
             notes: DOCTOR_NOTES,
         },
         ContractCommand::Recipe => CommandContract {
@@ -172,10 +177,17 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
 }
 
 fn exit_codes(validation_mismatch: &'static str) -> ExitCodeContract<'static> {
+    exit_codes_with_code_three(validation_mismatch, "input/usage error")
+}
+
+fn exit_codes_with_code_three(
+    validation_mismatch: &'static str,
+    code_three: &'static str,
+) -> ExitCodeContract<'static> {
     ExitCodeContract {
         success: "success",
         validation_mismatch,
-        input_usage_error: "input/usage error",
+        input_usage_error: code_three,
         internal_error: "internal/unexpected error",
     }
 }
