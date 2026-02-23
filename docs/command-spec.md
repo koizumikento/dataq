@@ -19,6 +19,7 @@ dataq [--emit-pipeline] <command> [options]
 ## `assert` 補助出力
 
 - `dataq assert --rules-help` で `--rules` 用ルール仕様を機械可読JSONで出力
+- `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
 
 ## CLI I/O 契約

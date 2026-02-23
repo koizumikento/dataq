@@ -11,6 +11,12 @@ CLIから同内容の機械可読ヘルプを取得する場合:
 dataq assert --rules-help
 ```
 
+JSON Schema検証モードの機械可読ヘルプを取得する場合:
+
+```bash
+dataq assert --schema-help
+```
+
 ## まず全キーを把握
 
 | キー | 型 | 目的 |

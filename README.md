@@ -110,6 +110,7 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 - `--schema <path>`: JSON Schema で検証
 - `--rules` と `--schema` は同時指定不可（入力不正として終了コード `3`）
 - `--rules-help`: `--rules` 用ルール仕様を機械可読JSONで出力して終了（終了コード `0`）
+- `--schema-help`: `--schema`（JSON Schema検証）用の使い方と結果契約を機械可読JSONで出力して終了（終了コード `0`）
 
 失敗時は機械可読エラーJSONを返し、終了コード `2`。  
 `mismatches[]` は `path`, `rule_kind`, `reason`, `actual`, `expected` を含みます。
@@ -141,6 +142,12 @@ count:
 
 ```bash
 dataq assert --rules-help
+```
+
+JSON Schemaモード仕様をCLIから取得:
+
+```bash
+dataq assert --schema-help
 ```
 
 ### 3. `sdiff`

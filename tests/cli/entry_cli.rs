@@ -119,6 +119,44 @@ fn assert_rules_help_conflicts_with_rules_source() {
 }
 
 #[test]
+fn assert_schema_help_outputs_machine_readable_json() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["assert", "--schema-help"])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(
+        stdout_json["schema"],
+        Value::from("dataq.assert.schema_help.v1")
+    );
+    assert_eq!(
+        stdout_json["mismatch_shape"]["reason"],
+        Value::from("schema_mismatch")
+    );
+    assert!(stdout_json["example_schema"].is_object());
+}
+
+#[test]
+fn assert_schema_help_conflicts_with_schema_source() {
+    let dir = tempdir().expect("temp dir");
+    let schema_path = dir.path().join("schema.json");
+    fs::write(&schema_path, r#"{"type":"object"}"#).expect("write schema");
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "assert",
+            "--schema-help",
+            "--schema",
+            schema_path.to_str().expect("utf8 path"),
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
+}
+
+#[test]
 fn emit_pipeline_outputs_stderr_json_with_expected_schema() {
     let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["--emit-pipeline", "canon", "--from", "json"])

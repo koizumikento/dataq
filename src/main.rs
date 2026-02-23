@@ -62,7 +62,7 @@ struct CanonArgs {
 #[derive(Debug, clap::Args)]
 #[command(group(
     ArgGroup::new("assert_source")
-        .args(["rules", "schema", "rules_help"])
+        .args(["rules", "schema", "rules_help", "schema_help"])
         .required(true)
         .multiple(false)
 ))]
@@ -73,12 +73,16 @@ struct AssertArgs {
     #[arg(long)]
     schema: Option<PathBuf>,
 
-    #[arg(long, conflicts_with = "rules_help")]
+    #[arg(long, conflicts_with_all = ["rules_help", "schema_help"])]
     input: Option<PathBuf>,
 
     /// Print machine-readable rules help for `--rules` and exit.
     #[arg(long, default_value_t = false)]
     rules_help: bool,
+
+    /// Print machine-readable JSON Schema help for `--schema` and exit.
+    #[arg(long, default_value_t = false)]
+    schema_help: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -287,6 +291,18 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         emit_error(
             "internal_error",
             "failed to serialize assert rules help".to_string(),
+            json!({"command": "assert"}),
+            1,
+        );
+        return 1;
+    }
+    if args.schema_help {
+        if emit_json_stdout(&r#assert::schema_help_payload()) {
+            return 0;
+        }
+        emit_error(
+            "internal_error",
+            "failed to serialize assert schema help".to_string(),
             json!({"command": "assert"}),
             1,
         );

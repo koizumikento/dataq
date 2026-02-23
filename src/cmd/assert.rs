@@ -105,6 +105,46 @@ pub fn rules_help_payload() -> Value {
     })
 }
 
+/// Machine-readable help payload for `assert --schema` JSON Schema mode.
+pub fn schema_help_payload() -> Value {
+    json!({
+        "schema": "dataq.assert.schema_help.v1",
+        "description": "JSON Schema validation help for `dataq assert --schema`",
+        "mode": {
+            "validator": "jsonschema crate (Rust native)",
+            "input_contract": "schema file must contain exactly one JSON/YAML value",
+            "source_selection": "`--schema` and `--rules` are mutually exclusive"
+        },
+        "usage": [
+            "dataq assert --schema schema.json < input.json",
+            "dataq assert --input input.json --schema schema.json"
+        ],
+        "result_contract": {
+            "exit_code_0": "all rows matched schema",
+            "exit_code_2": "one or more mismatches",
+            "exit_code_3": "input/usage error (for example invalid schema)"
+        },
+        "mismatch_shape": {
+            "path": "$[row].<field> (canonicalized from JSON Pointer)",
+            "rule_kind": "schema",
+            "reason": "schema_mismatch",
+            "actual": "actual value at instance path",
+            "expected": {
+                "schema_path": "JSON Pointer into schema",
+                "message": "validator error message"
+            }
+        },
+        "example_schema": {
+            "type": "object",
+            "required": ["id", "score"],
+            "properties": {
+                "id": { "type": "integer" },
+                "score": { "type": "number", "maximum": 10 }
+            }
+        }
+    })
+}
+
 pub fn run_with_stdin<R: Read>(args: &AssertCommandArgs, stdin: R) -> AssertCommandResponse {
     match execute(args, stdin) {
         Ok(report) => report_response(report),
