@@ -697,7 +697,7 @@ fn parse_summary_line(line: &str) -> Option<ParsedSummaryLine> {
         return None;
     }
     let tail = &body[(close_bracket + 2)..];
-    let close_paren = tail.find(')')?;
+    let close_paren = find_link_closing_paren(tail)?;
     let target = tail[..close_paren].trim();
     if target.is_empty() {
         return None;
@@ -710,18 +710,93 @@ fn parse_summary_line(line: &str) -> Option<ParsedSummaryLine> {
     })
 }
 
+fn find_link_closing_paren(target: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+    for (index, ch) in target.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(quote) = in_quote {
+            if ch == quote {
+                in_quote = None;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            in_quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn sanitize_summary_target(target: &str, line: usize) -> Result<PathBuf, IngestBookError> {
-    if target.contains("://") || target.starts_with("mailto:") {
+    let mut trimmed = target.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(IngestBookError::SummaryParse {
+            line,
+            message: "chapter link target is empty".to_string(),
+        });
+    }
+
+    if let Some(stripped) = trimmed.strip_prefix('<') {
+        let close = stripped
+            .find('>')
+            .ok_or_else(|| IngestBookError::SummaryParse {
+                line,
+                message: "chapter link target has unclosed angle bracket".to_string(),
+            })?;
+        let destination = stripped[..close].trim();
+        if destination.is_empty() {
+            return Err(IngestBookError::SummaryParse {
+                line,
+                message: "chapter link target is empty".to_string(),
+            });
+        }
+        let trailing = stripped[(close + 1)..].trim();
+        if !trailing.is_empty() && !is_markdown_link_title(trailing) {
+            return Err(IngestBookError::SummaryParse {
+                line,
+                message: "chapter link target has invalid optional title".to_string(),
+            });
+        }
+        trimmed = destination.to_string();
+    } else if let Some((destination, title)) =
+        split_destination_and_optional_title(trimmed.as_str())
+    {
+        if !is_markdown_link_title(title) {
+            return Err(IngestBookError::SummaryParse {
+                line,
+                message: "chapter link target has invalid optional title".to_string(),
+            });
+        }
+        trimmed = destination.to_string();
+    }
+
+    if trimmed.contains("://") || trimmed.starts_with("mailto:") {
         return Err(IngestBookError::SummaryParse {
             line,
             message: "external links are not supported".to_string(),
         });
     }
-
-    let mut trimmed = target.trim();
-    if let Some(index) = trimmed.find(char::is_whitespace) {
-        trimmed = &trimmed[..index];
-    }
+    let mut trimmed = trimmed.as_str();
     trimmed = trimmed
         .split_once('#')
         .map(|(prefix, _)| prefix)
@@ -745,6 +820,43 @@ fn sanitize_summary_target(target: &str, line: usize) -> Result<PathBuf, IngestB
         });
     }
     Ok(path)
+}
+
+fn split_destination_and_optional_title(target: &str) -> Option<(&str, &str)> {
+    let mut starts = Vec::new();
+    let mut previous_whitespace = false;
+    for (index, ch) in target.char_indices() {
+        if ch.is_whitespace() {
+            previous_whitespace = true;
+            continue;
+        }
+        if previous_whitespace {
+            starts.push(index);
+        }
+        previous_whitespace = false;
+    }
+
+    for index in starts.into_iter().rev() {
+        let destination = target[..index].trim_end();
+        let title = target[index..].trim_start();
+        if destination.is_empty() || title.is_empty() {
+            continue;
+        }
+        if is_markdown_link_title(title) {
+            return Some((destination, title));
+        }
+    }
+    None
+}
+
+fn is_markdown_link_title(candidate: &str) -> bool {
+    if candidate.len() < 2 {
+        return false;
+    }
+    let mut chars = candidate.chars();
+    let first = chars.next().unwrap_or_default();
+    let last = candidate.chars().next_back().unwrap_or_default();
+    matches!((first, last), ('"', '"') | ('\'', '\'') | ('(', ')'))
 }
 
 fn build_chapter_tree(
@@ -1015,6 +1127,42 @@ src = "src"
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn summary_links_accept_paths_with_spaces_and_optional_titles() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let src = root.join("src");
+        fs::create_dir_all(src.join("guides")).expect("create guides");
+        fs::write(root.join("book.toml"), "[book]\nsrc = \"src\"\n").expect("write book.toml");
+        fs::write(
+            src.join("SUMMARY.md"),
+            r#"- [Intro](chapters and guides/intro page.md "Optional title")
+- [Guide](<guides/quick start.md> 'Guide title')
+"#,
+        )
+        .expect("write summary");
+        fs::create_dir_all(src.join("chapters and guides")).expect("create chapter dir");
+        fs::write(
+            src.join("chapters and guides/intro page.md"),
+            "# Intro Page\n",
+        )
+        .expect("write intro page");
+        fs::write(src.join("guides/quick start.md"), "# Quick Start\n").expect("write guide");
+
+        let report = ingest_book(&IngestBookOptions {
+            root: root.to_path_buf(),
+            include_files: false,
+        })
+        .expect("ingest");
+
+        assert_eq!(report.summary.chapter_count, 2);
+        assert_eq!(
+            report.summary.order[0].path,
+            "src/chapters and guides/intro page.md"
+        );
+        assert_eq!(report.summary.order[1].path, "src/guides/quick start.md");
     }
 }
 
