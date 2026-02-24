@@ -274,6 +274,9 @@ fn map_xh_error(error: xh::XhError) -> CommandErrorKind {
 
 fn map_jq_error(error: jq::JqError) -> CommandErrorKind {
     match error {
+        jq::JqError::InvalidFilter => {
+            CommandErrorKind::Internal("jq normalization filter cannot be empty".to_string())
+        }
         jq::JqError::Unavailable => {
             CommandErrorKind::InputUsage("ingest api requires `jq` in PATH".to_string())
         }

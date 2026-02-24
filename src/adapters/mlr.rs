@@ -10,6 +10,8 @@ use crate::util::sort::sort_value_keys;
 
 #[derive(Debug, Error)]
 pub enum MlrError {
+    #[error("invalid mlr arguments: {0}")]
+    InvalidArguments(String),
     #[error("`mlr` is not available in PATH")]
     Unavailable,
     #[error("failed to spawn mlr: {0}")]
@@ -103,6 +105,24 @@ pub fn aggregate_rows(
 ) -> Result<Vec<Value>, MlrError> {
     let mlr_bin = resolve_mlr_bin();
     aggregate_rows_with_bin(values, group_by, metric, target, &mlr_bin)
+}
+
+pub fn run_verbs(values: &[Value], verbs: &[String]) -> Result<Vec<Value>, MlrError> {
+    if verbs.is_empty() {
+        return Err(MlrError::InvalidArguments(
+            "`--mlr` requires at least one argument".to_string(),
+        ));
+    }
+    if verbs.iter().any(|arg| arg.trim().is_empty()) {
+        return Err(MlrError::InvalidArguments(
+            "`--mlr` arguments cannot be empty".to_string(),
+        ));
+    }
+
+    let mut args = vec!["--ijson".to_string(), "--ojson".to_string()];
+    args.extend(verbs.iter().cloned());
+    let mlr_bin = resolve_mlr_bin();
+    run_mlr_with_stdin_values(values, &args, &mlr_bin)
 }
 
 fn resolve_mlr_bin() -> String {

@@ -9,7 +9,7 @@ use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
     canon, contract, diff, doctor, emit, gate, ingest, ingest_api, ingest_yaml_jobs, join, merge,
-    profile, recipe, scan, sdiff,
+    profile, recipe, scan, sdiff, transform,
 };
 use crate::domain::ingest::IngestYamlJobsMode;
 use crate::domain::report::{
@@ -33,7 +33,7 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 22] = [
+const TOOL_ORDER: [&str; 23] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -49,6 +49,7 @@ const TOOL_ORDER: [&str; 22] = [
     "dataq.join",
     "dataq.aggregate",
     "dataq.scan.text",
+    "dataq.transform.rowset",
     "dataq.merge",
     "dataq.doctor",
     "dataq.contract",
@@ -260,6 +261,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.join" => execute_join(args),
         "dataq.aggregate" => execute_aggregate(args),
         "dataq.scan.text" => execute_scan_text(args),
+        "dataq.transform.rowset" => execute_transform_rowset(args),
         "dataq.merge" => execute_merge(args),
         "dataq.doctor" => execute_doctor(args),
         "dataq.contract" => execute_contract(args),
@@ -1613,6 +1615,63 @@ fn execute_scan_text(args: &Map<String, Value>) -> ToolExecution {
     execution
 }
 
+fn execute_transform_rowset(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let input = match parse_value_input(
+        args,
+        &["input_path", "input_file"],
+        &["input", "input_inline", "input_value"],
+        "input",
+        true,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `input`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let jq_filter = match parse_required_string(args, &["jq_filter", "jq-filter"], "jq_filter") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let mlr = match parse_string_list(args, &["mlr", "mlr_args"], "mlr") {
+        Ok(values) if values.is_empty() => return input_usage_error("missing required `mlr`"),
+        Ok(values) => values,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let input_format = source_format(&input);
+    let command_args = transform::TransformRowsetCommandArgs {
+        input: to_transform_rowset_input(input.clone()),
+        jq_filter,
+        mlr,
+    };
+    let (response, trace) = transform::run_rowset_with_trace(&command_args);
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "transform.rowset",
+            PipelineInput::new(vec![pipeline_source("input", &input, input_format)]),
+            transform::pipeline_steps(),
+            transform::deterministic_guards(),
+        );
+        for tool in &trace.used_tools {
+            report = report.mark_external_tool_used(tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
 fn execute_merge(args: &Map<String, Value>) -> ToolExecution {
     let emit_pipeline = match parse_emit_pipeline(args) {
         Ok(value) => value,
@@ -2611,6 +2670,13 @@ fn to_aggregate_input(source: ValueInputSource) -> aggregate::AggregateCommandIn
     }
 }
 
+fn to_transform_rowset_input(source: ValueInputSource) -> transform::TransformRowsetCommandInput {
+    match source {
+        ValueInputSource::Path(path) => transform::TransformRowsetCommandInput::Path(path),
+        ValueInputSource::Inline(values) => transform::TransformRowsetCommandInput::Inline(values),
+    }
+}
+
 fn to_merge_input(source: DocumentInputSource) -> merge::MergeCommandInput {
     match source {
         DocumentInputSource::Path(path) => merge::MergeCommandInput::Path(path),
@@ -2747,6 +2813,7 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         "ingest-notes" => Ok(contract::ContractCommand::IngestNotes),
         "ingest-book" => Ok(contract::ContractCommand::IngestBook),
         "scan" => Ok(contract::ContractCommand::Scan),
+        "transform-rowset" | "transform.rowset" => Ok(contract::ContractCommand::TransformRowset),
         "merge" => Ok(contract::ContractCommand::Merge),
         "doctor" => Ok(contract::ContractCommand::Doctor),
         "recipe" | "recipe-run" => Ok(contract::ContractCommand::RecipeRun),

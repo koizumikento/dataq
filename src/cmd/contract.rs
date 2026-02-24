@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 17] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 18] = [
     ContractCommand::Canon,
     ContractCommand::IngestApi,
     ContractCommand::Ingest,
@@ -16,6 +16,7 @@ pub const ORDERED_COMMANDS: [ContractCommand; 17] = [
     ContractCommand::IngestNotes,
     ContractCommand::IngestBook,
     ContractCommand::Scan,
+    ContractCommand::TransformRowset,
     ContractCommand::Merge,
     ContractCommand::Doctor,
     ContractCommand::RecipeRun,
@@ -38,6 +39,7 @@ pub enum ContractCommand {
     IngestNotes,
     IngestBook,
     Scan,
+    TransformRowset,
     Merge,
     Doctor,
     RecipeRun,
@@ -152,6 +154,10 @@ const INGEST_BOOK_NOTES: &[&str] = &[
 const SCAN_NOTES: &[&str] = &[
     "`matches` is deterministically sorted by `path`, `line`, `column`.",
     "When `policy_mode=true`, exit code 2 indicates forbidden patterns were found.",
+];
+const TRANSFORM_ROWSET_NOTES: &[&str] = &[
+    "Output is always a JSON array.",
+    "`jq` runs first, then `mlr`, with stage-level diagnostics in `--emit-pipeline`.",
 ];
 const MERGE_NOTES: &[&str] = &[
     "Output is the merged root JSON value.",
@@ -308,6 +314,13 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: SCAN_FIELDS,
             exit_codes: exit_codes("forbidden-pattern matches when `policy_mode` is enabled"),
             notes: SCAN_NOTES,
+        },
+        ContractCommand::TransformRowset => CommandContract {
+            command: "transform-rowset",
+            schema: "dataq.transform.rowset.output.v1",
+            output_fields: NO_FIXED_ROOT_FIELDS,
+            exit_codes: exit_codes("validation mismatch is not used by this command"),
+            notes: TRANSFORM_ROWSET_NOTES,
         },
         ContractCommand::Merge => CommandContract {
             command: "merge",

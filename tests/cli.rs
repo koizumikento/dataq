@@ -32,3 +32,5 @@ mod recipe_cli;
 mod scan_cli;
 #[path = "cli/sdiff_cli.rs"]
 mod sdiff_cli;
+#[path = "cli/transform_cli.rs"]
+mod transform_cli;
