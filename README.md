@@ -63,6 +63,7 @@ dataq [--emit-pipeline] <command> [options]
 | Command | 用途 | 必須オプション |
 | --- | --- | --- |
 | `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>`（stdin時は省略可） |
+| `ingest api` | HTTP API 応答を `xh -> jq` で決定的JSONへ正規化 | `--url <http(s)://...>` |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
 | `gate schema` | JSON Schema で品質ゲートを実行（`assert --schema` の専用ラッパー） | `--schema <path>` |
 | `gate policy` | ルールベース品質ゲートを実行（違反詳細を決定的順序で出力） | `--rules <path>` |
@@ -98,6 +99,9 @@ cat events.jsonl | dataq canon --to jsonl > out.jsonl
 
 # ルール検証
 dataq assert --input out.jsonl --rules rules.yaml
+
+# API応答を取得して正規化
+dataq ingest api --url https://example.test/items --header 'accept:application/json'
 
 # JSON Schema 検証
 dataq assert --input out.jsonl --schema schema.json
@@ -511,12 +515,12 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
+- `dataq contract --command <canon|ingest-api|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
   - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-- 順序: `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+- 順序: `canon`, `ingest-api`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
@@ -554,6 +558,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `tools/call`
 - `tools/list` のツール順序は固定:
   - `dataq.canon`
+  - `dataq.ingest.api`
   - `dataq.assert`
   - `dataq.gate.schema`
   - `dataq.gate.policy`

@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
-    canon, contract, diff, doctor, emit, gate, join, merge, profile, recipe, sdiff,
+    canon, contract, diff, doctor, emit, gate, ingest_api, join, merge, profile, recipe, sdiff,
 };
 use crate::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
 use crate::domain::rules::AssertRules;
@@ -27,8 +27,9 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 16] = [
+const TOOL_ORDER: [&str; 17] = [
     "dataq.canon",
+    "dataq.ingest.api",
     "dataq.assert",
     "dataq.gate.schema",
     "dataq.gate.policy",
@@ -234,6 +235,7 @@ fn handle_tools_call(id: Value, params: Map<String, Value>) -> Value {
 fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecution {
     match tool_name {
         "dataq.canon" => execute_canon(args),
+        "dataq.ingest.api" => execute_ingest_api(args),
         "dataq.assert" => execute_assert(args),
         "dataq.gate.schema" => execute_gate_schema(args),
         "dataq.gate.policy" => execute_gate_policy(args),
@@ -316,6 +318,82 @@ fn execute_canon(args: &Map<String, Value>) -> ToolExecution {
             }),
         );
         execution.pipeline = pipeline_as_value(pipeline).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_api(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let url = match parse_required_string(args, &["url"], "url") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let method = match parse_optional_string(args, &["method"], "method") {
+        Ok(Some(value)) => match value.to_ascii_uppercase().as_str() {
+            "GET" => ingest_api::IngestApiMethod::Get,
+            "POST" => ingest_api::IngestApiMethod::Post,
+            "PUT" => ingest_api::IngestApiMethod::Put,
+            "PATCH" => ingest_api::IngestApiMethod::Patch,
+            "DELETE" => ingest_api::IngestApiMethod::Delete,
+            _ => return input_usage_error("`method` must be GET|POST|PUT|PATCH|DELETE"),
+        },
+        Ok(None) => ingest_api::IngestApiMethod::Get,
+        Err(message) => return input_usage_error(message),
+    };
+    let headers = match parse_string_list(args, &["header", "headers"], "header") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let body = match parse_optional_json_body(args, &["body"], "body") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let expect_status =
+        match parse_optional_u16(args, &["expect_status", "expect-status"], "expect_status") {
+            Ok(value) => value,
+            Err(message) => return input_usage_error(message),
+        };
+
+    let (response, trace) = ingest_api::run_with_trace(&ingest_api::IngestApiCommandArgs {
+        url,
+        method,
+        headers,
+        body,
+        expect_status,
+    });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "ingest_api",
+            PipelineInput::new(vec![PipelineInputSource {
+                label: "url".to_string(),
+                source: "url".to_string(),
+                path: Some(
+                    args.get("url")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                format: Some("http".to_string()),
+            }]),
+            ingest_api::pipeline_steps(),
+            ingest_api::deterministic_guards(),
+        );
+        for tool in &trace.used_tools {
+            report = report.mark_external_tool_used(tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
     }
 
     execution
@@ -1799,6 +1877,27 @@ fn parse_usize(
     }
 }
 
+fn parse_optional_u16(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<u16>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| format!("`{label}` must be between 0 and 65535")),
+        Some(Value::String(text)) => text
+            .parse::<u16>()
+            .map(Some)
+            .map_err(|_| format!("`{label}` must be between 0 and 65535")),
+        Some(_) => Err(format!("`{label}` must be a number or numeric string")),
+    }
+}
+
 fn parse_required_string(
     args: &Map<String, Value>,
     aliases: &[&str],
@@ -1935,6 +2034,21 @@ fn parse_inline_value(
     label: &str,
 ) -> Result<Option<Value>, String> {
     Ok(find_alias(args, aliases, label)?.cloned())
+}
+
+fn parse_optional_json_body(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<String>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.to_string())),
+        Some(other) => serde_json::to_string(other)
+            .map(Some)
+            .map_err(|error| format!("failed to serialize `{label}`: {error}")),
+    }
 }
 
 fn find_alias<'a>(
@@ -2211,6 +2325,7 @@ fn pipeline_as_value(report: PipelineReport) -> Result<Value, String> {
 fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, String> {
     match value {
         "canon" => Ok(contract::ContractCommand::Canon),
+        "ingest-api" => Ok(contract::ContractCommand::IngestApi),
         "assert" => Ok(contract::ContractCommand::Assert),
         "gate-schema" => Ok(contract::ContractCommand::GateSchema),
         "gate" | "gate-policy" => Ok(contract::ContractCommand::Gate),

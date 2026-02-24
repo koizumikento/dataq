@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 16] = [
+const TOOL_ORDER: [&str; 17] = [
     "dataq.canon",
+    "dataq.ingest.api",
     "dataq.assert",
     "dataq.gate.schema",
     "dataq.gate.policy",
@@ -160,6 +161,14 @@ fn tools_call_minimal_success_for_all_tools() {
             }),
         ),
         (
+            "dataq.ingest.api",
+            json!({
+                "url": "https://example.test/items",
+                "method": "GET",
+                "header": ["accept:application/json"]
+            }),
+        ),
+        (
             "dataq.assert",
             json!({
                 "input": [{"id": 1}],
@@ -288,6 +297,34 @@ fn tools_call_minimal_success_for_all_tools() {
             "tool: {tool_name}",
         );
     }
+}
+
+#[test]
+fn tools_call_ingest_api_accepts_mixed_case_method() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        101,
+        "dataq.ingest.api",
+        json!({
+            "url": "https://example.test/items",
+            "method": "Get",
+            "header": ["accept:application/json"]
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(false));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["status"],
+        Value::from(200)
+    );
 }
 
 #[test]
@@ -836,8 +873,9 @@ impl FakeToolchain {
         let bin_dir = dir.path().to_path_buf();
 
         let mlr_bin = write_fake_mlr_script(bin_dir.join("mlr"));
-        write_fake_version_script(bin_dir.join("jq"), "jq-1.7");
+        write_fake_ingest_jq_script(bin_dir.join("jq"));
         write_fake_version_script(bin_dir.join("yq"), "yq 4.35.2");
+        write_fake_xh_script(bin_dir.join("xh"));
 
         Self {
             _dir: dir,
@@ -864,6 +902,41 @@ fn write_fake_version_script(path: PathBuf, version: &str) {
         ),
     )
     .expect("write version script");
+    set_executable(&path);
+}
+
+fn write_fake_ingest_jq_script(path: PathBuf) {
+    let script = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'jq-1.7\n'
+  exit 0
+fi
+cat
+"#;
+    fs::write(&path, script).expect("write fake jq script");
+    set_executable(&path);
+}
+
+fn write_fake_xh_script(path: PathBuf) {
+    let script = r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    printf 'xh 0.23.0\n'
+    exit 0
+  fi
+done
+
+cat <<'EOF'
+HTTP/1.1 200 OK
+Date: Mon, 24 Feb 2025 10:00:00 GMT
+Content-Type: application/json
+ETag: W/"abc"
+X-Trace-Id: trace-123
+
+{"ok":true,"n":1}
+EOF
+"#;
+    fs::write(&path, script).expect("write fake xh script");
     set_executable(&path);
 }
 

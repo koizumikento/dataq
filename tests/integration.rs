@@ -14,6 +14,8 @@ mod emit_plan_flow;
 mod gate_policy_flow;
 #[path = "integration/gate_schema_flow.rs"]
 mod gate_schema_flow;
+#[path = "integration/ingest_api_flow.rs"]
+mod ingest_api_flow;
 #[path = "integration/io_format_resolution.rs"]
 mod io_format_resolution;
 #[path = "integration/io_roundtrip.rs"]
