@@ -43,6 +43,44 @@ pub struct ProfileTypeDistribution {
     pub object: usize,
 }
 
+/// Deterministic extraction report for `ingest doc` command output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IngestDocReport {
+    pub meta: Value,
+    pub headings: Vec<IngestDocHeading>,
+    pub links: Vec<IngestDocLink>,
+    pub tables: Vec<IngestDocTable>,
+    pub code_blocks: Vec<IngestDocCodeBlock>,
+}
+
+/// Heading entry extracted from a source document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestDocHeading {
+    pub level: i64,
+    pub text: String,
+}
+
+/// Link entry extracted from a source document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestDocLink {
+    pub url: String,
+    pub title: String,
+    pub text: String,
+}
+
+/// Table entry extracted from a source document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestDocTable {
+    pub caption: String,
+}
+
+/// Code-block entry extracted from a source document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestDocCodeBlock {
+    pub language: String,
+    pub code: String,
+}
+
 /// Deterministic report for `recipe run` command output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RecipeRunReport {

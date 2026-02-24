@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 13] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 14] = [
     ContractCommand::Canon,
     ContractCommand::IngestApi,
     ContractCommand::Ingest,
@@ -12,6 +12,7 @@ pub const ORDERED_COMMANDS: [ContractCommand; 13] = [
     ContractCommand::Sdiff,
     ContractCommand::DiffSource,
     ContractCommand::Profile,
+    ContractCommand::IngestDoc,
     ContractCommand::Merge,
     ContractCommand::Doctor,
     ContractCommand::RecipeRun,
@@ -30,6 +31,7 @@ pub enum ContractCommand {
     Sdiff,
     DiffSource,
     Profile,
+    IngestDoc,
     Merge,
     Doctor,
     RecipeRun,
@@ -71,6 +73,7 @@ const GATE_FIELDS: &[&str] = &["matched", "violations", "details"];
 const SDIFF_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values"];
 const DIFF_SOURCE_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values", "sources"];
 const PROFILE_FIELDS: &[&str] = &["record_count", "field_count", "fields"];
+const INGEST_DOC_FIELDS: &[&str] = &["meta", "headings", "links", "tables", "code_blocks"];
 const DOCTOR_FIELDS: &[&str] = &["tools"];
 const RECIPE_RUN_FIELDS: &[&str] = &["matched", "exit_code", "steps"];
 const RECIPE_LOCK_FIELDS: &[&str] = &[
@@ -116,6 +119,10 @@ const DIFF_SOURCE_NOTES: &[&str] = &[
 const PROFILE_NOTES: &[&str] = &[
     "`fields` keys are canonical JSON paths in deterministic order.",
     "`numeric_stats` is omitted when no numeric samples exist.",
+];
+const INGEST_DOC_NOTES: &[&str] = &[
+    "Extraction runs as `pandoc -t json` followed by jq projection.",
+    "`headings`, `links`, `tables`, and `code_blocks` preserve source order.",
 ];
 const MERGE_NOTES: &[&str] = &[
     "Output is the merged root JSON value.",
@@ -235,6 +242,16 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: PROFILE_FIELDS,
             exit_codes: exit_codes("validation mismatch is not used by this command"),
             notes: PROFILE_NOTES,
+        },
+        ContractCommand::IngestDoc => CommandContract {
+            command: "ingest.doc",
+            schema: "dataq.ingest.doc.output.v1",
+            output_fields: INGEST_DOC_FIELDS,
+            exit_codes: exit_codes_with_code_three(
+                "validation mismatch is not used by this command",
+                "input/usage error or missing `pandoc`/`jq`",
+            ),
+            notes: INGEST_DOC_NOTES,
         },
         ContractCommand::Merge => CommandContract {
             command: "merge",

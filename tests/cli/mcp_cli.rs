@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 18] = [
+const TOOL_ORDER: [&str; 19] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -15,6 +15,7 @@ const TOOL_ORDER: [&str; 18] = [
     "dataq.sdiff",
     "dataq.diff.source",
     "dataq.profile",
+    "dataq.ingest.doc",
     "dataq.join",
     "dataq.aggregate",
     "dataq.merge",
@@ -230,6 +231,13 @@ fn tools_call_minimal_success_for_all_tools() {
             }),
         ),
         (
+            "dataq.ingest.doc",
+            json!({
+                "input": "# Overview\n\nSee [site](https://example.com/docs)\n",
+                "from": "md"
+            }),
+        ),
+        (
             "dataq.join",
             json!({
                 "left": [{"id":1,"l":"L1"},{"id":2,"l":"L2"}],
@@ -401,6 +409,101 @@ fn emit_pipeline_true_includes_pipeline() {
     assert_eq!(
         response["result"]["structuredContent"]["pipeline"]["command"],
         Value::from("profile")
+    );
+}
+
+#[test]
+fn ingest_doc_emit_pipeline_marks_pandoc_and_jq_used() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        11,
+        "dataq.ingest.doc",
+        json!({
+            "emit_pipeline": true,
+            "input": "# heading",
+            "from": "md"
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+
+    let tools = response["result"]["structuredContent"]["pipeline"]["external_tools"]
+        .as_array()
+        .expect("external_tools array");
+    let jq_entry = tools
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some("jq"))
+        .expect("jq entry");
+    assert_eq!(jq_entry["used"], Value::Bool(true));
+
+    let pandoc_entry = tools
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some("pandoc"))
+        .expect("pandoc entry");
+    assert_eq!(pandoc_entry["used"], Value::Bool(true));
+}
+
+#[test]
+fn ingest_doc_input_path_dash_returns_input_usage_error() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        12,
+        "dataq.ingest.doc",
+        json!({
+            "emit_pipeline": true,
+            "input_path": "-",
+            "from": "md"
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["error"],
+        Value::from("input_usage_error")
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["message"],
+        Value::from(
+            "`input` path `-` is not supported for `dataq.ingest.doc`; pass file path or inline `input`",
+        )
+    );
+}
+
+#[test]
+fn ingest_doc_accepts_empty_inline_input() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        13,
+        "dataq.ingest.doc",
+        json!({
+            "input": "",
+            "from": "md"
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(false));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
     );
 }
 
@@ -957,6 +1060,7 @@ impl FakeToolchain {
         write_fake_ingest_jq_script(bin_dir.join("jq"));
         write_fake_yq_script(bin_dir.join("yq"));
         write_fake_xh_script(bin_dir.join("xh"));
+        write_fake_pandoc_script(bin_dir.join("pandoc"));
 
         Self {
             _dir: dir,
@@ -980,7 +1084,12 @@ if [ "$1" = "--version" ]; then
   printf 'jq-1.7\n'
   exit 0
 fi
-cat
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"pandoc-api-version"'; then
+  printf '{"meta":{"title":"Sample"},"headings":[],"links":[],"tables":[],"code_blocks":[]}'
+else
+  printf '%s' "$payload"
+fi
 "#;
     fs::write(&path, script).expect("write fake jq script");
     set_executable(&path);
@@ -1018,6 +1127,22 @@ X-Trace-Id: trace-123
 EOF
 "#;
     fs::write(&path, script).expect("write fake xh script");
+    set_executable(&path);
+}
+
+fn write_fake_pandoc_script(path: PathBuf) {
+    let script = r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    printf 'pandoc 3.5.0\n'
+    exit 0
+  fi
+done
+
+printf '{"pandoc-api-version":[1,23,1],"meta":{"title":{"t":"MetaString","c":"Sample"}},"blocks":[]}'
+"#;
+
+    fs::write(&path, script).expect("write fake pandoc script");
     set_executable(&path);
 }
 

@@ -7,8 +7,8 @@ use std::process::{self, Command};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
-    aggregate, r#assert, canon, contract, diff, doctor, emit, gate, ingest_api, ingest_yaml_jobs,
-    join, mcp, merge, profile, recipe, sdiff,
+    aggregate, r#assert, canon, contract, diff, doctor, emit, gate, ingest, ingest_api,
+    ingest_yaml_jobs, join, mcp, merge, profile, recipe, sdiff,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::ingest::IngestYamlJobsMode;
@@ -133,6 +133,8 @@ enum IngestSubcommand {
     Api(IngestApiArgs),
     /// Extract and normalize job definitions from YAML.
     YamlJobs(IngestYamlJobsArgs),
+    /// Extract deterministic schema fields from a document.
+    Doc(IngestDocArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -165,6 +167,15 @@ struct IngestYamlJobsArgs {
 
     #[arg(long, value_enum)]
     mode: CliIngestYamlJobsMode,
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestDocArgs {
+    #[arg(long)]
+    input: String,
+
+    #[arg(long, value_enum)]
+    from: CliIngestDocFormat,
 }
 
 #[derive(Debug, clap::Args)]
@@ -450,6 +461,15 @@ enum CliIngestYamlJobsMode {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliIngestDocFormat {
+    Md,
+    Html,
+    Docx,
+    Rst,
+    Latex,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliGatePolicySource {
     ScanText,
     IngestDoc,
@@ -480,6 +500,7 @@ enum CliContractCommand {
     Sdiff,
     DiffSource,
     Profile,
+    IngestDoc,
     Merge,
     Doctor,
     #[value(name = "recipe-run", alias = "recipe")]
@@ -569,6 +590,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::Sdiff => Self::Sdiff,
             CliContractCommand::DiffSource => Self::DiffSource,
             CliContractCommand::Profile => Self::Profile,
+            CliContractCommand::IngestDoc => Self::IngestDoc,
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
             CliContractCommand::RecipeRun => Self::RecipeRun,
@@ -609,6 +631,18 @@ impl From<CliIngestYamlJobsMode> for IngestYamlJobsMode {
             CliIngestYamlJobsMode::GithubActions => Self::GithubActions,
             CliIngestYamlJobsMode::GitlabCi => Self::GitlabCi,
             CliIngestYamlJobsMode::GenericMap => Self::GenericMap,
+        }
+    }
+}
+
+impl From<CliIngestDocFormat> for ingest::IngestDocInputFormat {
+    fn from(value: CliIngestDocFormat) -> Self {
+        match value {
+            CliIngestDocFormat::Md => Self::Md,
+            CliIngestDocFormat::Html => Self::Html,
+            CliIngestDocFormat::Docx => Self::Docx,
+            CliIngestDocFormat::Rst => Self::Rst,
+            CliIngestDocFormat::Latex => Self::Latex,
         }
     }
 }
@@ -971,6 +1005,7 @@ fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         IngestSubcommand::Api(api_args) => run_ingest_api(api_args, emit_pipeline),
         IngestSubcommand::YamlJobs(args) => run_ingest_yaml_jobs(args, emit_pipeline),
+        IngestSubcommand::Doc(args) => run_ingest_doc(args, emit_pipeline),
     }
 }
 
@@ -1087,6 +1122,67 @@ fn run_ingest_yaml_jobs(args: IngestYamlJobsArgs, emit_pipeline: bool) -> i32 {
         let report = build_ingest_yaml_jobs_pipeline_report(&args, mode, input_is_stdin, &trace);
         emit_pipeline_report(&report);
     }
+    exit_code
+}
+
+fn run_ingest_doc(args: IngestDocArgs, emit_pipeline: bool) -> i32 {
+    let from: ingest::IngestDocInputFormat = args.from.into();
+    let input_path = if args.input == "-" {
+        None
+    } else {
+        Some(PathBuf::from(&args.input))
+    };
+
+    let command_args = ingest::IngestDocCommandArgs {
+        input: input_path.clone(),
+        from,
+    };
+    let stdin = io::stdin();
+    let response = ingest::run_with_stdin(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest doc response".to_string(),
+                    json!({"command": "ingest.doc"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest doc error".to_string(),
+                    json!({"command": "ingest.doc"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected ingest doc exit code: {other}"),
+                json!({"command": "ingest.doc"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_ingest_doc_pipeline_report(&args, input_path, from);
+        emit_pipeline_report(&pipeline_report);
+    }
+
     exit_code
 }
 
@@ -2641,6 +2737,29 @@ fn build_profile_pipeline_report(
     )
 }
 
+fn build_ingest_doc_pipeline_report(
+    args: &IngestDocArgs,
+    input_path: Option<PathBuf>,
+    from: ingest::IngestDocInputFormat,
+) -> PipelineReport {
+    let source = if let Some(path) = input_path {
+        PipelineInputSource::path("input", path.display().to_string(), Some(from.as_str()))
+    } else if args.input == "-" {
+        PipelineInputSource::stdin("input", Some(from.as_str()))
+    } else {
+        PipelineInputSource::path("input", args.input.clone(), Some(from.as_str()))
+    };
+
+    PipelineReport::new(
+        "ingest.doc",
+        PipelineInput::new(vec![source]),
+        ingest::pipeline_steps(),
+        ingest::deterministic_guards(),
+    )
+    .mark_external_tool_used("pandoc")
+    .mark_external_tool_used("jq")
+}
+
 fn build_merge_pipeline_report(
     args: &MergeArgs,
     base_format: Option<Format>,
@@ -2911,14 +3030,14 @@ fn collect_used_tool_versions(
             let version = preferred_versions
                 .get(tool.name.as_str())
                 .cloned()
-                .unwrap_or_else(|| detect_tool_version(&tool.name, report.command.as_str()));
+                .unwrap_or_else(|| detect_tool_version(&tool.name));
             (tool.name.clone(), version)
         })
         .collect()
 }
 
-fn detect_tool_version(tool_name: &str, command_name: &str) -> String {
-    let executable = resolve_tool_executable(tool_name, command_name);
+fn detect_tool_version(tool_name: &str) -> String {
+    let executable = resolve_tool_executable(tool_name);
     match Command::new(&executable).arg("--version").output() {
         Ok(output) if output.status.success() => first_non_empty_line(&output.stdout)
             .or_else(|| first_non_empty_line(&output.stderr))
@@ -2936,12 +3055,13 @@ fn detect_tool_version(tool_name: &str, command_name: &str) -> String {
     }
 }
 
-fn resolve_tool_executable(tool_name: &str, _command_name: &str) -> String {
+fn resolve_tool_executable(tool_name: &str) -> String {
     let env_key = match tool_name {
         "jq" => Some("DATAQ_JQ_BIN"),
         "yq" => Some("DATAQ_YQ_BIN"),
         "mlr" => Some("DATAQ_MLR_BIN"),
         "xh" => Some("DATAQ_XH_BIN"),
+        "pandoc" => Some("DATAQ_PANDOC_BIN"),
         _ => None,
     };
 

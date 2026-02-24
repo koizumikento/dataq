@@ -19,6 +19,7 @@ dataq [--emit-pipeline] <command> [options]
 - `sdiff`: 2データセットの構造差分を出力
 - `diff source`: 2ソース（preset/path）を解決して構造差分を出力
 - `profile`: フィールド統計を決定的JSONで出力
+- `ingest doc`: ドキュメント（md/html/docx/rst/latex）を共通JSONへ抽出
 - `join`: 2入力をキー結合してJSON配列を出力
 - `aggregate`: グループ集計をJSON配列で出力
 - `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
@@ -33,12 +34,12 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
+  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
   - `--command recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -101,6 +102,7 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.sdiff`
   - `dataq.diff.source`
   - `dataq.profile`
+  - `dataq.ingest.doc`
   - `dataq.join`
   - `dataq.aggregate`
   - `dataq.merge`
@@ -178,6 +180,28 @@ dataq [--emit-pipeline] <command> [options]
   - `index = rank - 1`（0始まり）
 - `numeric_stats` の浮動小数は小数点以下6桁に丸めて出力
 
+## `ingest doc` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq ingest doc --input <path|-> --from <md|html|docx|rst|latex>`
+- 出力: JSON object（stdout）
+  - `meta`
+  - `headings`
+  - `links`
+  - `tables`
+  - `code_blocks`
+- 実行方式:
+  - stage1: `pandoc -f <from> -t json` で AST 化
+  - stage2: `jq` で固定スキーマへ投影
+  - `--emit-pipeline` の `external_tools` では `pandoc` と `jq` を `used=true` として記録
+- 異常時契約:
+  - unsupported `--from` は exit `3`
+  - `pandoc` 不在は exit `3`
+  - 文書 parse 失敗は exit `3`
+- `--emit-pipeline` 指定時の `steps`:
+  - `ingest_doc_pandoc_ast`
+  - `ingest_doc_jq_project`
+
 ## このCLIの位置づけ
 
 - `dataq` は `jq` / `yq` / `mlr` の代替ではなく、運用で繰り返す複合処理を短いコマンドに固定するための契約CLI
@@ -235,8 +259,9 @@ dataq [--emit-pipeline] <command> [options]
 
 ## 外部ツール多段連携（契約方針）
 
-- 多段連携コマンドは、内部で `jq` / `yq` / `mlr` の1つ以上を段階実行して1つの結果JSONを返す
+- 多段連携コマンドは、内部で `pandoc` / `jq` / `yq` / `mlr` の1つ以上を段階実行して1つの結果JSONを返す
 - 各段は役割を分離する:
+  - `pandoc`: ドキュメント AST 化
   - `yq`: YAML抽出/整形
   - `jq`: JSON正規化/判定フラグ付け
   - `mlr`: 集計/結合/統計
@@ -263,7 +288,7 @@ dataq [--emit-pipeline] <command> [options]
 
 - `0`: 成功
 - `2`: 検証失敗（期待仕様に不一致）
-- `3`: 入力不正（フォーマット不正、必須引数不足など）または `doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）
+- `3`: 入力不正（フォーマット不正、必須引数不足など）、`doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）、または `ingest doc` の `pandoc`/parse 失敗
 - `1`: その他実行時エラー
 
 ## `doctor` コマンド契約（MVP）
@@ -373,11 +398,11 @@ pipeline JSON schema:
 - `command`: 実行サブコマンド名
 - `input`: 入力ソース情報（stdin/path, format）
 - `steps`: 実行ステップ配列
-- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
+- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）に、コマンド固有ツール（例: `ingest doc` の `pandoc`）を追記。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
   - 追加メトリクス: `input_bytes`, `output_bytes`, `duration_ms`（決定性保持のため固定 `0`）
   - 後方互換: 既存フィールド（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）は不変
-- `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ), `dataq_version`）
+- `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ。`DATAQ_*_BIN` オーバーライド先を優先), `dataq_version`）
 - `deterministic_guards`: 適用した決定性ガード
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
 - `recipe run` では `steps` に `load_recipe_file`, `validate_recipe_schema`, `execute_step_<index>_<kind>` が入る
