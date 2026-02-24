@@ -1214,6 +1214,67 @@ exit 9
     path
 }
 
+fn write_fake_rg_script(path: PathBuf) -> PathBuf {
+    let script = r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    printf 'ripgrep 14.1.1\n'
+    exit 0
+  fi
+done
+
+pattern=""
+root=""
+capture_pattern=0
+capture_path=0
+for arg in "$@"; do
+  if [ "$capture_pattern" = "1" ]; then
+    pattern="$arg"
+    capture_pattern=0
+    continue
+  fi
+  if [ "$capture_path" = "1" ]; then
+    root="$arg"
+    capture_path=0
+    continue
+  fi
+  if [ "$arg" = "-e" ]; then
+    capture_pattern=1
+    continue
+  fi
+  if [ "$arg" = "--" ]; then
+    capture_path=1
+    continue
+  fi
+done
+
+if [ -z "$pattern" ] || [ -z "$root" ]; then
+  prev=""
+  last=""
+  for arg in "$@"; do
+    prev="$last"
+    last="$arg"
+  done
+  if [ -z "$pattern" ]; then
+    pattern="$prev"
+  fi
+  if [ -z "$root" ]; then
+    root="$last"
+  fi
+fi
+
+if [ "$pattern" = "token" ]; then
+  printf '{"type":"match","data":{"path":{"text":"%s/file.txt"},"lines":{"text":"token\\n"},"line_number":1,"submatches":[{"match":{"text":"token"},"start":0,"end":5}]}}\n' "$root"
+  exit 0
+fi
+
+exit 1
+"#;
+
+    fs::write(&path, script).expect("write fake rg script");
+    set_executable(&path);
+    path
+}
 fn set_executable(path: &PathBuf) {
     #[cfg(unix)]
     {

@@ -61,14 +61,45 @@ for arg in "$@"; do
   fi
 done
 
-prev=""
-last=""
+pattern=""
+root=""
+capture_pattern=0
+capture_path=0
 for arg in "$@"; do
-  prev="$last"
-  last="$arg"
+  if [ "$capture_pattern" = "1" ]; then
+    pattern="$arg"
+    capture_pattern=0
+    continue
+  fi
+  if [ "$capture_path" = "1" ]; then
+    root="$arg"
+    capture_path=0
+    continue
+  fi
+  if [ "$arg" = "-e" ]; then
+    capture_pattern=1
+    continue
+  fi
+  if [ "$arg" = "--" ]; then
+    capture_path=1
+    continue
+  fi
 done
-pattern="$prev"
-root="$last"
+
+if [ -z "$pattern" ] || [ -z "$root" ]; then
+  prev=""
+  last=""
+  for arg in "$@"; do
+    prev="$last"
+    last="$arg"
+  done
+  if [ -z "$pattern" ]; then
+    pattern="$prev"
+  fi
+  if [ -z "$root" ]; then
+    root="$last"
+  fi
+fi
 
 if [ "$pattern" = "stable" ]; then
   printf '{"type":"match","data":{"path":{"text":"%s/sub/b.txt"},"lines":{"text":"beta\\n"},"line_number":3,"submatches":[{"match":{"text":"beta"},"start":0,"end":4}]}}\n' "$root"

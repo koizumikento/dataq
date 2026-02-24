@@ -50,7 +50,9 @@ fn execute_json_with_bin(args: &RgCommandArgs<'_>, bin: &str) -> Result<String, 
     }
 
     command
+        .arg("-e")
         .arg(args.pattern)
+        .arg("--")
         .arg(args.path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

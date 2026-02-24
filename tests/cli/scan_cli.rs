@@ -134,6 +134,29 @@ fn scan_text_policy_mode_returns_exit_two_when_matches_found() {
     assert_eq!(payload["summary"]["forbidden_matches"], json!(1));
 }
 
+#[test]
+fn scan_text_pattern_starting_with_dash_is_treated_as_pattern() {
+    let toolchain = FakeRgToolchain::new();
+    let scan_root = tempdir().expect("scan root");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_RG_BIN", &toolchain.rg_bin)
+        .args([
+            "scan",
+            "text",
+            "--pattern=-forbidden",
+            "--path",
+            scan_root.path().to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run scan text");
+
+    assert_eq!(output.status.code(), Some(0));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["summary"]["total_matches"], json!(1));
+    assert_eq!(payload["matches"][0]["line"], json!(1));
+}
+
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
     let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
     let line = text
@@ -166,14 +189,45 @@ for arg in "$@"; do
   fi
 done
 
-prev=""
-last=""
+pattern=""
+root=""
+capture_pattern=0
+capture_path=0
 for arg in "$@"; do
-  prev="$last"
-  last="$arg"
+  if [ "$capture_pattern" = "1" ]; then
+    pattern="$arg"
+    capture_pattern=0
+    continue
+  fi
+  if [ "$capture_path" = "1" ]; then
+    root="$arg"
+    capture_path=0
+    continue
+  fi
+  if [ "$arg" = "-e" ]; then
+    capture_pattern=1
+    continue
+  fi
+  if [ "$arg" = "--" ]; then
+    capture_path=1
+    continue
+  fi
 done
-pattern="$prev"
-root="$last"
+
+if [ -z "$pattern" ] || [ -z "$root" ]; then
+  prev=""
+  last=""
+  for arg in "$@"; do
+    prev="$last"
+    last="$arg"
+  done
+  if [ -z "$pattern" ]; then
+    pattern="$prev"
+  fi
+  if [ -z "$root" ]; then
+    root="$last"
+  fi
+fi
 
 if [ "$pattern" = "invalid-regex" ]; then
   echo 'regex parse error: unclosed group' 1>&2
@@ -195,6 +249,11 @@ fi
 
 if [ "$pattern" = "forbidden" ]; then
   printf '{"type":"match","data":{"path":{"text":"%s/policy.txt"},"lines":{"text":"forbidden token\\n"},"line_number":1,"submatches":[{"match":{"text":"forbidden"},"start":0,"end":9}]}}\n' "$root"
+  exit 0
+fi
+
+if [ "$pattern" = "-forbidden" ]; then
+  printf '{"type":"match","data":{"path":{"text":"%s/policy.txt"},"lines":{"text":"-forbidden token\\n"},"line_number":1,"submatches":[{"match":{"text":"-forbidden"},"start":0,"end":10}]}}\n' "$root"
   exit 0
 fi
 
