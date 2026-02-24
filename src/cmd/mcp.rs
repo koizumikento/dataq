@@ -987,16 +987,16 @@ fn execute_doctor(args: &Map<String, Value>) -> ToolExecution {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
-    let profile = match parse_optional_string(args, &["profile"], "profile") {
+    let profile = match parse_optional_doctor_profile(args) {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
-
-    let doctor_args = doctor::DoctorCommandArgs {
+    let command_input = doctor::DoctorCommandInput {
         capabilities,
         profile,
     };
-    let (response, _) = doctor::run_with_args_and_trace(&doctor_args);
+
+    let (response, _) = doctor::run_with_input_and_trace(command_input);
     let mut execution = ToolExecution {
         exit_code: response.exit_code,
         payload: response.payload,
@@ -1007,8 +1007,8 @@ fn execute_doctor(args: &Map<String, Value>) -> ToolExecution {
         let mut report = PipelineReport::new(
             "doctor",
             PipelineInput::new(Vec::new()),
-            doctor::pipeline_steps(),
-            doctor::deterministic_guards(),
+            doctor::pipeline_steps(command_input.profile),
+            doctor::deterministic_guards(command_input.profile),
         );
         for tool in ["jq", "yq", "mlr"] {
             report = report.mark_external_tool_used(tool);
@@ -1158,19 +1158,31 @@ fn tools_list_result() -> Value {
 }
 
 fn tool_definition(tool_name: &str) -> Value {
+    let mut input_schema = json!({
+        "type": "object",
+        "properties": {
+            "emit_pipeline": {
+                "type": "boolean",
+                "default": false
+            }
+        },
+        "additionalProperties": true
+    });
+    if tool_name == "dataq.doctor" {
+        input_schema["properties"]["capabilities"] = json!({
+            "type": "boolean",
+            "default": false
+        });
+        input_schema["properties"]["profile"] = json!({
+            "type": "string",
+            "enum": ["core", "ci-jobs", "doc", "api", "notes", "book", "scan"]
+        });
+    }
+
     json!({
         "name": tool_name,
         "description": format!("dataq MCP tool `{tool_name}`"),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "emit_pipeline": {
-                    "type": "boolean",
-                    "default": false
-                }
-            },
-            "additionalProperties": true
-        }
+        "inputSchema": input_schema
     })
 }
 
@@ -1339,6 +1351,14 @@ fn parse_optional_normalize_mode(
         _ => Err("`normalize` must be `github-actions-jobs` or `gitlab-ci-jobs`".to_string()),
     })
     .transpose()
+}
+
+fn parse_optional_doctor_profile(
+    args: &Map<String, Value>,
+) -> Result<Option<doctor::DoctorProfile>, String> {
+    let raw = parse_optional_string(args, &["profile"], "profile")?;
+    raw.map(|value| doctor::DoctorProfile::from_str(value.as_str()))
+        .transpose()
 }
 
 fn parse_string_list(
