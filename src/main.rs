@@ -17,6 +17,7 @@ use dataq::domain::report::{
 };
 use dataq::engine::aggregate::AggregateMetric;
 use dataq::engine::canon::canonicalize_value;
+use dataq::engine::ingest as ingest_engine;
 use dataq::engine::join::JoinHow;
 use dataq::engine::merge::MergePolicy;
 use dataq::io::format::jsonl::JsonlStreamError;
@@ -133,6 +134,8 @@ enum IngestSubcommand {
     Api(IngestApiArgs),
     /// Extract and normalize job definitions from YAML.
     YamlJobs(IngestYamlJobsArgs),
+    /// Fetch and normalize `nb` notes into deterministic JSON.
+    Notes(IngestNotesArgs),
     /// Extract deterministic schema fields from a document.
     Doc(IngestDocArgs),
 }
@@ -167,6 +170,21 @@ struct IngestYamlJobsArgs {
 
     #[arg(long, value_enum)]
     mode: CliIngestYamlJobsMode,
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestNotesArgs {
+    #[arg(long = "tag")]
+    tag: Vec<String>,
+
+    #[arg(long)]
+    since: Option<String>,
+
+    #[arg(long)]
+    until: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = CliIngestNotesOutput::Json)]
+    to: CliIngestNotesOutput,
 }
 
 #[derive(Debug, clap::Args)]
@@ -461,6 +479,12 @@ enum CliIngestYamlJobsMode {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliIngestNotesOutput {
+    Json,
+    Jsonl,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliIngestDocFormat {
     Md,
     Html,
@@ -501,6 +525,8 @@ enum CliContractCommand {
     DiffSource,
     Profile,
     IngestDoc,
+    #[value(name = "ingest-notes")]
+    IngestNotes,
     Merge,
     Doctor,
     #[value(name = "recipe-run", alias = "recipe")]
@@ -591,6 +617,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::DiffSource => Self::DiffSource,
             CliContractCommand::Profile => Self::Profile,
             CliContractCommand::IngestDoc => Self::IngestDoc,
+            CliContractCommand::IngestNotes => Self::IngestNotes,
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
             CliContractCommand::RecipeRun => Self::RecipeRun,
@@ -1005,6 +1032,7 @@ fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         IngestSubcommand::Api(api_args) => run_ingest_api(api_args, emit_pipeline),
         IngestSubcommand::YamlJobs(args) => run_ingest_yaml_jobs(args, emit_pipeline),
+        IngestSubcommand::Notes(args) => run_ingest_notes(args, emit_pipeline),
         IngestSubcommand::Doc(args) => run_ingest_doc(args, emit_pipeline),
     }
 }
@@ -1122,6 +1150,98 @@ fn run_ingest_yaml_jobs(args: IngestYamlJobsArgs, emit_pipeline: bool) -> i32 {
         let report = build_ingest_yaml_jobs_pipeline_report(&args, mode, input_is_stdin, &trace);
         emit_pipeline_report(&report);
     }
+    exit_code
+}
+
+fn run_ingest_notes(args: IngestNotesArgs, emit_pipeline: bool) -> i32 {
+    let time_range =
+        match ingest_engine::resolve_time_range(args.since.as_deref(), args.until.as_deref()) {
+            Ok(value) => value,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    error.to_string(),
+                    json!({"command": "ingest.notes"}),
+                    3,
+                );
+                return 3;
+            }
+        };
+
+    let command_args = ingest::IngestNotesCommandArgs {
+        tags: args.tag.clone(),
+        since: time_range.since,
+        until: time_range.until,
+    };
+    let (response, trace) = ingest::run_notes_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 => match (args.to, &response.payload) {
+            (CliIngestNotesOutput::Json, _) => {
+                if emit_json_stdout(&response.payload) {
+                    0
+                } else {
+                    emit_error(
+                        "internal_error",
+                        "failed to serialize ingest notes response".to_string(),
+                        json!({"command": "ingest.notes"}),
+                        1,
+                    );
+                    1
+                }
+            }
+            (CliIngestNotesOutput::Jsonl, Value::Array(values)) => {
+                if emit_jsonl_stdout(values) {
+                    0
+                } else {
+                    emit_error(
+                        "internal_error",
+                        "failed to serialize ingest notes JSONL response".to_string(),
+                        json!({"command": "ingest.notes"}),
+                        1,
+                    );
+                    1
+                }
+            }
+            (CliIngestNotesOutput::Jsonl, _) => {
+                emit_error(
+                    "internal_error",
+                    "ingest notes response must be an array for JSONL output".to_string(),
+                    json!({"command": "ingest.notes"}),
+                    1,
+                );
+                1
+            }
+        },
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest notes error".to_string(),
+                    json!({"command": "ingest.notes"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected ingest notes exit code: {other}"),
+                json!({"command": "ingest.notes"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_ingest_notes_pipeline_report(&trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+
     exit_code
 }
 
@@ -2737,6 +2857,19 @@ fn build_profile_pipeline_report(
     )
 }
 
+fn build_ingest_notes_pipeline_report(trace: &ingest::IngestNotesPipelineTrace) -> PipelineReport {
+    let mut report = PipelineReport::new(
+        "ingest.notes",
+        PipelineInput::new(Vec::new()),
+        ingest::notes_pipeline_steps(),
+        ingest::notes_deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
 fn build_ingest_doc_pipeline_report(
     args: &IngestDocArgs,
     input_path: Option<PathBuf>,
@@ -3062,6 +3195,7 @@ fn resolve_tool_executable(tool_name: &str) -> String {
         "mlr" => Some("DATAQ_MLR_BIN"),
         "xh" => Some("DATAQ_XH_BIN"),
         "pandoc" => Some("DATAQ_PANDOC_BIN"),
+        "nb" => Some("DATAQ_NB_BIN"),
         _ => None,
     };
 
@@ -3089,6 +3223,12 @@ fn emit_json_stdout(value: &Value) -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn emit_jsonl_stdout(values: &[Value]) -> bool {
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    dataq_io::format::jsonl::write_jsonl(&mut writer, values).is_ok()
 }
 
 fn emit_json_stderr(value: &Value) -> bool {

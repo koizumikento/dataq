@@ -60,6 +60,7 @@ fn contract_all_returns_deterministic_order() {
             "diff-source",
             "profile",
             "ingest.doc",
+            "ingest.notes",
             "merge",
             "doctor",
             "recipe-run",
