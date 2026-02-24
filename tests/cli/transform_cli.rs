@@ -29,15 +29,15 @@ fn transform_rowset_count_sum_avg_are_deterministic_json_arrays() {
         (
             "sum",
             json!([
-                {"sum": 15.0, "team": "a"},
-                {"sum": 7.0, "team": "b"}
+                {"sum": "15.000000", "team": "a"},
+                {"sum": "7.000000", "team": "b"}
             ]),
         ),
         (
             "mean",
             json!([
-                {"avg": 7.0, "team": "b"},
-                {"avg": 7.5, "team": "a"}
+                {"avg": "7.000000", "team": "b"},
+                {"avg": "7.500000", "team": "a"}
             ]),
         ),
     ] {
@@ -133,6 +133,91 @@ fn transform_rowset_emit_pipeline_reports_stage_diagnostics_with_record_counts()
     assert_eq!(
         stderr_json["stage_diagnostics"][1]["output_records"],
         Value::from(2)
+    );
+}
+
+#[test]
+fn transform_rowset_preserves_string_values_from_mlr_output() {
+    let dir = tempdir().expect("tempdir");
+    let jq_bin = write_fake_jq_script(dir.path().join("fake-jq"));
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(&input, r#"[{"team":"a","price":10.0}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JQ_BIN", &jq_bin)
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "transform",
+            "rowset",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--jq-filter",
+            ".",
+            "--mlr",
+            "stats1",
+            "-a",
+            "literal",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("parse transform rowset output");
+    assert_eq!(
+        parsed,
+        json!([
+            {"label": "exp", "value": "1e3"},
+            {"label": "fixed", "value": "7.000000"}
+        ])
+    );
+}
+
+#[test]
+fn transform_rowset_emit_pipeline_after_mlr_args_is_parsed_as_global_flag() {
+    let dir = tempdir().expect("tempdir");
+    let jq_bin = write_fake_jq_script(dir.path().join("fake-jq"));
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"b","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JQ_BIN", &jq_bin)
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "transform",
+            "rowset",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--jq-filter",
+            ".",
+            "--mlr",
+            "stats1",
+            "-a",
+            "count",
+            "-f",
+            "price",
+            "-g",
+            "team",
+            "--emit-pipeline",
+        ])
+        .output()
+        .expect("run transform rowset");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], Value::from("transform.rowset"));
+    assert_eq!(
+        stderr_json["stage_diagnostics"][1]["step"],
+        Value::from("transform_rowset_mlr")
     );
 }
 
@@ -234,7 +319,7 @@ mode=""
 action=""
 for arg in "$@"; do
   if [ "$arg" = "stats1" ]; then mode="stats1"; fi
-  if [ "$arg" = "count" ] || [ "$arg" = "sum" ] || [ "$arg" = "mean" ]; then action="$arg"; fi
+  if [ "$arg" = "count" ] || [ "$arg" = "sum" ] || [ "$arg" = "mean" ] || [ "$arg" = "literal" ]; then action="$arg"; fi
 done
 
 if [ "$mode" != "stats1" ]; then
@@ -252,6 +337,10 @@ if [ "$action" = "sum" ]; then
 fi
 if [ "$action" = "mean" ]; then
   printf '[{"team":"b","avg":"7.000000"},{"team":"a","avg":"7.500000"}]'
+  exit 0
+fi
+if [ "$action" = "literal" ]; then
+  printf '[{"label":"exp","value":"1e3"},{"label":"fixed","value":"7.000000"}]'
   exit 0
 fi
 

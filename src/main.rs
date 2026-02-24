@@ -1820,9 +1820,27 @@ fn run_scan(args: ScanArgs, emit_pipeline: bool) -> i32 {
 fn run_transform(args: TransformArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         TransformSubcommand::Rowset(rowset_args) => {
+            let (rowset_args, emit_pipeline) =
+                normalize_transform_rowset_global_flags(rowset_args, emit_pipeline);
             run_transform_rowset(rowset_args, emit_pipeline)
         }
     }
+}
+
+fn normalize_transform_rowset_global_flags(
+    mut args: TransformRowsetArgs,
+    emit_pipeline: bool,
+) -> (TransformRowsetArgs, bool) {
+    let mut resolved_emit_pipeline = emit_pipeline;
+    args.mlr.retain(|arg| {
+        if arg == "--emit-pipeline" {
+            resolved_emit_pipeline = true;
+            false
+        } else {
+            true
+        }
+    });
+    (args, resolved_emit_pipeline)
 }
 
 fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {

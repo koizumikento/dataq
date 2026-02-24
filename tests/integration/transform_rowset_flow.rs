@@ -70,8 +70,8 @@ fn transform_rowset_stdin_flow_is_deterministic() {
     assert_eq!(
         actual,
         json!([
-            {"avg": 7.0, "team": "b"},
-            {"avg": 7.5, "team": "a"}
+            {"avg": "7.000000", "team": "b"},
+            {"avg": "7.500000", "team": "a"}
         ])
     );
 }

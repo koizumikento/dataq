@@ -108,9 +108,6 @@ fn canonicalize_float_values(value: Value) -> Value {
                 .map(|(key, value)| (key, canonicalize_float_values(value)))
                 .collect(),
         ),
-        Value::String(text) => parse_float_literal(text.as_str())
-            .map(Value::Number)
-            .unwrap_or(Value::String(text)),
         Value::Number(number) => {
             let original = number.clone();
             Value::Number(canonicalize_float_number(number).unwrap_or(original))
@@ -124,11 +121,4 @@ fn canonicalize_float_number(number: Number) -> Option<Number> {
         return Some(number);
     }
     number.as_f64().and_then(Number::from_f64)
-}
-
-fn parse_float_literal(text: &str) -> Option<Number> {
-    if !text.contains('.') && !text.contains('e') && !text.contains('E') {
-        return None;
-    }
-    text.parse::<f64>().ok().and_then(Number::from_f64)
 }
