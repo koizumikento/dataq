@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 22] = [
+const TOOL_ORDER: [&str; 23] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -21,6 +21,7 @@ const TOOL_ORDER: [&str; 22] = [
     "dataq.join",
     "dataq.aggregate",
     "dataq.scan.text",
+    "dataq.transform.rowset",
     "dataq.merge",
     "dataq.doctor",
     "dataq.contract",
@@ -260,6 +261,18 @@ fn tools_call_minimal_success_for_all_tools() {
                 "group_by": "team",
                 "metric": "count",
                 "target": "price"
+            }),
+        ),
+        (
+            "dataq.transform.rowset",
+            json!({
+                "input": [
+                    {"team":"a","price":10.0},
+                    {"team":"a","price":5.0},
+                    {"team":"b","price":7.0}
+                ],
+                "jq_filter": ".",
+                "mlr": ["stats1", "-a", "count", "-f", "price", "-g", "team"]
             }),
         ),
         (

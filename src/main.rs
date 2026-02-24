@@ -8,7 +8,7 @@ use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
     aggregate, r#assert, canon, contract, diff, doctor, emit, gate, ingest, ingest_api,
-    ingest_yaml_jobs, join, mcp, merge, profile, recipe, scan, sdiff,
+    ingest_yaml_jobs, join, mcp, merge, profile, recipe, scan, sdiff, transform,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::ingest::IngestYamlJobsMode;
@@ -60,6 +60,8 @@ enum Commands {
     Join(JoinArgs),
     /// Aggregate grouped metrics with deterministic JSON output.
     Aggregate(AggregateArgs),
+    /// Transform rowsets with fixed `jq -> mlr` stages.
+    Transform(TransformArgs),
     /// Scan repository text with deterministic structured match output.
     Scan(ScanArgs),
     /// Merge base and overlays with a deterministic merge policy.
@@ -348,6 +350,33 @@ struct AggregateArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct TransformArgs {
+    #[command(subcommand)]
+    command: TransformSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TransformSubcommand {
+    /// Run fixed two-stage rowset transform (`jq` then `mlr`).
+    Rowset(TransformRowsetArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TransformRowsetArgs {
+    /// Input path or `-` for stdin.
+    #[arg(long)]
+    input: String,
+
+    /// jq filter used in stage 1.
+    #[arg(long = "jq-filter")]
+    jq_filter: String,
+
+    /// mlr verb/arguments used in stage 2.
+    #[arg(long = "mlr", required = true, num_args = 1.., allow_hyphen_values = true)]
+    mlr: Vec<String>,
+}
+
+#[derive(Debug, clap::Args)]
 struct ScanArgs {
     #[command(subcommand)]
     command: ScanSubcommand,
@@ -576,6 +605,8 @@ enum CliContractCommand {
     IngestNotes,
     IngestBook,
     Scan,
+    #[value(name = "transform-rowset")]
+    TransformRowset,
     Merge,
     Doctor,
     #[value(name = "recipe-run", alias = "recipe")]
@@ -669,6 +700,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::IngestNotes => Self::IngestNotes,
             CliContractCommand::IngestBook => Self::IngestBook,
             CliContractCommand::Scan => Self::Scan,
+            CliContractCommand::TransformRowset => Self::TransformRowset,
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
             CliContractCommand::RecipeRun => Self::RecipeRun,
@@ -754,6 +786,7 @@ fn run() -> i32 {
         Commands::Profile(args) => run_profile(args, emit_pipeline),
         Commands::Join(args) => run_join(args, emit_pipeline),
         Commands::Aggregate(args) => run_aggregate(args, emit_pipeline),
+        Commands::Transform(args) => run_transform(args, emit_pipeline),
         Commands::Scan(args) => run_scan(args, emit_pipeline),
         Commands::Merge(args) => run_merge(args, emit_pipeline),
         Commands::Recipe(args) => run_recipe(args, emit_pipeline),
@@ -1782,6 +1815,141 @@ fn run_scan(args: ScanArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         ScanSubcommand::Text(text_args) => run_scan_text(text_args, emit_pipeline),
     }
+}
+
+fn run_transform(args: TransformArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        TransformSubcommand::Rowset(rowset_args) => {
+            run_transform_rowset(rowset_args, emit_pipeline)
+        }
+    }
+}
+
+fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {
+    let (input, input_format) = if args.input == "-" {
+        let stdin = io::stdin();
+        let mut bytes = Vec::new();
+        if let Err(error) = stdin.lock().read_to_end(&mut bytes) {
+            emit_error(
+                "input_usage_error",
+                format!("failed to read stdin: {error}"),
+                json!({"command": "transform.rowset"}),
+                3,
+            );
+            if emit_pipeline {
+                emit_pipeline_report(&build_transform_rowset_pipeline_report(
+                    &args,
+                    None,
+                    true,
+                    &transform::TransformRowsetPipelineTrace::default(),
+                ));
+            }
+            return 3;
+        }
+
+        let format = match dataq_io::autodetect_stdin_input_format(&bytes) {
+            Ok(format) => format,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    error.to_string(),
+                    json!({"command": "transform.rowset"}),
+                    3,
+                );
+                if emit_pipeline {
+                    emit_pipeline_report(&build_transform_rowset_pipeline_report(
+                        &args,
+                        None,
+                        true,
+                        &transform::TransformRowsetPipelineTrace::default(),
+                    ));
+                }
+                return 3;
+            }
+        };
+
+        let values = match dataq_io::reader::read_values(Cursor::new(bytes), format) {
+            Ok(values) => values,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    format!("failed to read input: {error}"),
+                    json!({"command": "transform.rowset"}),
+                    3,
+                );
+                if emit_pipeline {
+                    emit_pipeline_report(&build_transform_rowset_pipeline_report(
+                        &args,
+                        Some(format),
+                        true,
+                        &transform::TransformRowsetPipelineTrace::default(),
+                    ));
+                }
+                return 3;
+            }
+        };
+
+        (
+            transform::TransformRowsetCommandInput::Inline(values),
+            Some(format),
+        )
+    } else {
+        let path = PathBuf::from(args.input.clone());
+        let format = dataq_io::resolve_input_format(None, Some(path.as_path())).ok();
+        (transform::TransformRowsetCommandInput::Path(path), format)
+    };
+
+    let command_args = transform::TransformRowsetCommandArgs {
+        input,
+        jq_filter: args.jq_filter.clone(),
+        mlr: args.mlr.clone(),
+    };
+    let (response, trace) = transform::run_rowset_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize transform rowset output".to_string(),
+                    json!({"command": "transform.rowset"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 => {
+            if emit_json_stderr(&response.payload) {
+                3
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize transform rowset error".to_string(),
+                    json!({"command": "transform.rowset"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected transform rowset exit code: {other}"),
+                json!({"command": "transform.rowset"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report =
+            build_transform_rowset_pipeline_report(&args, input_format, args.input == "-", &trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
 }
 
 fn run_scan_text(args: ScanTextArgs, emit_pipeline: bool) -> i32 {
@@ -3120,6 +3288,29 @@ fn ensure_external_tool(mut report: PipelineReport, tool_name: &str) -> Pipeline
             });
     }
     report
+}
+
+fn build_transform_rowset_pipeline_report(
+    args: &TransformRowsetArgs,
+    input_format: Option<Format>,
+    stdin_input: bool,
+    trace: &transform::TransformRowsetPipelineTrace,
+) -> PipelineReport {
+    let source = if stdin_input {
+        PipelineInputSource::stdin("input", format_label(input_format))
+    } else {
+        PipelineInputSource::path("input", args.input.as_str(), format_label(input_format))
+    };
+    let mut report = PipelineReport::new(
+        "transform.rowset",
+        PipelineInput::new(vec![source]),
+        transform::pipeline_steps(),
+        transform::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
 fn build_merge_pipeline_report(

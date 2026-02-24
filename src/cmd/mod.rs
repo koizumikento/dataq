@@ -17,3 +17,4 @@ pub mod recipe;
 pub mod scan;
 pub mod sdiff;
 pub(crate) mod stage_trace;
+pub mod transform;

@@ -267,6 +267,8 @@ const SCAN_TEXT_PROJECT_FILTER: &str =
 
 #[derive(Debug, Error)]
 pub enum JqError {
+    #[error("jq filter cannot be empty")]
+    InvalidFilter,
     #[error("`jq` is not available in PATH")]
     Unavailable,
     #[error("failed to spawn jq: {0}")]
@@ -319,6 +321,13 @@ pub fn project_ingest_book(payload: &Value) -> Result<Value, JqError> {
 
 pub fn project_scan_text_matches(values: &[Value]) -> Result<Vec<Value>, JqError> {
     run_filter(values, SCAN_TEXT_PROJECT_FILTER)
+}
+
+pub fn run_custom_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {
+    if filter.trim().is_empty() {
+        return Err(JqError::InvalidFilter);
+    }
+    run_filter(values, filter)
 }
 
 fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {

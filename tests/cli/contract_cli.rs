@@ -63,6 +63,7 @@ fn contract_all_returns_deterministic_order() {
             "ingest.notes",
             "ingest-book",
             "scan",
+            "transform-rowset",
             "merge",
             "doctor",
             "recipe-run",
@@ -162,6 +163,21 @@ fn contract_doctor_command_exit_three_describes_profile_aware_semantics() {
             "without `--profile`: missing/non-executable `jq|yq|mlr`; with `--profile`: selected profile requirements are unsatisfied"
         )
     );
+}
+
+#[test]
+fn contract_transform_rowset_command_is_available() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "transform-rowset"])
+        .output()
+        .expect("run contract transform-rowset");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], json!("transform-rowset"));
+    assert_eq!(payload["schema"], json!("dataq.transform.rowset.output.v1"));
 }
 
 #[test]

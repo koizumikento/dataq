@@ -9,3 +9,4 @@ pub mod profile;
 pub mod recipe;
 pub mod scan;
 pub mod sdiff;
+pub mod transform;
