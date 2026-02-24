@@ -96,7 +96,7 @@ fn resolve_steps(command: &str, args: &[String]) -> Result<Vec<String>, EmitPlan
         "join" => Ok(join::pipeline_steps()),
         "aggregate" => Ok(aggregate::pipeline_steps()),
         "merge" => Ok(merge::pipeline_steps()),
-        "doctor" => Ok(doctor::pipeline_steps()),
+        "doctor" => Ok(doctor::pipeline_steps(None)),
         "contract" => Ok(contract::pipeline_steps()),
         "recipe" | "recipe.run" => resolve_recipe_steps(args),
         "mcp" => Ok(vec![
