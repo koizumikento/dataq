@@ -1224,8 +1224,15 @@ fn execute_ingest_doc(args: &Map<String, Value>) -> ToolExecution {
         return input_usage_error("missing required `input`");
     }
 
+    let input_path_is_stdin = input_path.as_deref() == Some(Path::new("-"));
+    let command_input_path = if input_path_is_stdin {
+        None
+    } else {
+        input_path.clone()
+    };
+
     let command_args = ingest::IngestDocCommandArgs {
-        input: input_path.clone(),
+        input: command_input_path.clone(),
         from,
     };
     let stdin_payload = input_text.unwrap_or_default().into_bytes();
@@ -1238,7 +1245,9 @@ fn execute_ingest_doc(args: &Map<String, Value>) -> ToolExecution {
     };
 
     if emit_pipeline {
-        let source = if let Some(path) = input_path {
+        let source = if input_path_is_stdin {
+            PipelineInputSource::stdin("input", Some(from.as_str()))
+        } else if let Some(path) = command_input_path {
             PipelineInputSource::path("input", path.display().to_string(), Some(from.as_str()))
         } else {
             PipelineInputSource {

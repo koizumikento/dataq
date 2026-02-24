@@ -451,10 +451,39 @@ fn ingest_doc_emit_pipeline_marks_pandoc_and_jq_used() {
 }
 
 #[test]
-fn ingest_doc_accepts_empty_inline_input() {
+fn ingest_doc_input_path_dash_is_treated_as_stdin() {
     let toolchain = FakeToolchain::new();
     let request = tool_call_request(
         12,
+        "dataq.ingest.doc",
+        json!({
+            "emit_pipeline": true,
+            "input_path": "-",
+            "from": "md"
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+
+    let source = &response["result"]["structuredContent"]["pipeline"]["input"]["sources"][0];
+    assert_eq!(source["label"], Value::from("input"));
+    assert_eq!(source["source"], Value::from("stdin"));
+    assert_eq!(source["path"], Value::Null);
+    assert_eq!(source["format"], Value::from("md"));
+}
+
+#[test]
+fn ingest_doc_accepts_empty_inline_input() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        13,
         "dataq.ingest.doc",
         json!({
             "input": "",
