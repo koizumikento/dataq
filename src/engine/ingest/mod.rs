@@ -411,7 +411,9 @@ fn format_rfc3339_utc(value: DateTime<Utc>) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{IngestNotesRangeError, IngestYamlJobsError, finalize_notes, resolve_time_range, shape_rows};
+    use super::{
+        IngestNotesRangeError, IngestYamlJobsError, finalize_notes, resolve_time_range, shape_rows,
+    };
     use crate::domain::ingest::IngestYamlJobsMode;
 
     #[test]

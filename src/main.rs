@@ -1154,21 +1154,19 @@ fn run_ingest_yaml_jobs(args: IngestYamlJobsArgs, emit_pipeline: bool) -> i32 {
 }
 
 fn run_ingest_notes(args: IngestNotesArgs, emit_pipeline: bool) -> i32 {
-    let time_range = match ingest_engine::resolve_time_range(
-        args.since.as_deref(),
-        args.until.as_deref(),
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            emit_error(
-                "input_usage_error",
-                error.to_string(),
-                json!({"command": "ingest.notes"}),
-                3,
-            );
-            return 3;
-        }
-    };
+    let time_range =
+        match ingest_engine::resolve_time_range(args.since.as_deref(), args.until.as_deref()) {
+            Ok(value) => value,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    error.to_string(),
+                    json!({"command": "ingest.notes"}),
+                    3,
+                );
+                return 3;
+            }
+        };
 
     let command_args = ingest::IngestNotesCommandArgs {
         tags: args.tag.clone(),
