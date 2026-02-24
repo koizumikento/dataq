@@ -1,25 +1,38 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::str::FromStr;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::domain::report::{RecipeRunReport, RecipeStepReport};
+use crate::domain::report::{RecipeLockReport, RecipeRunReport, RecipeStepReport};
 use crate::domain::rules::AssertRules;
 use crate::domain::value_path::ValuePath;
 use crate::engine::r#assert::{self, AssertValidationError};
-use crate::engine::canon::{CanonOptions, canonicalize_values};
+use crate::engine::canon::{CanonOptions, canonicalize_value, canonicalize_values};
 use crate::engine::profile;
 use crate::engine::sdiff::{self, DEFAULT_VALUE_DIFF_CAP, SdiffOptions};
 use crate::io::{self, Format};
+use crate::util::hash::DeterministicHasher;
 
 pub const RECIPE_VERSION: &str = "dataq.recipe.v1";
+const RECIPE_LOCK_VERSION: &str = "dataq.recipe.lock.v1";
+const RECIPE_LOCK_TOOLS: [&str; 3] = ["jq", "yq", "mlr"];
 
 #[derive(Debug, Clone)]
 pub struct RecipeExecution {
     pub report: RecipeRunReport,
     pub pipeline_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecipeLockExecution {
+    pub report: RecipeLockReport,
+    pub serialized: Vec<u8>,
+    pub pipeline_steps: Vec<String>,
+    pub tool_versions: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +147,79 @@ pub fn run_from_value(
         resolved_base_dir.as_path(),
         &mut pipeline_steps,
     )
+}
+
+pub fn lock(recipe_path: &Path) -> Result<RecipeLockExecution, RecipeExecutionError> {
+    let mut pipeline_steps = vec!["recipe_lock_parse".to_string()];
+    let loaded = match load_recipe_value(recipe_path) {
+        Ok(value) => value,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+    let recipe = match parse_recipe(loaded) {
+        Ok(recipe) => recipe,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+    if let Err(kind) = validate_recipe_lock_step_kinds(&recipe) {
+        return Err(RecipeExecutionError {
+            kind,
+            pipeline_steps: pipeline_steps.clone(),
+        });
+    }
+
+    pipeline_steps.push("recipe_lock_probe_tools".to_string());
+    let tool_versions = match probe_recipe_lock_tools() {
+        Ok(versions) => versions,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+
+    pipeline_steps.push("recipe_lock_fingerprint".to_string());
+    let args_hash = match hash_recipe_args(&recipe) {
+        Ok(hash) => hash,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+    let report = RecipeLockReport {
+        version: RECIPE_LOCK_VERSION.to_string(),
+        command_graph_hash: hash_recipe_command_graph(&recipe),
+        args_hash,
+        tool_versions: tool_versions.clone(),
+        dataq_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let serialized = match serialize_recipe_lock_report(&report) {
+        Ok(serialized) => serialized,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+
+    Ok(RecipeLockExecution {
+        report,
+        serialized,
+        pipeline_steps,
+        tool_versions,
+    })
 }
 
 fn execute_loaded_recipe(
@@ -523,6 +609,131 @@ fn parse_step_args<T: for<'de> Deserialize<'de>>(
     })
 }
 
+fn validate_recipe_lock_step_kinds(recipe: &RecipeFile) -> Result<(), RecipeExecutionErrorKind> {
+    for step in &recipe.steps {
+        if !matches!(step.kind.as_str(), "canon" | "assert" | "profile" | "sdiff") {
+            return Err(RecipeExecutionErrorKind::InputUsage(format!(
+                "unknown recipe step kind `{}`",
+                step.kind
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn hash_recipe_command_graph(recipe: &RecipeFile) -> String {
+    let mut hasher = DeterministicHasher::new();
+    hasher.update_len_prefixed(b"dataq.recipe.lock.command_graph.v1");
+    hasher.update_len_prefixed(recipe.version.as_bytes());
+    for (index, step) in recipe.steps.iter().enumerate() {
+        hasher.update_len_prefixed(&(index as u64).to_le_bytes());
+        hasher.update_len_prefixed(step.kind.as_bytes());
+    }
+    hasher.finish_hex()
+}
+
+fn hash_recipe_args(recipe: &RecipeFile) -> Result<String, RecipeExecutionErrorKind> {
+    let mut hasher = DeterministicHasher::new();
+    hasher.update_len_prefixed(b"dataq.recipe.lock.args.v1");
+    for (index, step) in recipe.steps.iter().enumerate() {
+        hasher.update_len_prefixed(&(index as u64).to_le_bytes());
+        hasher.update_len_prefixed(step.kind.as_bytes());
+
+        let canonical_args = canonicalize_value(
+            Value::Object(step.args.clone()),
+            CanonOptions {
+                sort_keys: true,
+                normalize_time: false,
+            },
+        );
+        let encoded = serde_json::to_vec(&canonical_args).map_err(|error| {
+            RecipeExecutionErrorKind::Internal(format!(
+                "failed to serialize recipe step args: {error}"
+            ))
+        })?;
+        hasher.update_len_prefixed(encoded.as_slice());
+    }
+    Ok(hasher.finish_hex())
+}
+
+fn probe_recipe_lock_tools() -> Result<BTreeMap<String, String>, RecipeExecutionErrorKind> {
+    let mut versions = BTreeMap::new();
+    for tool in RECIPE_LOCK_TOOLS {
+        versions.insert(tool.to_string(), probe_recipe_lock_tool_version(tool)?);
+    }
+    Ok(versions)
+}
+
+fn probe_recipe_lock_tool_version(tool_name: &str) -> Result<String, RecipeExecutionErrorKind> {
+    let executable = resolve_recipe_lock_tool_executable(tool_name);
+    let output = Command::new(&executable)
+        .arg("--version")
+        .output()
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => RecipeExecutionErrorKind::InputUsage(format!(
+                "failed to resolve tool `{tool_name}` at `{executable}`: file not found"
+            )),
+            std::io::ErrorKind::PermissionDenied => RecipeExecutionErrorKind::InputUsage(format!(
+                "failed to execute tool `{tool_name}` at `{executable}`: not executable"
+            )),
+            _ => RecipeExecutionErrorKind::InputUsage(format!(
+                "failed to execute tool `{tool_name}` at `{executable}`: {error}"
+            )),
+        })?;
+
+    if !output.status.success() {
+        return Err(RecipeExecutionErrorKind::InputUsage(format!(
+            "failed to resolve tool version for `{tool_name}` from `{executable}`: `--version` exited with {}",
+            status_label(output.status.code())
+        )));
+    }
+
+    first_non_empty_line(&output.stdout)
+        .or_else(|| first_non_empty_line(&output.stderr))
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            RecipeExecutionErrorKind::InputUsage(format!(
+                "failed to resolve tool version for `{tool_name}` from `{executable}`: empty `--version` output"
+            ))
+        })
+}
+
+fn resolve_recipe_lock_tool_executable(tool_name: &str) -> String {
+    let env_key = match tool_name {
+        "jq" => Some("DATAQ_JQ_BIN"),
+        "yq" => Some("DATAQ_YQ_BIN"),
+        "mlr" => Some("DATAQ_MLR_BIN"),
+        _ => None,
+    };
+
+    env_key
+        .and_then(|key| std::env::var(key).ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| tool_name.to_string())
+}
+
+fn serialize_recipe_lock_report(
+    report: &RecipeLockReport,
+) -> Result<Vec<u8>, RecipeExecutionErrorKind> {
+    let value = serde_json::to_value(report).map_err(|error| {
+        RecipeExecutionErrorKind::Internal(format!(
+            "failed to serialize recipe lock report: {error}"
+        ))
+    })?;
+    let canonical = canonicalize_value(
+        value,
+        CanonOptions {
+            sort_keys: true,
+            normalize_time: false,
+        },
+    );
+    serde_json::to_vec(&canonical).map_err(|error| {
+        RecipeExecutionErrorKind::Internal(format!(
+            "failed to serialize canonical recipe lock: {error}"
+        ))
+    })
+}
+
 fn resolve_step_input_format(
     explicit: Option<&str>,
     path: &Path,
@@ -576,6 +787,16 @@ fn map_assert_error(error: AssertValidationError) -> RecipeExecutionErrorKind {
         AssertValidationError::InputUsage(message) => RecipeExecutionErrorKind::InputUsage(message),
         AssertValidationError::Internal(message) => RecipeExecutionErrorKind::Internal(message),
     }
+}
+
+fn first_non_empty_line(bytes: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.lines().find(|line| !line.trim().is_empty())
+}
+
+fn status_label(code: Option<i32>) -> String {
+    code.map(|value| value.to_string())
+        .unwrap_or_else(|| "terminated by signal".to_string())
 }
 
 const fn default_true() -> bool {

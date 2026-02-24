@@ -61,6 +61,16 @@ pub struct RecipeStepReport {
     pub summary: Value,
 }
 
+/// Deterministic lock metadata for reproducible `recipe` execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecipeLockReport {
+    pub version: String,
+    pub command_graph_hash: String,
+    pub args_hash: String,
+    pub tool_versions: BTreeMap<String, String>,
+    pub dataq_version: String,
+}
+
 /// Diagnostics report emitted when `--emit-pipeline` is enabled.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PipelineReport {

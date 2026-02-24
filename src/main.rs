@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufRead, Cursor, Read};
+use std::io::{self, BufRead, Cursor, Read, Write};
 use std::path::PathBuf;
 use std::process::{self, Command};
 
@@ -266,12 +266,23 @@ struct RecipeArgs {
 enum RecipeSubcommand {
     /// Run a declarative recipe file.
     Run(RecipeRunArgs),
+    /// Generate deterministic lock metadata for a recipe file.
+    Lock(RecipeLockArgs),
 }
 
 #[derive(Debug, clap::Args)]
 struct RecipeRunArgs {
     #[arg(long)]
     file: PathBuf,
+}
+
+#[derive(Debug, clap::Args)]
+struct RecipeLockArgs {
+    #[arg(long)]
+    file: PathBuf,
+
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1582,6 +1593,7 @@ fn run_doctor(args: DoctorArgs, emit_pipeline: bool) -> i32 {
 fn run_recipe(args: RecipeArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         RecipeSubcommand::Run(run_args) => run_recipe_run(run_args, emit_pipeline),
+        RecipeSubcommand::Lock(lock_args) => run_recipe_lock(lock_args, emit_pipeline),
     }
 }
 
@@ -1635,6 +1647,93 @@ fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool) -> i32 {
     if emit_pipeline {
         let pipeline_report = build_recipe_pipeline_report(&args, recipe_format, trace.steps);
         emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn run_recipe_lock(args: RecipeLockArgs, emit_pipeline: bool) -> i32 {
+    let recipe_format = dataq_io::resolve_input_format(None, Some(args.file.as_path())).ok();
+    let command_args = recipe::RecipeLockCommandArgs {
+        file_path: args.file.clone(),
+    };
+    let (response, trace, serialized_lock) = recipe::lock_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if let Some(serialized_lock) = serialized_lock {
+                if let Some(out_path) = args.out.as_ref() {
+                    match fs::write(out_path, serialized_lock.as_slice()) {
+                        Ok(()) => 0,
+                        Err(error) => {
+                            emit_error(
+                                "input_usage_error",
+                                format!(
+                                    "failed to write recipe lock file `{}`: {error}",
+                                    out_path.display()
+                                ),
+                                json!({"command": "recipe", "subcommand": "lock"}),
+                                3,
+                            );
+                            3
+                        }
+                    }
+                } else if emit_bytes_stdout(serialized_lock.as_slice()) {
+                    0
+                } else {
+                    emit_error(
+                        "internal_error",
+                        "failed to emit recipe lock response".to_string(),
+                        json!({"command": "recipe", "subcommand": "lock"}),
+                        1,
+                    );
+                    1
+                }
+            } else {
+                emit_error(
+                    "internal_error",
+                    "recipe lock payload bytes were unavailable".to_string(),
+                    json!({"command": "recipe", "subcommand": "lock"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize recipe lock error".to_string(),
+                    json!({"command": "recipe", "subcommand": "lock"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected recipe lock exit code: {other}"),
+                json!({"command": "recipe", "subcommand": "lock"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let fingerprint_context = FingerprintContext {
+            preferred_tool_versions: trace.tool_versions.clone(),
+            ..Default::default()
+        };
+        let pipeline_report = build_recipe_lock_pipeline_report(
+            &args,
+            recipe_format,
+            trace.steps,
+            &trace.tool_versions,
+        );
+        emit_pipeline_report_with_context(&pipeline_report, &fingerprint_context);
     }
     exit_code
 }
@@ -2337,8 +2436,40 @@ fn build_recipe_pipeline_report(
             format_label(recipe_format),
         )]),
         step_names,
-        recipe::deterministic_guards(),
+        recipe::deterministic_guards_run(),
     )
+}
+
+fn build_recipe_lock_pipeline_report(
+    args: &RecipeLockArgs,
+    recipe_format: Option<Format>,
+    steps: Vec<String>,
+    tool_versions: &BTreeMap<String, String>,
+) -> PipelineReport {
+    let step_names = if steps.is_empty() {
+        vec![
+            "recipe_lock_parse".to_string(),
+            "recipe_lock_probe_tools".to_string(),
+            "recipe_lock_fingerprint".to_string(),
+        ]
+    } else {
+        steps
+    };
+
+    let mut report = PipelineReport::new(
+        "recipe",
+        PipelineInput::new(vec![PipelineInputSource::path(
+            "recipe",
+            args.file.display().to_string(),
+            format_label(recipe_format),
+        )]),
+        step_names,
+        recipe::deterministic_guards_lock(),
+    );
+    for tool_name in tool_versions.keys() {
+        report = report.mark_external_tool_used(tool_name);
+    }
+    report
 }
 
 fn format_label(format: Option<Format>) -> Option<&'static str> {
@@ -2479,6 +2610,12 @@ fn emit_json_stderr(value: &Value) -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn emit_bytes_stdout(bytes: &[u8]) -> bool {
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    writer.write_all(bytes).is_ok() && writer.write_all(b"\n").is_ok()
 }
 
 fn emit_pipeline_report(report: &PipelineReport) {

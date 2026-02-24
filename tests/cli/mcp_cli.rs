@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 14] = [
+const TOOL_ORDER: [&str; 15] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
@@ -20,6 +20,7 @@ const TOOL_ORDER: [&str; 14] = [
     "dataq.contract",
     "dataq.emit.plan",
     "dataq.recipe.run",
+    "dataq.recipe.lock",
 ];
 
 #[test]
@@ -123,6 +124,8 @@ fn tools_call_minimal_success_for_all_tools() {
     .expect("write gate rules");
     fs::write(&diff_input_path, r#"[{"id":1,"v":"same"}]"#).expect("write diff fixture");
     let diff_input = diff_input_path.display().to_string();
+    let recipe_path = dir.path().join("recipe-lock.json");
+    fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
     let requests = vec![
         (
             "dataq.canon",
@@ -223,6 +226,12 @@ fn tools_call_minimal_success_for_all_tools() {
                     "version": "dataq.recipe.v1",
                     "steps": []
                 }
+            }),
+        ),
+        (
+            "dataq.recipe.lock",
+            json!({
+                "file_path": recipe_path
             }),
         ),
     ];
@@ -540,6 +549,35 @@ fn recipe_supports_file_path_and_inline_recipe() {
         inline_response["result"]["structuredContent"]["exit_code"],
         Value::from(0)
     );
+}
+
+#[test]
+fn recipe_lock_supports_file_path() {
+    let toolchain = FakeToolchain::new();
+    let dir = tempdir().expect("tempdir");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
+
+    let request = tool_call_request(
+        3,
+        "dataq.recipe.lock",
+        json!({
+            "file_path": recipe_path
+        }),
+    );
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["version"],
+        Value::from("dataq.recipe.lock.v1")
+    );
+    assert!(response["result"]["structuredContent"]["payload"]["tool_versions"].is_object());
 }
 
 fn tool_call_request(id: i64, tool_name: &str, arguments: Value) -> Value {

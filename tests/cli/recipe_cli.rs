@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 
 use serde_json::Value;
 use tempfile::tempdir;
@@ -297,6 +298,175 @@ fn recipe_run_emit_pipeline_keeps_stdout_clean() {
     );
 }
 
+#[test]
+fn recipe_lock_regenerates_byte_identically() {
+    let dir = tempdir().expect("temp dir");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin dir");
+    write_exec_script(&bin_dir.join("jq"), "#!/bin/sh\necho 'jq-1.7'\n");
+    write_exec_script(&bin_dir.join("yq"), "#!/bin/sh\necho 'yq-4.44.6'\n");
+    write_exec_script(&bin_dir.join("mlr"), "#!/bin/sh\necho 'mlr-6.13.0'\n");
+
+    let recipe_path = dir.path().join("recipe-lock.json");
+    fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
+
+    let first_stdout = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", bin_dir.as_path())
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("first lock run");
+    let second_stdout = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", bin_dir.as_path())
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("second lock run");
+
+    assert_eq!(first_stdout.status.code(), Some(0));
+    assert_eq!(second_stdout.status.code(), Some(0));
+    assert_eq!(first_stdout.stdout, second_stdout.stdout);
+    assert!(first_stdout.stderr.is_empty());
+    assert!(second_stdout.stderr.is_empty());
+
+    let lock_json: Value = serde_json::from_slice(&first_stdout.stdout).expect("stdout lock json");
+    assert_eq!(lock_json["version"], Value::from("dataq.recipe.lock.v1"));
+    assert!(lock_json["command_graph_hash"].is_string());
+    assert!(lock_json["args_hash"].is_string());
+    assert!(lock_json["tool_versions"].is_object());
+    assert!(lock_json["dataq_version"].is_string());
+
+    let lock_path = dir.path().join("recipe.lock.json");
+    let first_file = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", bin_dir.as_path())
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+            "--out",
+            lock_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("first file lock run");
+    let bytes_first = fs::read(&lock_path).expect("read first lock bytes");
+    let second_file = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", bin_dir.as_path())
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+            "--out",
+            lock_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("second file lock run");
+    let bytes_second = fs::read(&lock_path).expect("read second lock bytes");
+
+    assert_eq!(first_file.status.code(), Some(0));
+    assert_eq!(second_file.status.code(), Some(0));
+    assert!(first_file.stdout.is_empty());
+    assert!(second_file.stdout.is_empty());
+    assert!(first_file.stderr.is_empty());
+    assert!(second_file.stderr.is_empty());
+    assert_eq!(bytes_first, bytes_second);
+}
+
+#[test]
+fn recipe_lock_invalid_recipe_returns_exit_three() {
+    let dir = tempdir().expect("temp dir");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&recipe_path, r#"{"version":"wrong.version","steps":[]}"#).expect("write recipe");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["error"], Value::from("input_usage_error"));
+}
+
+#[test]
+fn recipe_lock_unresolved_tool_returns_exit_three() {
+    let dir = tempdir().expect("temp dir");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JQ_BIN", "/definitely-missing/jq")
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["error"], Value::from("input_usage_error"));
+    assert!(
+        stderr_json["message"]
+            .as_str()
+            .expect("message")
+            .contains("jq")
+    );
+}
+
+#[test]
+fn recipe_lock_emit_pipeline_reports_lock_steps() {
+    let dir = tempdir().expect("temp dir");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin dir");
+    write_exec_script(&bin_dir.join("jq"), "#!/bin/sh\necho 'jq-1.7'\n");
+    write_exec_script(&bin_dir.join("yq"), "#!/bin/sh\necho 'yq-4.44.6'\n");
+    write_exec_script(&bin_dir.join("mlr"), "#!/bin/sh\necho 'mlr-6.13.0'\n");
+
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", bin_dir.as_path())
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+            "--emit-pipeline",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(0));
+    let pipeline_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(pipeline_json["command"], Value::from("recipe"));
+    assert_eq!(
+        pipeline_json["steps"],
+        Value::from(vec![
+            "recipe_lock_parse",
+            "recipe_lock_probe_tools",
+            "recipe_lock_fingerprint",
+        ])
+    );
+}
+
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
     let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
     let line = text
@@ -305,4 +475,13 @@ fn parse_last_stderr_json(stderr: &[u8]) -> Value {
         .find(|candidate| !candidate.trim().is_empty())
         .expect("non-empty stderr line");
     serde_json::from_str(line).expect("stderr json")
+}
+
+fn write_exec_script(path: &Path, body: &str) {
+    fs::write(path, body).expect("write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
 }
