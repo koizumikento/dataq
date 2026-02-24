@@ -396,6 +396,10 @@ fn join_emit_pipeline_reports_stage_diagnostics() {
         .find(|entry| entry["name"].as_str() == Some("mlr"))
         .expect("mlr entry");
     assert_eq!(mlr_entry["used"], Value::Bool(true));
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"]["mlr"],
+        Value::from("mlr-fake 1.0.0")
+    );
 }
 
 fn assert_stage_metrics_shape(stage: &Value) {
@@ -416,6 +420,11 @@ fn parse_last_stderr_json(stderr: &[u8]) -> Value {
 
 fn write_fake_mlr_script(path: PathBuf) -> PathBuf {
     let script = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo 'mlr-fake 1.0.0'
+  exit 0
+fi
+
 mode=""
 action=""
 left_file=""

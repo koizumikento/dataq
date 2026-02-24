@@ -86,6 +86,7 @@ dataq [--emit-pipeline] <command> [options]
 グローバルオプション:
 
 - `--emit-pipeline`: stderr に pipeline JSON を1行追加出力（`fingerprint` を含む）
+  - `fingerprint.tool_versions` は実際に呼び出す外部ツール実体を対象に採取（`DATAQ_JQ_BIN` / `DATAQ_YQ_BIN` / `DATAQ_MLR_BIN` / `DATAQ_PANDOC_BIN` を尊重）
 - `-h, --help`: ヘルプ
 - `-V, --version`: バージョン
 
@@ -439,6 +440,8 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 - stage2: `jq` で `meta`, `headings`, `links`, `tables`, `code_blocks` へ投影
 - `pandoc` 不在・parse失敗・不正入力は終了コード `3`
 - `--emit-pipeline` 時のステップは `ingest_doc_pandoc_ast`, `ingest_doc_jq_project`
+  - `external_tools` は `pandoc` と `jq` を `used=true` で記録
+
 ### 8. `merge`
 
 複数の JSON/YAML 入力をポリシー指定で決定的にマージ。

@@ -2756,6 +2756,7 @@ fn build_ingest_doc_pipeline_report(
         ingest::pipeline_steps(),
         ingest::deterministic_guards(),
     )
+    .mark_external_tool_used("pandoc")
     .mark_external_tool_used("jq")
 }
 
@@ -3029,14 +3030,14 @@ fn collect_used_tool_versions(
             let version = preferred_versions
                 .get(tool.name.as_str())
                 .cloned()
-                .unwrap_or_else(|| detect_tool_version(&tool.name, report.command.as_str()));
+                .unwrap_or_else(|| detect_tool_version(&tool.name));
             (tool.name.clone(), version)
         })
         .collect()
 }
 
-fn detect_tool_version(tool_name: &str, command_name: &str) -> String {
-    let executable = resolve_tool_executable(tool_name, command_name);
+fn detect_tool_version(tool_name: &str) -> String {
+    let executable = resolve_tool_executable(tool_name);
     match Command::new(&executable).arg("--version").output() {
         Ok(output) if output.status.success() => first_non_empty_line(&output.stdout)
             .or_else(|| first_non_empty_line(&output.stderr))
@@ -3054,12 +3055,13 @@ fn detect_tool_version(tool_name: &str, command_name: &str) -> String {
     }
 }
 
-fn resolve_tool_executable(tool_name: &str, _command_name: &str) -> String {
+fn resolve_tool_executable(tool_name: &str) -> String {
     let env_key = match tool_name {
         "jq" => Some("DATAQ_JQ_BIN"),
         "yq" => Some("DATAQ_YQ_BIN"),
         "mlr" => Some("DATAQ_MLR_BIN"),
         "xh" => Some("DATAQ_XH_BIN"),
+        "pandoc" => Some("DATAQ_PANDOC_BIN"),
         _ => None,
     };
 

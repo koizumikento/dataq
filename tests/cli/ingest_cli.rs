@@ -56,8 +56,20 @@ fn ingest_doc_extracts_expected_json_and_pipeline_steps() {
     let tools = stderr_json["external_tools"]
         .as_array()
         .expect("external_tools array");
-    assert_eq!(tools[0]["name"], Value::from("jq"));
-    assert_eq!(tools[0]["used"], Value::Bool(true));
+    let jq_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == Value::from("jq"))
+        .expect("jq entry");
+    assert_eq!(jq_entry["used"], Value::Bool(true));
+    let pandoc_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == Value::from("pandoc"))
+        .expect("pandoc entry");
+    assert_eq!(pandoc_entry["used"], Value::Bool(true));
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"]["pandoc"],
+        Value::from("fake-pandoc 9.9.9")
+    );
 
     drop(tool_dir);
 }
@@ -115,6 +127,11 @@ fn create_fake_pandoc_shim() -> (tempfile::TempDir, String) {
     write_exec_script(
         &path,
         r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "fake-pandoc 9.9.9"
+  exit 0
+fi
+
 from=""
 while [ $# -gt 0 ]; do
   case "$1" in

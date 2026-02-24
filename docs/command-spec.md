@@ -193,6 +193,7 @@ dataq [--emit-pipeline] <command> [options]
 - 実行方式:
   - stage1: `pandoc -f <from> -t json` で AST 化
   - stage2: `jq` で固定スキーマへ投影
+  - `--emit-pipeline` の `external_tools` では `pandoc` と `jq` を `used=true` として記録
 - 異常時契約:
   - unsupported `--from` は exit `3`
   - `pandoc` 不在は exit `3`
@@ -397,11 +398,11 @@ pipeline JSON schema:
 - `command`: 実行サブコマンド名
 - `input`: 入力ソース情報（stdin/path, format）
 - `steps`: 実行ステップ配列
-- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
+- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）に、コマンド固有ツール（例: `ingest doc` の `pandoc`）を追記。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
   - 追加メトリクス: `input_bytes`, `output_bytes`, `duration_ms`（決定性保持のため固定 `0`）
   - 後方互換: 既存フィールド（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）は不変
-- `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ), `dataq_version`）
+- `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ。`DATAQ_*_BIN` オーバーライド先を優先), `dataq_version`）
 - `deterministic_guards`: 適用した決定性ガード
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
 - `recipe run` では `steps` に `load_recipe_file`, `validate_recipe_schema`, `execute_step_<index>_<kind>` が入る
