@@ -1064,6 +1064,7 @@ impl FakeToolchain {
         write_fake_yq_script(bin_dir.join("yq"));
         write_fake_xh_script(bin_dir.join("xh"));
         write_fake_pandoc_script(bin_dir.join("pandoc"));
+        write_fake_rg_script(bin_dir.join("rg"));
 
         Self {
             _dir: dir,
