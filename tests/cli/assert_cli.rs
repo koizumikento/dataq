@@ -53,6 +53,12 @@ fn parse_stderr_json_lines(stderr: &[u8]) -> Vec<Value> {
         .collect()
 }
 
+fn assert_stage_metrics_shape(stage: &Value) {
+    assert!(stage["input_bytes"].is_u64());
+    assert!(stage["output_bytes"].is_u64());
+    assert!(stage["duration_ms"].is_u64());
+}
+
 fn create_normalize_tool_shims() -> Option<(tempfile::TempDir, String, String)> {
     if Command::new("jq").arg("--version").output().is_err() {
         return None;
@@ -194,6 +200,9 @@ jobs:
         pipeline_json["stage_diagnostics"][2]["status"],
         Value::from("ok")
     );
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][0]);
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][1]);
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][2]);
 
     let tools = pipeline_json["external_tools"]
         .as_array()
@@ -267,6 +276,7 @@ jobs:
         pipeline_json["stage_diagnostics"][0]["status"],
         Value::from("error")
     );
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][0]);
     let tools = pipeline_json["external_tools"]
         .as_array()
         .expect("external_tools array");
@@ -345,6 +355,9 @@ jobs:
         pipeline_json["stage_diagnostics"][2]["status"],
         Value::from("error")
     );
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][0]);
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][1]);
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][2]);
     let tools = pipeline_json["external_tools"]
         .as_array()
         .expect("external_tools array");
