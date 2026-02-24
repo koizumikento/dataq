@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use predicates::prelude::predicate;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::tempdir;
 
 #[test]
@@ -110,6 +110,120 @@ fn ingest_doc_unsupported_format_is_cli_input_error() {
         .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
 }
 
+#[test]
+fn ingest_book_outputs_nested_tree_and_optional_file_metadata() {
+    let dir = tempdir().expect("tempdir");
+    let jq_bin = write_passthrough_jq_script(dir.path().join("jq-pass"));
+    let book_root = dir.path().join("book");
+    let src_dir = book_root.join("src");
+    fs::create_dir_all(src_dir.join("chapters")).expect("create chapters");
+
+    fs::write(
+        book_root.join("book.toml"),
+        r#"[book]
+title = "CLI Book"
+authors = ["alice"]
+src = "src"
+"#,
+    )
+    .expect("write book.toml");
+    fs::write(
+        src_dir.join("SUMMARY.md"),
+        r#"# Summary
+
+- [Intro](intro.md)
+  - [Nested](chapters/nested.md)
+"#,
+    )
+    .expect("write summary");
+    fs::write(src_dir.join("intro.md"), "# Intro\n").expect("write intro");
+    fs::write(src_dir.join("chapters/nested.md"), "# Nested\n").expect("write nested");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JQ_BIN", &jq_bin)
+        .args([
+            "ingest",
+            "book",
+            "--root",
+            book_root.to_str().expect("utf8 root"),
+            "--include-files",
+        ])
+        .output()
+        .expect("run ingest book");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["book"]["title"], json!("CLI Book"));
+    assert_eq!(payload["summary"]["chapter_count"], json!(2));
+    assert_eq!(
+        payload["summary"]["order"][0]["path"],
+        json!("src/intro.md")
+    );
+    assert_eq!(
+        payload["summary"]["order"][1]["path"],
+        json!("src/chapters/nested.md")
+    );
+    assert_eq!(payload["summary"]["chapters"][0]["index"], json!(1));
+    assert_eq!(
+        payload["summary"]["chapters"][0]["children"][0]["index"],
+        json!(2)
+    );
+    assert!(payload["summary"]["chapters"][0]["file"]["size_bytes"].is_u64());
+    assert_eq!(
+        payload["summary"]["chapters"][0]["file"]["content_hash"]
+            .as_str()
+            .map(str::len),
+        Some(16)
+    );
+}
+
+#[test]
+fn ingest_book_emit_pipeline_reports_expected_steps() {
+    let dir = tempdir().expect("tempdir");
+    let jq_bin = write_passthrough_jq_script(dir.path().join("jq-pass"));
+    let book_root = dir.path().join("book");
+    let src_dir = book_root.join("src");
+    fs::create_dir_all(&src_dir).expect("create src");
+    fs::write(book_root.join("book.toml"), "[book]\nsrc = \"src\"\n").expect("write book.toml");
+    fs::write(src_dir.join("SUMMARY.md"), "- [Intro](intro.md)\n").expect("write summary");
+    fs::write(src_dir.join("intro.md"), "# Intro\n").expect("write intro");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JQ_BIN", &jq_bin)
+        .args([
+            "--emit-pipeline",
+            "ingest",
+            "book",
+            "--root",
+            book_root.to_str().expect("utf8 root"),
+        ])
+        .output()
+        .expect("run ingest book");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], json!("ingest.book"));
+    assert_eq!(
+        stderr_json["steps"],
+        json!([
+            "ingest_book_summary_parse",
+            "ingest_book_mdbook_meta",
+            "ingest_book_jq_project"
+        ])
+    );
+
+    let tools = stderr_json["external_tools"]
+        .as_array()
+        .expect("external_tools");
+    let jq_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == json!("jq"))
+        .expect("jq entry");
+    assert_eq!(jq_entry["used"], json!(true));
+}
+
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
     let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
     let line = text
@@ -166,7 +280,12 @@ esac
     (dir, path.display().to_string())
 }
 
-fn write_exec_script(path: &PathBuf, body: &str) {
+fn write_passthrough_jq_script(path: PathBuf) -> PathBuf {
+    write_exec_script(&path, "#!/bin/sh\ncat\n");
+    path
+}
+
+fn write_exec_script(path: &Path, body: &str) {
     fs::write(path, body).expect("write script");
     #[cfg(unix)]
     {

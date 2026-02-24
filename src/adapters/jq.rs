@@ -244,6 +244,25 @@ else
 end
 "#;
 
+const INGEST_BOOK_PROJECT_FILTER: &str = r#"
+{
+  book: {
+    title: .book.title,
+    authors: .book.authors,
+    description: .book.description,
+    language: .book.language,
+    multilingual: .book.multilingual,
+    src: .book.src,
+    summary_path: .book.summary_path
+  },
+  summary: {
+    chapter_count: .summary.chapter_count,
+    order: .summary.order,
+    chapters: .summary.chapters
+  }
+}
+"#;
+
 #[derive(Debug, Error)]
 pub enum JqError {
     #[error("`jq` is not available in PATH")]
@@ -290,6 +309,10 @@ pub fn normalize_ingest_notes(values: &[Value]) -> Result<Vec<Value>, JqError> {
 
 pub fn project_document_ast(ast: &Value) -> Result<Value, JqError> {
     run_filter_value(ast, INGEST_DOC_PROJECT_FILTER)
+}
+
+pub fn project_ingest_book(payload: &Value) -> Result<Value, JqError> {
+    run_filter_value(payload, INGEST_BOOK_PROJECT_FILTER)
 }
 
 fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {
