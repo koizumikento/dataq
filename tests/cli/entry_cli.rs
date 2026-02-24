@@ -20,6 +20,7 @@ fn help_is_available() {
         .stdout(predicate::str::contains("assert"))
         .stdout(predicate::str::contains("gate"))
         .stdout(predicate::str::contains("sdiff"))
+        .stdout(predicate::str::contains("diff"))
         .stdout(predicate::str::contains("profile"))
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("contract"))

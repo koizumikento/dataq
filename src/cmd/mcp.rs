@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
-    canon, contract, doctor, emit, gate, join, merge, profile, recipe, sdiff,
+    canon, contract, diff, doctor, emit, gate, join, merge, profile, recipe, sdiff,
 };
 use crate::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
 use crate::domain::rules::AssertRules;
@@ -27,12 +27,13 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 13] = [
+const TOOL_ORDER: [&str; 14] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
     "dataq.gate.policy",
     "dataq.sdiff",
+    "dataq.diff.source",
     "dataq.profile",
     "dataq.join",
     "dataq.aggregate",
@@ -235,6 +236,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.gate.schema" => execute_gate_schema(args),
         "dataq.gate.policy" => execute_gate_policy(args),
         "dataq.sdiff" => execute_sdiff(args),
+        "dataq.diff.source" => execute_diff_source(args),
         "dataq.profile" => execute_profile(args),
         "dataq.join" => execute_join(args),
         "dataq.aggregate" => execute_aggregate(args),
@@ -888,6 +890,79 @@ fn execute_sdiff(args: &Map<String, Value>) -> ToolExecution {
             sdiff::pipeline_steps(),
             sdiff::deterministic_guards(),
         );
+        execution.pipeline = pipeline_as_value(pipeline).ok();
+    }
+
+    execution
+}
+
+fn execute_diff_source(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let left = match parse_required_string(args, &["left"], "left") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let right = match parse_required_string(args, &["right"], "right") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let fail_on_diff = match parse_bool(args, &["fail_on_diff"], false, "fail_on_diff") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let execution_result = match diff::execute(left.as_str(), right.as_str()) {
+        Ok(execution) => execution,
+        Err(error) => return input_usage_error(error.to_string()),
+    };
+    let exit_code = if fail_on_diff && execution_result.report.values.total > 0 {
+        2
+    } else {
+        0
+    };
+
+    let payload = match serde_json::to_value(diff::DiffSourceReport::new(
+        execution_result.report,
+        execution_result.sources,
+    )) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return internal_error(format!("failed to serialize diff source report: {error}"));
+        }
+    };
+
+    let mut execution = ToolExecution {
+        exit_code,
+        payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut pipeline = PipelineReport::new(
+            "diff.source",
+            PipelineInput::new(vec![
+                PipelineInputSource {
+                    label: "left".to_string(),
+                    source: execution_result.left.metadata.kind.clone(),
+                    path: Some(execution_result.left.metadata.path.clone()),
+                    format: Some(execution_result.left.metadata.format.clone()),
+                },
+                PipelineInputSource {
+                    label: "right".to_string(),
+                    source: execution_result.right.metadata.kind.clone(),
+                    path: Some(execution_result.right.metadata.path.clone()),
+                    format: Some(execution_result.right.metadata.format.clone()),
+                },
+            ]),
+            diff::pipeline_steps(),
+            diff::deterministic_guards(),
+        );
+        for tool in &execution_result.used_tools {
+            pipeline = pipeline.mark_external_tool_used(tool);
+        }
         execution.pipeline = pipeline_as_value(pipeline).ok();
     }
 
@@ -1986,6 +2061,7 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         "gate-schema" => Ok(contract::ContractCommand::GateSchema),
         "gate" | "gate-policy" => Ok(contract::ContractCommand::Gate),
         "sdiff" => Ok(contract::ContractCommand::Sdiff),
+        "diff-source" => Ok(contract::ContractCommand::DiffSource),
         "profile" => Ok(contract::ContractCommand::Profile),
         "merge" => Ok(contract::ContractCommand::Merge),
         "doctor" => Ok(contract::ContractCommand::Doctor),

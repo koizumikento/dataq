@@ -239,6 +239,19 @@ pub fn run_with_stdin_and_normalize_with_trace<R: Read>(
     }
 }
 
+/// Normalizes already-loaded values with a specific normalize mode.
+///
+/// This is shared by commands that need the same deterministic
+/// `yq -> jq -> mlr` normalization contract as `assert --normalize`.
+pub fn normalize_values_for_mode(
+    values: Vec<Value>,
+    mode: AssertInputNormalizeMode,
+) -> Result<(Vec<Value>, AssertPipelineTrace), String> {
+    normalize_with_pipeline(values, mode).map_err(|error| match error.kind {
+        CommandErrorKind::InputUsage(message) | CommandErrorKind::Internal(message) => message,
+    })
+}
+
 fn execute<R: Read>(
     args: &AssertCommandArgs,
     stdin: R,

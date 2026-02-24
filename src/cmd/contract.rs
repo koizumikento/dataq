@@ -2,12 +2,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 9] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 10] = [
     ContractCommand::Canon,
     ContractCommand::Assert,
     ContractCommand::GateSchema,
     ContractCommand::Gate,
     ContractCommand::Sdiff,
+    ContractCommand::DiffSource,
     ContractCommand::Profile,
     ContractCommand::Merge,
     ContractCommand::Doctor,
@@ -22,6 +23,7 @@ pub enum ContractCommand {
     GateSchema,
     Gate,
     Sdiff,
+    DiffSource,
     Profile,
     Merge,
     Doctor,
@@ -60,6 +62,7 @@ const NO_FIXED_ROOT_FIELDS: &[&str] = &[];
 const ASSERT_FIELDS: &[&str] = &["matched", "mismatch_count", "mismatches"];
 const GATE_FIELDS: &[&str] = &["matched", "violations", "details"];
 const SDIFF_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values"];
+const DIFF_SOURCE_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values", "sources"];
 const PROFILE_FIELDS: &[&str] = &["record_count", "field_count", "fields"];
 const DOCTOR_FIELDS: &[&str] = &["tools"];
 const RECIPE_FIELDS: &[&str] = &["matched", "exit_code", "steps"];
@@ -83,6 +86,10 @@ const GATE_NOTES: &[&str] = &[
 const SDIFF_NOTES: &[&str] = &[
     "`values.total` is the full diff count before truncation.",
     "`--value-diff-cap` only limits `values.items`.",
+];
+const DIFF_SOURCE_NOTES: &[&str] = &[
+    "`sources.left` and `sources.right` include resolved input metadata.",
+    "Preset sources must be specified as `preset:<preset-name>:<path>`.",
 ];
 const PROFILE_NOTES: &[&str] = &[
     "`fields` keys are canonical JSON paths in deterministic order.",
@@ -168,6 +175,13 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: SDIFF_FIELDS,
             exit_codes: exit_codes("diff detected when `--fail-on-diff` is enabled"),
             notes: SDIFF_NOTES,
+        },
+        ContractCommand::DiffSource => CommandContract {
+            command: "diff-source",
+            schema: "dataq.diff.source.output.v1",
+            output_fields: DIFF_SOURCE_FIELDS,
+            exit_codes: exit_codes("diff detected when `--fail-on-diff` is enabled"),
+            notes: DIFF_SOURCE_NOTES,
         },
         ContractCommand::Profile => CommandContract {
             command: "profile",

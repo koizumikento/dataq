@@ -5,12 +5,13 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 13] = [
+const TOOL_ORDER: [&str; 14] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
     "dataq.gate.policy",
     "dataq.sdiff",
+    "dataq.diff.source",
     "dataq.profile",
     "dataq.join",
     "dataq.aggregate",
@@ -96,6 +97,7 @@ fn tools_call_minimal_success_for_all_tools() {
     let dir = tempdir().expect("tempdir");
     let schema_path = dir.path().join("gate-schema.json");
     let gate_rules_path = dir.path().join("gate-rules.json");
+    let diff_input_path = dir.path().join("diff.json");
     fs::write(
         &schema_path,
         r#"{
@@ -119,7 +121,8 @@ fn tools_call_minimal_success_for_all_tools() {
         }"#,
     )
     .expect("write gate rules");
-
+    fs::write(&diff_input_path, r#"[{"id":1,"v":"same"}]"#).expect("write diff fixture");
+    let diff_input = diff_input_path.display().to_string();
     let requests = vec![
         (
             "dataq.canon",
@@ -160,6 +163,13 @@ fn tools_call_minimal_success_for_all_tools() {
             json!({
                 "left": [{"id": 1}],
                 "right": [{"id": 1}]
+            }),
+        ),
+        (
+            "dataq.diff.source",
+            json!({
+                "left": diff_input.clone(),
+                "right": diff_input.clone()
             }),
         ),
         (

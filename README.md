@@ -67,6 +67,7 @@ dataq [--emit-pipeline] <command> [options]
 | `gate schema` | JSON Schema で品質ゲートを実行（`assert --schema` の専用ラッパー） | `--schema <path>` |
 | `gate policy` | ルールベース品質ゲートを実行（違反詳細を決定的順序で出力） | `--rules <path>` |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
+| `diff source` | 2ソース（preset/path）を解決して構造差分を出力 | `--left <preset-or-path>` `--right <preset-or-path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
@@ -143,6 +144,12 @@ dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-pat
 
 # CIゲート: 差分があれば終了コード2、値差分詳細は先頭1件まで
 dataq sdiff --left before.jsonl --right after.jsonl --fail-on-diff --value-diff-cap 1
+
+# CI定義を preset 経由で正規化して差分比較
+dataq diff source \
+  --left 'preset:github-actions-jobs:.github/workflows/ci.yml' \
+  --right expected-jobs.json \
+  --fail-on-diff
 
 # JSON入力をそのままdataqで検証
 dataq assert --input raw.json --rules rules.yaml
@@ -338,7 +345,18 @@ dataq assert \
 - `--ignore-path` 指定時、レポートに `ignored_paths` が出力される
 - `values.total` は実差分件数を維持し、上限超過時のみ `values.truncated=true`
 
-### 4. `profile`
+### 4. `diff source`
+
+異なる入力ソース（file または preset）を解決してから、`sdiff` と同じ差分レポートを返す。
+
+- `--left <preset-or-path>` / `--right <preset-or-path>`
+  - file: `path/to/input.json`
+  - preset: `preset:<github-actions-jobs|gitlab-ci-jobs>:<path>`
+- 出力は `sdiff` と同じ `counts` / `keys` / `ignored_paths` / `values` に加えて、`sources`（左右の解決メタデータ）を含む
+- `--fail-on-diff` 指定時は `values.total > 0` で終了コード `2`
+- `--emit-pipeline` の `steps`: `diff_source_resolve_left`, `diff_source_resolve_right`, `diff_source_compare`
+
+### 5. `profile`
 
 データ品質の概要を決定的な JSON で返す。
 
@@ -357,7 +375,7 @@ dataq assert \
 - `p50` / `p95` は nearest-rank 方式（`rank = ceil(p * n)`、`index = rank - 1`、0始まり配列で評価）
 - `numeric_stats` の浮動小数は小数点以下6桁へ丸め（`round half away from zero` 相当）
 
-### 5. `join`
+### 6. `join`
 
 2つの入力を結合キーで結合し、JSON配列で返す。
 
@@ -369,7 +387,7 @@ dataq assert \
 - 出力は JSON 配列固定（決定的順序）
 - 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
-### 6. `aggregate`
+### 7. `aggregate`
 
 単一入力をグループ化して集計し、JSON配列で返す。
 
@@ -382,7 +400,7 @@ dataq assert \
 - 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
 - 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
-### 7. `merge`
+### 8. `merge`
 
 複数の JSON/YAML 入力をポリシー指定で決定的にマージ。
 
@@ -395,7 +413,7 @@ dataq assert \
   - 解決順: 最長一致する `--policy-path` を優先し、同一深さの一致は後ろに指定した定義を優先。一致なしは `--policy` を適用
 - 出力は JSON 固定（キー順は決定的にソート）
 
-### 8. `doctor`
+### 9. `doctor`
 
 実行環境の依存を診断。`--capabilities` と `--profile` に対応。
 
@@ -416,7 +434,7 @@ dataq assert \
   - `--profile` 未指定: `doctor_probe_tools`, `doctor_probe_capabilities`
   - `--profile` 指定: `doctor_profile_probe`, `doctor_profile_evaluate`
 
-### 9. `recipe run`
+### 10. `recipe run`
 
 レシピファイル（YAML/JSON）を読み込み、`steps` を定義順で実行します。
 
@@ -447,19 +465,19 @@ steps:
             type: integer
 ```
 
-### 10. `contract`
+### 11. `contract`
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|assert|gate-schema|gate|sdiff|profile|merge|doctor|recipe>`
+- `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe>`
   - 単一コマンドの契約を1オブジェクトで返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-  - 順序: `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+- 順序: `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
-### 11. `emit plan`
+### 12. `emit plan`
 
 サブコマンドの静的実行計画を、実行せずに機械可読JSONで取得します（read-only）。
 
@@ -479,7 +497,7 @@ steps:
   - `emit plan`: 実行前の静的計画（外部ツール実行なし）
   - `--emit-pipeline`: 実行時に観測した診断（stderr）
 
-### 12. `mcp`
+### 13. `mcp`
 
 MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理します。
 
@@ -497,6 +515,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.gate.schema`
   - `dataq.gate.policy`
   - `dataq.sdiff`
+  - `dataq.diff.source`
   - `dataq.profile`
   - `dataq.join`
   - `dataq.aggregate`

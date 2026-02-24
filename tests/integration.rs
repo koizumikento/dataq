@@ -4,6 +4,8 @@ mod canon_assert_flow;
 mod canon_flow;
 #[path = "integration/canon_sdiff_flow.rs"]
 mod canon_sdiff_flow;
+#[path = "integration/diff_source_flow.rs"]
+mod diff_source_flow;
 #[path = "integration/doctor_capabilities_flow.rs"]
 mod doctor_capabilities_flow;
 #[path = "integration/emit_plan_flow.rs"]
