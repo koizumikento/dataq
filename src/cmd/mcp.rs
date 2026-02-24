@@ -12,7 +12,9 @@ use crate::cmd::{
     profile, recipe, scan, sdiff,
 };
 use crate::domain::ingest::IngestYamlJobsMode;
-use crate::domain::report::{ExternalToolUsage, PipelineInput, PipelineInputSource, PipelineReport};
+use crate::domain::report::{
+    ExternalToolUsage, PipelineInput, PipelineInputSource, PipelineReport,
+};
 use crate::domain::rules::AssertRules;
 use crate::engine::aggregate::AggregateMetric;
 use crate::engine::r#assert as assert_engine;
