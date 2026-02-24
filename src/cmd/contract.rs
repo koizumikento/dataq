@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 10] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 11] = [
     ContractCommand::Canon,
     ContractCommand::Assert,
     ContractCommand::GateSchema,
@@ -12,7 +12,8 @@ pub const ORDERED_COMMANDS: [ContractCommand; 10] = [
     ContractCommand::Profile,
     ContractCommand::Merge,
     ContractCommand::Doctor,
-    ContractCommand::Recipe,
+    ContractCommand::RecipeRun,
+    ContractCommand::RecipeLock,
 ];
 
 /// Subcommand identifier accepted by `dataq contract --command`.
@@ -27,7 +28,8 @@ pub enum ContractCommand {
     Profile,
     Merge,
     Doctor,
-    Recipe,
+    RecipeRun,
+    RecipeLock,
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -65,7 +67,14 @@ const SDIFF_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values"];
 const DIFF_SOURCE_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values", "sources"];
 const PROFILE_FIELDS: &[&str] = &["record_count", "field_count", "fields"];
 const DOCTOR_FIELDS: &[&str] = &["tools"];
-const RECIPE_FIELDS: &[&str] = &["matched", "exit_code", "steps"];
+const RECIPE_RUN_FIELDS: &[&str] = &["matched", "exit_code", "steps"];
+const RECIPE_LOCK_FIELDS: &[&str] = &[
+    "version",
+    "command_graph_hash",
+    "args_hash",
+    "tool_versions",
+    "dataq_version",
+];
 
 const CANON_NOTES: &[&str] = &[
     "Output is the canonicalized root JSON value.",
@@ -105,9 +114,13 @@ const DOCTOR_NOTES: &[&str] = &[
     "Exit code 3 means missing/non-executable `jq|yq|mlr` without `--profile`, or unsatisfied selected profile requirements with `--profile`.",
 ];
 const DOCTOR_EXIT_CODE_3: &str = "without `--profile`: missing/non-executable `jq|yq|mlr`; with `--profile`: selected profile requirements are unsatisfied";
-const RECIPE_NOTES: &[&str] = &[
+const RECIPE_RUN_NOTES: &[&str] = &[
     "`steps` preserves recipe definition order.",
     "Step-level unmatched results map to exit code 2.",
+];
+const RECIPE_LOCK_NOTES: &[&str] = &[
+    "`tool_versions` keys are fixed in `jq`, `yq`, `mlr` order.",
+    "Lock output is canonicalized before write/emit.",
 ];
 
 pub fn run_for_command(command: ContractCommand) -> ContractCommandResponse {
@@ -207,12 +220,19 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             ),
             notes: DOCTOR_NOTES,
         },
-        ContractCommand::Recipe => CommandContract {
-            command: "recipe",
+        ContractCommand::RecipeRun => CommandContract {
+            command: "recipe-run",
             schema: "dataq.recipe.run.output.v1",
-            output_fields: RECIPE_FIELDS,
+            output_fields: RECIPE_RUN_FIELDS,
             exit_codes: exit_codes("at least one step reported `matched=false`"),
-            notes: RECIPE_NOTES,
+            notes: RECIPE_RUN_NOTES,
+        },
+        ContractCommand::RecipeLock => CommandContract {
+            command: "recipe-lock",
+            schema: "dataq.recipe.lock.output.v1",
+            output_fields: RECIPE_LOCK_FIELDS,
+            exit_codes: exit_codes("validation mismatch is not used by this command"),
+            notes: RECIPE_LOCK_NOTES,
         },
     }
 }

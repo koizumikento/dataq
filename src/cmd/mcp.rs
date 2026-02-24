@@ -1515,14 +1515,23 @@ fn execute_recipe_lock(args: &Map<String, Value>) -> ToolExecution {
 
     if execution.exit_code == 0 {
         if let Some(out_path) = out_path {
-            let Some(serialized_lock) = serialized_lock else {
-                return internal_error("recipe lock payload bytes were unavailable");
-            };
-            if let Err(error) = std::fs::write(&out_path, serialized_lock.as_slice()) {
-                return input_usage_error(format!(
-                    "failed to write recipe lock file `{}`: {error}",
-                    out_path.display()
-                ));
+            if let Some(serialized_lock) = serialized_lock {
+                if let Err(error) = std::fs::write(&out_path, serialized_lock.as_slice()) {
+                    execution.exit_code = 3;
+                    execution.payload = json!({
+                        "error": "input_usage_error",
+                        "message": format!(
+                            "failed to write recipe lock file `{}`: {error}",
+                            out_path.display()
+                        ),
+                    });
+                }
+            } else {
+                execution.exit_code = 1;
+                execution.payload = json!({
+                    "error": "internal_error",
+                    "message": "recipe lock payload bytes were unavailable",
+                });
             }
         }
     }
@@ -2139,7 +2148,8 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         "profile" => Ok(contract::ContractCommand::Profile),
         "merge" => Ok(contract::ContractCommand::Merge),
         "doctor" => Ok(contract::ContractCommand::Doctor),
-        "recipe" => Ok(contract::ContractCommand::Recipe),
+        "recipe" | "recipe-run" => Ok(contract::ContractCommand::RecipeRun),
+        "recipe-lock" => Ok(contract::ContractCommand::RecipeLock),
         _ => Err(format!("unsupported contract command `{value}`")),
     }
 }

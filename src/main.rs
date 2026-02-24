@@ -401,7 +401,9 @@ enum CliContractCommand {
     Profile,
     Merge,
     Doctor,
-    Recipe,
+    #[value(name = "recipe-run", alias = "recipe")]
+    RecipeRun,
+    RecipeLock,
 }
 
 impl From<CliInputFormat> for Format {
@@ -486,7 +488,8 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::Profile => Self::Profile,
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
-            CliContractCommand::Recipe => Self::Recipe,
+            CliContractCommand::RecipeRun => Self::RecipeRun,
+            CliContractCommand::RecipeLock => Self::RecipeLock,
         }
     }
 }

@@ -169,7 +169,7 @@ pub fn lock(recipe_path: &Path) -> Result<RecipeLockExecution, RecipeExecutionEr
             });
         }
     };
-    if let Err(kind) = validate_recipe_lock_step_kinds(&recipe) {
+    if let Err(kind) = validate_recipe_lock_steps(&recipe) {
         return Err(RecipeExecutionError {
             kind,
             pipeline_steps: pipeline_steps.clone(),
@@ -609,15 +609,114 @@ fn parse_step_args<T: for<'de> Deserialize<'de>>(
     })
 }
 
-fn validate_recipe_lock_step_kinds(recipe: &RecipeFile) -> Result<(), RecipeExecutionErrorKind> {
+fn validate_recipe_lock_steps(recipe: &RecipeFile) -> Result<(), RecipeExecutionErrorKind> {
     for step in &recipe.steps {
-        if !matches!(step.kind.as_str(), "canon" | "assert" | "profile" | "sdiff") {
-            return Err(RecipeExecutionErrorKind::InputUsage(format!(
-                "unknown recipe step kind `{}`",
-                step.kind
-            )));
+        match step.kind.as_str() {
+            "canon" => {
+                let args: CanonStepArgs = parse_step_args("canon", step.args.clone())?;
+                validate_canon_step_args_for_lock(&args)?;
+            }
+            "assert" => {
+                let args: AssertStepArgs = parse_step_args("assert", step.args.clone())?;
+                validate_assert_step_args_for_lock(&args)?;
+            }
+            "profile" => {
+                let _: ProfileStepArgs = parse_step_args("profile", step.args.clone())?;
+            }
+            "sdiff" => {
+                let args: SdiffStepArgs = parse_step_args("sdiff", step.args.clone())?;
+                validate_sdiff_step_args_for_lock(&args)?;
+            }
+            _ => {
+                return Err(RecipeExecutionErrorKind::InputUsage(format!(
+                    "unknown recipe step kind `{}`",
+                    step.kind
+                )));
+            }
         }
     }
+    Ok(())
+}
+
+fn validate_canon_step_args_for_lock(args: &CanonStepArgs) -> Result<(), RecipeExecutionErrorKind> {
+    if args.input.is_some() {
+        if let Some(raw) = args.from.as_deref() {
+            Format::from_str(raw).map_err(|error| {
+                RecipeExecutionErrorKind::InputUsage(format!(
+                    "invalid format `{raw}` for `canon.args.input`: {error}"
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_assert_step_args_for_lock(
+    args: &AssertStepArgs,
+) -> Result<(), RecipeExecutionErrorKind> {
+    if args.rules.is_some() && args.rules_file.is_some() {
+        return Err(RecipeExecutionErrorKind::InputUsage(
+            "assert step args `rules` and `rules_file` are mutually exclusive".to_string(),
+        ));
+    }
+    if args.schema.is_some() && args.schema_file.is_some() {
+        return Err(RecipeExecutionErrorKind::InputUsage(
+            "assert step args `schema` and `schema_file` are mutually exclusive".to_string(),
+        ));
+    }
+
+    let has_rules_source = args.rules.is_some() || args.rules_file.is_some();
+    let has_schema_source = args.schema.is_some() || args.schema_file.is_some();
+    match (has_rules_source, has_schema_source) {
+        (false, false) => {
+            return Err(RecipeExecutionErrorKind::InputUsage(
+                "assert step requires exactly one of `rules`, `rules_file`, `schema`, or `schema_file`"
+                    .to_string(),
+            ));
+        }
+        (true, true) => {
+            return Err(RecipeExecutionErrorKind::InputUsage(
+                "assert step cannot combine rules and schema sources".to_string(),
+            ));
+        }
+        _ => {}
+    }
+
+    if let Some(rules) = args.rules.as_ref() {
+        let _: AssertRules = serde_json::from_value(rules.clone()).map_err(|error| {
+            RecipeExecutionErrorKind::InputUsage(format!(
+                "invalid assert rules in recipe step: {error}"
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+fn validate_sdiff_step_args_for_lock(args: &SdiffStepArgs) -> Result<(), RecipeExecutionErrorKind> {
+    if let Some(raw_format) = args.right_from.as_deref() {
+        Format::from_str(raw_format).map_err(|error| {
+            RecipeExecutionErrorKind::InputUsage(format!(
+                "invalid format `{raw_format}` for `sdiff.args.right`: {error}"
+            ))
+        })?;
+    }
+
+    if let Some(key_path) = args.key.as_deref() {
+        ValuePath::parse_canonical(key_path).map_err(|error| {
+            RecipeExecutionErrorKind::InputUsage(format!(
+                "invalid sdiff key path `{key_path}`: {error}"
+            ))
+        })?;
+    }
+    for raw_path in &args.ignore_path {
+        ValuePath::parse_canonical(raw_path).map_err(|error| {
+            RecipeExecutionErrorKind::InputUsage(format!(
+                "invalid sdiff ignore path `{raw_path}`: {error}"
+            ))
+        })?;
+    }
+
     Ok(())
 }
 

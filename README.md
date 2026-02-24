@@ -481,18 +481,18 @@ steps:
   - `tool_versions`（`jq`/`yq`/`mlr`）
   - `dataq_version`
 - 異常時契約:
-  - レシピ不正 / ツール解決失敗は exit `3`
+  - レシピ不正 / step引数不正 / ツール解決失敗は exit `3`
 - `--emit-pipeline` 有効時は `recipe_lock_parse`, `recipe_lock_probe_tools`, `recipe_lock_fingerprint` を stderr JSON へ出力
 
 ### 12. `contract`
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe>`
+- `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-- 順序: `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe`
+- 順序: `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 

@@ -403,6 +403,46 @@ fn recipe_lock_invalid_recipe_returns_exit_three() {
 }
 
 #[test]
+fn recipe_lock_invalid_step_args_returns_exit_three() {
+    let dir = tempdir().expect("temp dir");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(
+        &recipe_path,
+        r#"{
+            "version":"dataq.recipe.v1",
+            "steps":[
+                {
+                    "kind":"assert",
+                    "args":{
+                        "rules":{"required_keys":[],"forbid_keys":[],"fields":{}},
+                        "schema":{"type":"object"}
+                    }
+                }
+            ]
+        }"#,
+    )
+    .expect("write recipe");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["error"], Value::from("input_usage_error"));
+    assert_eq!(
+        stderr_json["message"],
+        Value::from("assert step cannot combine rules and schema sources")
+    );
+}
+
+#[test]
 fn recipe_lock_unresolved_tool_returns_exit_three() {
     let dir = tempdir().expect("temp dir");
     let recipe_path = dir.path().join("recipe.json");

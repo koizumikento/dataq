@@ -30,11 +30,11 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe>`
+  - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe`
+  - `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -379,7 +379,7 @@ cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.jso
   - `recipe_lock_probe_tools`
   - `recipe_lock_fingerprint`
 - 異常時契約:
-  - レシピファイル不正は exit `3`
+  - レシピファイル不正 / step引数不正は exit `3`
   - ツール解決失敗（未存在/非実行可能/版数取得失敗）は exit `3`
 
 ## 関連ドキュメント
