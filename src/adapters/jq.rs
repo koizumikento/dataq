@@ -151,7 +151,7 @@ fn run_filter_bytes(input: &[u8], filter: &str) -> Result<Value, JqError> {
     };
 
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(&input).map_err(JqError::Stdin)?;
+        stdin.write_all(input).map_err(JqError::Stdin)?;
     } else {
         return Err(JqError::Execution(
             "jq stdin was not piped as expected".to_string(),
