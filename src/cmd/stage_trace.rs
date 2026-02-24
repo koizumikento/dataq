@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use serde_json::Value;
 
 use crate::domain::report::{PipelineStageDiagnostic, PipelineStageMetrics};
@@ -19,9 +17,10 @@ where
         .iter()
         .map(|rows| value_array_json_bytes(rows))
         .sum();
-    let started = Instant::now();
     let result = run_stage();
-    let duration_ms = elapsed_ms(started);
+    // Keep emitted pipeline diagnostics deterministic for identical inputs.
+    // Wall-clock timing varies run to run, so `duration_ms` is fixed.
+    let duration_ms = 0;
 
     let diagnostic = match &result {
         Ok(rows) => PipelineStageDiagnostic::success_with_metrics(
@@ -54,8 +53,4 @@ where
 
 fn value_array_json_bytes(rows: &[Value]) -> usize {
     serde_json::to_vec(rows).map_or(0, |bytes| bytes.len())
-}
-
-fn elapsed_ms(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
