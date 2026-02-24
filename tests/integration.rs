@@ -18,6 +18,8 @@ mod gate_schema_flow;
 mod ingest_api_flow;
 #[path = "integration/ingest_doc_roundtrip.rs"]
 mod ingest_doc_roundtrip;
+#[path = "integration/ingest_book_flow.rs"]
+mod ingest_book_flow;
 #[path = "integration/ingest_yaml_jobs_flow.rs"]
 mod ingest_yaml_jobs_flow;
 #[path = "integration/io_format_resolution.rs"]

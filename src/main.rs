@@ -138,6 +138,8 @@ enum IngestSubcommand {
     Notes(IngestNotesArgs),
     /// Extract deterministic schema fields from a document.
     Doc(IngestDocArgs),
+    /// Parse mdBook `SUMMARY.md` and metadata from a book root.
+    Book(IngestBookArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -194,6 +196,15 @@ struct IngestDocArgs {
 
     #[arg(long, value_enum)]
     from: CliIngestDocFormat,
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestBookArgs {
+    #[arg(long)]
+    root: PathBuf,
+
+    #[arg(long, default_value_t = false)]
+    include_files: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -527,6 +538,7 @@ enum CliContractCommand {
     IngestDoc,
     #[value(name = "ingest-notes")]
     IngestNotes,
+    IngestBook,
     Merge,
     Doctor,
     #[value(name = "recipe-run", alias = "recipe")]
@@ -618,6 +630,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::Profile => Self::Profile,
             CliContractCommand::IngestDoc => Self::IngestDoc,
             CliContractCommand::IngestNotes => Self::IngestNotes,
+            CliContractCommand::IngestBook => Self::IngestBook,
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
             CliContractCommand::RecipeRun => Self::RecipeRun,
@@ -1034,6 +1047,7 @@ fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
         IngestSubcommand::YamlJobs(args) => run_ingest_yaml_jobs(args, emit_pipeline),
         IngestSubcommand::Notes(args) => run_ingest_notes(args, emit_pipeline),
         IngestSubcommand::Doc(args) => run_ingest_doc(args, emit_pipeline),
+        IngestSubcommand::Book(args) => run_ingest_book(args, emit_pipeline),
     }
 }
 
@@ -1300,6 +1314,59 @@ fn run_ingest_doc(args: IngestDocArgs, emit_pipeline: bool) -> i32 {
 
     if emit_pipeline {
         let pipeline_report = build_ingest_doc_pipeline_report(&args, input_path, from);
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
+}
+
+fn run_ingest_book(args: IngestBookArgs, emit_pipeline: bool) -> i32 {
+    let (response, trace) = ingest::run_book_with_trace(&ingest::IngestBookCommandArgs {
+        root: args.root.clone(),
+        include_files: args.include_files,
+        verify_mdbook_meta: ingest::resolve_verify_mdbook_meta(),
+    });
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest book response".to_string(),
+                    json!({"command": "ingest.book"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest book error".to_string(),
+                    json!({"command": "ingest.book"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected ingest book exit code: {other}"),
+                json!({"command": "ingest.book"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_ingest_book_pipeline_report(&args, &trace);
         emit_pipeline_report(&pipeline_report);
     }
 
@@ -2893,6 +2960,26 @@ fn build_ingest_doc_pipeline_report(
     .mark_external_tool_used("jq")
 }
 
+fn build_ingest_book_pipeline_report(
+    args: &IngestBookArgs,
+    trace: &ingest::IngestBookPipelineTrace,
+) -> PipelineReport {
+    let mut report = PipelineReport::new(
+        "ingest.book",
+        PipelineInput::new(vec![PipelineInputSource::path(
+            "root",
+            args.root.display().to_string(),
+            None,
+        )]),
+        ingest::pipeline_steps_book(),
+        ingest::deterministic_guards_book(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
 fn build_merge_pipeline_report(
     args: &MergeArgs,
     base_format: Option<Format>,
@@ -3195,6 +3282,7 @@ fn resolve_tool_executable(tool_name: &str) -> String {
         "mlr" => Some("DATAQ_MLR_BIN"),
         "xh" => Some("DATAQ_XH_BIN"),
         "pandoc" => Some("DATAQ_PANDOC_BIN"),
+        "mdbook" => Some("DATAQ_MDBOOK_BIN"),
         "nb" => Some("DATAQ_NB_BIN"),
         _ => None,
     };

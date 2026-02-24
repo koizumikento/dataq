@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 15] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 16] = [
     ContractCommand::Canon,
     ContractCommand::IngestApi,
     ContractCommand::Ingest,
@@ -14,6 +14,7 @@ pub const ORDERED_COMMANDS: [ContractCommand; 15] = [
     ContractCommand::Profile,
     ContractCommand::IngestDoc,
     ContractCommand::IngestNotes,
+    ContractCommand::IngestBook,
     ContractCommand::Merge,
     ContractCommand::Doctor,
     ContractCommand::RecipeRun,
@@ -34,6 +35,7 @@ pub enum ContractCommand {
     Profile,
     IngestDoc,
     IngestNotes,
+    IngestBook,
     Merge,
     Doctor,
     RecipeRun,
@@ -85,6 +87,7 @@ const INGEST_NOTES_FIELDS: &[&str] = &[
     "updated_at",
     "metadata",
 ];
+const INGEST_BOOK_FIELDS: &[&str] = &["book", "summary"];
 const DOCTOR_FIELDS: &[&str] = &["tools"];
 const RECIPE_RUN_FIELDS: &[&str] = &["matched", "exit_code", "steps"];
 const RECIPE_LOCK_FIELDS: &[&str] = &[
@@ -138,6 +141,10 @@ const INGEST_DOC_NOTES: &[&str] = &[
 const INGEST_NOTES_NOTES: &[&str] = &[
     "Output is a JSON array of normalized note records sorted by `created_at` then `id`.",
     "`created_at` and `updated_at` are normalized to RFC3339 UTC when present.",
+];
+const INGEST_BOOK_NOTES: &[&str] = &[
+    "`summary.order` preserves `SUMMARY.md` chapter ordering.",
+    "`--include-files` controls optional chapter `file` metadata fields.",
 ];
 const MERGE_NOTES: &[&str] = &[
     "Output is the merged root JSON value.",
@@ -277,6 +284,16 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
                 "input/usage error or missing `nb`/`jq`",
             ),
             notes: INGEST_NOTES_NOTES,
+        },
+        ContractCommand::IngestBook => CommandContract {
+            command: "ingest-book",
+            schema: "dataq.ingest.book.output.v1",
+            output_fields: INGEST_BOOK_FIELDS,
+            exit_codes: exit_codes_with_code_three(
+                "validation mismatch is not used by this command",
+                "input/usage error or missing `jq`/`mdbook`",
+            ),
+            notes: INGEST_BOOK_NOTES,
         },
         ContractCommand::Merge => CommandContract {
             command: "merge",

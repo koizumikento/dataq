@@ -1,3 +1,4 @@
+use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -5,10 +6,10 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::adapters::{jq, nb};
+use crate::adapters::{jq, mdbook, nb};
 use crate::domain::report::PipelineStageDiagnostic;
 pub use crate::engine::ingest::IngestDocInputFormat;
-use crate::engine::ingest::{self, IngestDocError};
+use crate::engine::ingest::{self, IngestBookOptions, IngestDocError};
 
 /// Input arguments for `ingest doc` command execution API.
 #[derive(Debug, Clone)]
@@ -39,6 +40,21 @@ pub struct IngestNotesCommandResponse {
     pub payload: Value,
 }
 
+/// Input arguments for `ingest book` command execution API.
+#[derive(Debug, Clone)]
+pub struct IngestBookCommandArgs {
+    pub root: PathBuf,
+    pub include_files: bool,
+    pub verify_mdbook_meta: bool,
+}
+
+/// Structured command response that carries exit-code mapping and JSON payload.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct IngestBookCommandResponse {
+    pub exit_code: i32,
+    pub payload: Value,
+}
+
 /// Trace details used by `--emit-pipeline` for `ingest notes` stages.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestNotesPipelineTrace {
@@ -47,6 +63,22 @@ pub struct IngestNotesPipelineTrace {
 }
 
 impl IngestNotesPipelineTrace {
+    fn mark_tool_used(&mut self, tool: &'static str) {
+        if self.used_tools.iter().any(|used| used == tool) {
+            return;
+        }
+        self.used_tools.push(tool.to_string());
+    }
+}
+
+/// Trace details used by `--emit-pipeline` for ingest-book stages.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IngestBookPipelineTrace {
+    pub used_tools: Vec<String>,
+    pub stage_diagnostics: Vec<PipelineStageDiagnostic>,
+}
+
+impl IngestBookPipelineTrace {
     fn mark_tool_used(&mut self, tool: &'static str) {
         if self.used_tools.iter().any(|used| used == tool) {
             return;
@@ -233,6 +265,149 @@ pub fn run_notes_with_trace(
     )
 }
 
+pub fn run_book_with_trace(
+    args: &IngestBookCommandArgs,
+) -> (IngestBookCommandResponse, IngestBookPipelineTrace) {
+    let mut trace = IngestBookPipelineTrace::default();
+    let parsed = match ingest::ingest_book(&IngestBookOptions {
+        root: args.root.clone(),
+        include_files: args.include_files,
+    }) {
+        Ok(report) => report,
+        Err(error) => {
+            return (
+                IngestBookCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": error.to_string(),
+                    }),
+                },
+                trace,
+            );
+        }
+    };
+
+    if args.verify_mdbook_meta {
+        let diagnostic = match mdbook::verify_book_metadata(args.root.as_path()) {
+            Ok(()) => {
+                PipelineStageDiagnostic::success(2, "ingest_book_mdbook_meta", "mdbook", 1, 1)
+            }
+            Err(mdbook::MdbookError::Unavailable) => {
+                let diagnostic =
+                    PipelineStageDiagnostic::failure(2, "ingest_book_mdbook_meta", "mdbook", 1);
+                trace.stage_diagnostics.push(diagnostic);
+                return (
+                    IngestBookCommandResponse {
+                        exit_code: 3,
+                        payload: json!({
+                            "error": "input_usage_error",
+                            "message": "mdbook metadata verification requires `mdbook` in PATH",
+                        }),
+                    },
+                    trace,
+                );
+            }
+            Err(error) => {
+                let diagnostic =
+                    PipelineStageDiagnostic::failure(2, "ingest_book_mdbook_meta", "mdbook", 1);
+                trace.stage_diagnostics.push(diagnostic);
+                return (
+                    IngestBookCommandResponse {
+                        exit_code: 3,
+                        payload: json!({
+                            "error": "input_usage_error",
+                            "message": format!("failed to verify mdbook metadata: {error}"),
+                        }),
+                    },
+                    trace,
+                );
+            }
+        };
+        trace.stage_diagnostics.push(diagnostic);
+    }
+
+    let parsed_value = match serde_json::to_value(parsed) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                IngestBookCommandResponse {
+                    exit_code: 1,
+                    payload: json!({
+                        "error": "internal_error",
+                        "message": format!("failed to serialize ingest report: {error}"),
+                    }),
+                },
+                trace,
+            );
+        }
+    };
+
+    trace.mark_tool_used("jq");
+    let projected = match jq::project_ingest_book(&parsed_value) {
+        Ok(value) => {
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::success(
+                    3,
+                    "ingest_book_jq_project",
+                    "jq",
+                    1,
+                    1,
+                ));
+            value
+        }
+        Err(jq::JqError::Unavailable) => {
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure(
+                    3,
+                    "ingest_book_jq_project",
+                    "jq",
+                    1,
+                ));
+            return (
+                IngestBookCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": "ingest book requires `jq` in PATH",
+                    }),
+                },
+                trace,
+            );
+        }
+        Err(error) => {
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure(
+                    3,
+                    "ingest_book_jq_project",
+                    "jq",
+                    1,
+                ));
+            return (
+                IngestBookCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": format!("failed to project ingest output with jq: {error}"),
+                    }),
+                },
+                trace,
+            );
+        }
+    };
+
+    (
+        IngestBookCommandResponse {
+            exit_code: 0,
+            payload: projected,
+        },
+        trace,
+    )
+}
+
 fn execute<R: Read>(args: &IngestDocCommandArgs, stdin: R) -> Result<Value, IngestDocError> {
     let input = load_input_bytes(args, stdin)?;
     let report = ingest::ingest_document(&input, args.from)?;
@@ -304,4 +479,31 @@ pub fn notes_deterministic_guards() -> Vec<String> {
         "ingest_notes_sorted_by_created_at_then_id".to_string(),
         "ingest_notes_timestamps_normalized_to_utc".to_string(),
     ]
+}
+
+pub fn pipeline_steps_book() -> Vec<String> {
+    vec![
+        "ingest_book_summary_parse".to_string(),
+        "ingest_book_mdbook_meta".to_string(),
+        "ingest_book_jq_project".to_string(),
+    ]
+}
+
+pub fn deterministic_guards_book() -> Vec<String> {
+    vec![
+        "summary_order_preserved_from_summary_md".to_string(),
+        "path_normalization_slash_no_trailing_separator".to_string(),
+        "jq_execution_with_explicit_arg_arrays".to_string(),
+        "optional_mdbook_metadata_verification_stage".to_string(),
+    ]
+}
+
+pub fn resolve_verify_mdbook_meta() -> bool {
+    match env::var("DATAQ_INGEST_BOOK_VERIFY_MDBOOK") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
 }

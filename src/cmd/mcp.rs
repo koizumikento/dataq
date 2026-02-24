@@ -31,7 +31,7 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 20] = [
+const TOOL_ORDER: [&str; 21] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -43,6 +43,7 @@ const TOOL_ORDER: [&str; 20] = [
     "dataq.profile",
     "dataq.ingest.doc",
     "dataq.ingest.notes",
+    "dataq.ingest.book",
     "dataq.join",
     "dataq.aggregate",
     "dataq.merge",
@@ -252,6 +253,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.profile" => execute_profile(args),
         "dataq.ingest.doc" => execute_ingest_doc(args),
         "dataq.ingest.notes" => execute_ingest_notes(args),
+        "dataq.ingest.book" => execute_ingest_book(args),
         "dataq.join" => execute_join(args),
         "dataq.aggregate" => execute_aggregate(args),
         "dataq.merge" => execute_merge(args),
@@ -1320,6 +1322,63 @@ fn execute_ingest_notes(args: &Map<String, Value>) -> ToolExecution {
             PipelineInput::new(Vec::new()),
             ingest::notes_pipeline_steps(),
             ingest::notes_deterministic_guards(),
+        );
+        for used_tool in &trace.used_tools {
+            report = report.mark_external_tool_used(used_tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_book(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let root = match parse_optional_path(args, &["root", "root_path", "book_root"], "root") {
+        Ok(Some(path)) => path,
+        Ok(None) => return input_usage_error("missing required `root`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let include_files = match parse_bool(args, &["include_files"], false, "include_files") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let verify_mdbook_meta = match parse_bool(
+        args,
+        &["verify_mdbook_meta"],
+        ingest::resolve_verify_mdbook_meta(),
+        "verify_mdbook_meta",
+    ) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let (response, trace) = ingest::run_book_with_trace(&ingest::IngestBookCommandArgs {
+        root: root.clone(),
+        include_files,
+        verify_mdbook_meta,
+    });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "ingest.book",
+            PipelineInput::new(vec![PipelineInputSource::path(
+                "root",
+                root.display().to_string(),
+                None,
+            )]),
+            ingest::pipeline_steps_book(),
+            ingest::deterministic_guards_book(),
         );
         for used_tool in &trace.used_tools {
             report = report.mark_external_tool_used(used_tool);
@@ -2591,6 +2650,8 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         "diff-source" => Ok(contract::ContractCommand::DiffSource),
         "profile" => Ok(contract::ContractCommand::Profile),
         "ingest-doc" => Ok(contract::ContractCommand::IngestDoc),
+        "ingest-notes" => Ok(contract::ContractCommand::IngestNotes),
+        "ingest-book" => Ok(contract::ContractCommand::IngestBook),
         "merge" => Ok(contract::ContractCommand::Merge),
         "doctor" => Ok(contract::ContractCommand::Doctor),
         "recipe" | "recipe-run" => Ok(contract::ContractCommand::RecipeRun),

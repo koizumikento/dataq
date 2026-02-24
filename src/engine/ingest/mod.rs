@@ -1,5 +1,10 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
@@ -9,6 +14,7 @@ use crate::domain::ingest::{
     GenericMapJobRecord, GithubActionsJobRecord, GitlabCiJobRecord, IngestYamlJobsMode,
 };
 use crate::domain::report::IngestDocReport;
+use crate::util::hash::DeterministicHasher;
 
 /// Supported `ingest doc --from` formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,6 +350,516 @@ where
         .collect()
 }
 
+#[derive(Debug, Clone)]
+pub struct IngestBookOptions {
+    pub root: PathBuf,
+    pub include_files: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IngestBookReport {
+    pub book: IngestBookMetadata,
+    pub summary: IngestBookSummary,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IngestBookMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub authors: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    pub multilingual: bool,
+    pub src: String,
+    pub summary_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IngestBookSummary {
+    pub chapter_count: usize,
+    pub order: Vec<IngestBookOrderItem>,
+    pub chapters: Vec<IngestBookChapter>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IngestBookOrderItem {
+    pub index: usize,
+    pub depth: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_index: Option<usize>,
+    pub title: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IngestBookChapter {
+    pub index: usize,
+    pub title: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<IngestBookFileMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<IngestBookChapter>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IngestBookFileMetadata {
+    pub size_bytes: u64,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Error)]
+pub enum IngestBookError {
+    #[error("book root `{path}` does not exist or is not a directory")]
+    InvalidRoot { path: String },
+    #[error("book metadata file `{path}` does not exist")]
+    MissingBookToml { path: String },
+    #[error("failed to read book metadata file `{path}`: {source}")]
+    ReadBookToml {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse book metadata file `{path}`: {source}")]
+    ParseBookToml {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("summary file `{path}` does not exist")]
+    MissingSummary { path: String },
+    #[error("failed to read summary file `{path}`: {source}")]
+    ReadSummary {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid SUMMARY.md line {line}: {message}")]
+    SummaryParse { line: usize, message: String },
+    #[error("chapter path `{path}` at SUMMARY.md line {line} resolves outside book root")]
+    ChapterPathOutsideRoot { line: usize, path: String },
+    #[error("summary does not contain any chapter entries")]
+    EmptySummary,
+    #[error("missing chapter files referenced by SUMMARY.md: {paths:?}")]
+    MissingChapterFiles { paths: Vec<String> },
+    #[error("failed to read chapter file `{path}` for metadata: {source}")]
+    ReadChapterFile {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct BookTomlRoot {
+    #[serde(default)]
+    book: BookTomlBookSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BookTomlBookSection {
+    title: Option<String>,
+    #[serde(default)]
+    authors: Vec<String>,
+    description: Option<String>,
+    language: Option<String>,
+    multilingual: Option<bool>,
+    src: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedBookMetadata {
+    title: Option<String>,
+    authors: Vec<String>,
+    description: Option<String>,
+    language: Option<String>,
+    multilingual: bool,
+    src: String,
+}
+
+#[derive(Debug, Clone)]
+struct FlatChapter {
+    index: usize,
+    depth: usize,
+    parent_index: Option<usize>,
+    title: String,
+    path: String,
+    absolute_path: PathBuf,
+}
+
+pub fn ingest_book(options: &IngestBookOptions) -> Result<IngestBookReport, IngestBookError> {
+    let root = canonicalize_root(options.root.as_path())?;
+    let metadata = load_book_metadata(root.as_path())?;
+    let summary_path =
+        normalize_lexical_path(root.join(Path::new(metadata.src.as_str()))).join("SUMMARY.md");
+    if !summary_path.is_file() {
+        return Err(IngestBookError::MissingSummary {
+            path: normalize_path_string(&summary_path),
+        });
+    }
+
+    let summary_text =
+        fs::read_to_string(&summary_path).map_err(|source| IngestBookError::ReadSummary {
+            path: normalize_path_string(&summary_path),
+            source,
+        })?;
+
+    let chapters = parse_summary(
+        root.as_path(),
+        summary_path.as_path(),
+        summary_text.as_str(),
+    )?;
+
+    let missing_paths: Vec<String> = chapters
+        .iter()
+        .filter(|chapter| !chapter.absolute_path.is_file())
+        .map(|chapter| chapter.path.clone())
+        .collect();
+    if !missing_paths.is_empty() {
+        return Err(IngestBookError::MissingChapterFiles {
+            paths: missing_paths,
+        });
+    }
+
+    let order: Vec<IngestBookOrderItem> = chapters
+        .iter()
+        .map(|chapter| IngestBookOrderItem {
+            index: chapter.index,
+            depth: chapter.depth,
+            parent_index: chapter.parent_index,
+            title: chapter.title.clone(),
+            path: chapter.path.clone(),
+        })
+        .collect();
+
+    let chapter_nodes = build_chapter_tree(&chapters, options.include_files)?;
+    Ok(IngestBookReport {
+        book: IngestBookMetadata {
+            title: metadata.title,
+            authors: metadata.authors,
+            description: metadata.description,
+            language: metadata.language,
+            multilingual: metadata.multilingual,
+            src: metadata.src,
+            summary_path: normalize_path_string(
+                summary_path
+                    .strip_prefix(root.as_path())
+                    .unwrap_or(summary_path.as_path()),
+            ),
+        },
+        summary: IngestBookSummary {
+            chapter_count: chapters.len(),
+            order,
+            chapters: chapter_nodes,
+        },
+    })
+}
+
+fn canonicalize_root(root: &Path) -> Result<PathBuf, IngestBookError> {
+    let canonical = fs::canonicalize(root).map_err(|_| IngestBookError::InvalidRoot {
+        path: normalize_path_string(root),
+    })?;
+    if !canonical.is_dir() {
+        return Err(IngestBookError::InvalidRoot {
+            path: normalize_path_string(root),
+        });
+    }
+    Ok(canonical)
+}
+
+fn load_book_metadata(root: &Path) -> Result<ResolvedBookMetadata, IngestBookError> {
+    let book_toml_path = root.join("book.toml");
+    if !book_toml_path.is_file() {
+        return Err(IngestBookError::MissingBookToml {
+            path: normalize_path_string(&book_toml_path),
+        });
+    }
+
+    let book_toml_text =
+        fs::read_to_string(&book_toml_path).map_err(|source| IngestBookError::ReadBookToml {
+            path: normalize_path_string(&book_toml_path),
+            source,
+        })?;
+    let parsed: BookTomlRoot = toml::from_str(book_toml_text.as_str()).map_err(|source| {
+        IngestBookError::ParseBookToml {
+            path: normalize_path_string(&book_toml_path),
+            source,
+        }
+    })?;
+    let mut metadata = parsed.book;
+    let src = if metadata.src.as_deref().unwrap_or("").trim().is_empty() {
+        "src".to_string()
+    } else {
+        normalize_relative_path_string(metadata.src.as_deref().unwrap_or("src"))
+    };
+    Ok(ResolvedBookMetadata {
+        title: metadata.title.take(),
+        authors: metadata.authors,
+        description: metadata.description.take(),
+        language: metadata.language.take(),
+        multilingual: metadata.multilingual.unwrap_or(false),
+        src,
+    })
+}
+
+fn parse_summary(
+    root: &Path,
+    summary_path: &Path,
+    content: &str,
+) -> Result<Vec<FlatChapter>, IngestBookError> {
+    let summary_dir = summary_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.to_path_buf());
+    let mut chapters = Vec::new();
+    let mut indent_stack: Vec<(usize, usize)> = Vec::new();
+
+    for (line_number, line) in content.lines().enumerate() {
+        let line_no = line_number + 1;
+        let parsed = match parse_summary_line(line) {
+            Some(parsed) => parsed,
+            None => continue,
+        };
+
+        while let Some((indent, _)) = indent_stack.last() {
+            if parsed.indent > *indent {
+                break;
+            }
+            indent_stack.pop();
+        }
+        let parent_index = indent_stack.last().map(|(_, index)| *index);
+        let depth = indent_stack.len();
+        let relative_target = sanitize_summary_target(parsed.target.as_str(), line_no)?;
+        let absolute_target = normalize_lexical_path(summary_dir.join(relative_target));
+        let relative_to_root = absolute_target.strip_prefix(root).map_err(|_| {
+            IngestBookError::ChapterPathOutsideRoot {
+                line: line_no,
+                path: parsed.target.clone(),
+            }
+        })?;
+
+        let index = chapters.len() + 1;
+        chapters.push(FlatChapter {
+            index,
+            depth,
+            parent_index,
+            title: parsed.title,
+            path: normalize_path_string(relative_to_root),
+            absolute_path: absolute_target,
+        });
+        indent_stack.push((parsed.indent, index));
+    }
+
+    if chapters.is_empty() {
+        return Err(IngestBookError::EmptySummary);
+    }
+    Ok(chapters)
+}
+
+struct ParsedSummaryLine {
+    indent: usize,
+    title: String,
+    target: String,
+}
+
+fn parse_summary_line(line: &str) -> Option<ParsedSummaryLine> {
+    let indent = leading_indent_width(line);
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    if trimmed.starts_with('#') || trimmed.is_empty() {
+        return None;
+    }
+
+    let bullet = trimmed.chars().next()?;
+    if !matches!(bullet, '-' | '*' | '+') {
+        return None;
+    }
+    if !trimmed
+        .chars()
+        .nth(1)
+        .map(char::is_whitespace)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let body = trimmed[1..].trim_start();
+    if !body.starts_with('[') {
+        return None;
+    }
+    let close_bracket = body.find("](")?;
+    if close_bracket <= 1 {
+        return None;
+    }
+    let title = body[1..close_bracket].trim();
+    if title.is_empty() {
+        return None;
+    }
+    let tail = &body[(close_bracket + 2)..];
+    let close_paren = tail.find(')')?;
+    let target = tail[..close_paren].trim();
+    if target.is_empty() {
+        return None;
+    }
+
+    Some(ParsedSummaryLine {
+        indent,
+        title: title.to_string(),
+        target: target.to_string(),
+    })
+}
+
+fn sanitize_summary_target(target: &str, line: usize) -> Result<PathBuf, IngestBookError> {
+    if target.contains("://") || target.starts_with("mailto:") {
+        return Err(IngestBookError::SummaryParse {
+            line,
+            message: "external links are not supported".to_string(),
+        });
+    }
+
+    let mut trimmed = target.trim();
+    if let Some(index) = trimmed.find(char::is_whitespace) {
+        trimmed = &trimmed[..index];
+    }
+    trimmed = trimmed
+        .split_once('#')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(trimmed);
+    trimmed = trimmed
+        .split_once('?')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(trimmed);
+    if trimmed.is_empty() {
+        return Err(IngestBookError::SummaryParse {
+            line,
+            message: "chapter link target is empty".to_string(),
+        });
+    }
+
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        return Err(IngestBookError::SummaryParse {
+            line,
+            message: "absolute chapter links are not supported".to_string(),
+        });
+    }
+    Ok(path)
+}
+
+fn build_chapter_tree(
+    chapters: &[FlatChapter],
+    include_files: bool,
+) -> Result<Vec<IngestBookChapter>, IngestBookError> {
+    let mut children: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
+    for chapter in chapters {
+        children
+            .entry(chapter.parent_index)
+            .or_default()
+            .push(chapter.index);
+    }
+    build_chapter_nodes(None, chapters, &children, include_files)
+}
+
+fn build_chapter_nodes(
+    parent: Option<usize>,
+    chapters: &[FlatChapter],
+    children: &BTreeMap<Option<usize>, Vec<usize>>,
+    include_files: bool,
+) -> Result<Vec<IngestBookChapter>, IngestBookError> {
+    let mut nodes = Vec::new();
+    if let Some(indices) = children.get(&parent) {
+        for index in indices {
+            let chapter = &chapters[*index - 1];
+            let file_metadata = if include_files {
+                Some(load_file_metadata(
+                    chapter.absolute_path.as_path(),
+                    chapter.path.as_str(),
+                )?)
+            } else {
+                None
+            };
+            nodes.push(IngestBookChapter {
+                index: chapter.index,
+                title: chapter.title.clone(),
+                path: chapter.path.clone(),
+                file: file_metadata,
+                children: build_chapter_nodes(
+                    Some(chapter.index),
+                    chapters,
+                    children,
+                    include_files,
+                )?,
+            });
+        }
+    }
+    Ok(nodes)
+}
+
+fn load_file_metadata(
+    absolute_path: &Path,
+    normalized_path: &str,
+) -> Result<IngestBookFileMetadata, IngestBookError> {
+    let bytes = fs::read(absolute_path).map_err(|source| IngestBookError::ReadChapterFile {
+        path: normalized_path.to_string(),
+        source,
+    })?;
+    let mut hasher = DeterministicHasher::new();
+    hasher.update_len_prefixed(bytes.as_slice());
+    Ok(IngestBookFileMetadata {
+        size_bytes: bytes.len() as u64,
+        content_hash: hasher.finish_hex(),
+    })
+}
+
+fn leading_indent_width(line: &str) -> usize {
+    let mut width = 0;
+    for ch in line.chars() {
+        match ch {
+            ' ' => width += 1,
+            '\t' => width += 4,
+            _ => break,
+        }
+    }
+    width
+}
+
+fn normalize_relative_path_string(path: &str) -> String {
+    let normalized = normalize_lexical_path(Path::new(path));
+    let as_string = normalize_path_string(&normalized);
+    if as_string.is_empty() {
+        ".".to_string()
+    } else {
+        as_string
+    }
+}
+
+fn normalize_path_string(path: &Path) -> String {
+    let mut normalized = path.to_string_lossy().replace('\\', "/");
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn normalize_lexical_path(path: impl AsRef<Path>) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.as_ref().components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    normalized
+}
+
 fn value_to_string(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(text)) => text.clone(),
@@ -405,6 +921,101 @@ fn parse_rfc3339_utc(input: &str) -> Result<DateTime<Utc>, String> {
 
 fn format_rfc3339_utc(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+}
+
+#[cfg(test)]
+mod ingest_book_tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{IngestBookError, IngestBookOptions, ingest_book};
+
+    #[test]
+    fn parses_nested_summary_in_deterministic_order() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            root.join("book.toml"),
+            r#"[book]
+title = "Sample Book"
+authors = ["alice", "bob"]
+language = "en"
+src = "src"
+"#,
+        )
+        .expect("write book.toml");
+        fs::write(
+            src.join("SUMMARY.md"),
+            r#"# Summary
+
+- [Intro](intro.md)
+  - [Install](guide/install.md)
+  - [Usage](guide/usage.md)
+- [Appendix](appendix.md)
+"#,
+        )
+        .expect("write summary");
+        fs::write(src.join("intro.md"), "# Intro\n").expect("write intro");
+        fs::create_dir_all(src.join("guide")).expect("create guide");
+        fs::write(src.join("guide/install.md"), "# Install\n").expect("write install");
+        fs::write(src.join("guide/usage.md"), "# Usage\n").expect("write usage");
+        fs::write(src.join("appendix.md"), "# Appendix\n").expect("write appendix");
+
+        let report = ingest_book(&IngestBookOptions {
+            root: root.to_path_buf(),
+            include_files: false,
+        })
+        .expect("ingest");
+
+        assert_eq!(report.book.title.as_deref(), Some("Sample Book"));
+        assert_eq!(report.summary.chapter_count, 4);
+        assert_eq!(report.summary.order[0].path, "src/intro.md");
+        assert_eq!(report.summary.order[1].parent_index, Some(1));
+        assert_eq!(report.summary.order[1].path, "src/guide/install.md");
+        assert_eq!(report.summary.order[2].parent_index, Some(1));
+        assert_eq!(report.summary.order[3].path, "src/appendix.md");
+        assert_eq!(report.summary.chapters.len(), 2);
+        assert_eq!(report.summary.chapters[0].children.len(), 2);
+    }
+
+    #[test]
+    fn missing_chapter_files_are_reported_as_input_error() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            root.join("book.toml"),
+            r#"[book]
+title = "Broken Book"
+src = "src"
+"#,
+        )
+        .expect("write book.toml");
+        fs::write(
+            src.join("SUMMARY.md"),
+            r#"# Summary
+
+- [Intro](intro.md)
+"#,
+        )
+        .expect("write summary");
+
+        let error = ingest_book(&IngestBookOptions {
+            root: root.to_path_buf(),
+            include_files: false,
+        })
+        .expect_err("must fail");
+        match error {
+            IngestBookError::MissingChapterFiles { paths } => {
+                assert_eq!(paths, vec!["src/intro.md".to_string()]);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
 }
 
 #[cfg(test)]
