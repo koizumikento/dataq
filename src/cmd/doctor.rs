@@ -427,6 +427,14 @@ pub fn pipeline_steps(profile: Option<DoctorProfile>) -> Vec<String> {
     ]
 }
 
+/// Ordered external-tool names used by `doctor` pipeline diagnostics.
+pub fn pipeline_external_tools(profile: Option<DoctorProfile>) -> Vec<String> {
+    probe_tool_specs(profile)
+        .iter()
+        .map(|spec| spec.name.to_string())
+        .collect()
+}
+
 /// Determinism guards planned for the `doctor` command.
 pub fn deterministic_guards(profile: Option<DoctorProfile>) -> Vec<String> {
     let mut guards = vec![
@@ -458,6 +466,8 @@ fn run_with_profile(profile: DoctorProfile) -> (DoctorCommandResponse, DoctorPip
     let capabilities = capability_reports(&tool_lookup, &CAPABILITY_SPECS);
     let profile_report = evaluate_profile(profile, &capabilities);
     let tool_versions = collect_tool_versions(&probed_tools);
+    // Profile mode exit semantics are profile-driven: pass/fail is determined by
+    // the selected profile requirement set rather than all base tools.
     let exit_code = if profile_report.satisfied { 0 } else { 3 };
 
     (
@@ -471,6 +481,13 @@ fn run_with_profile(profile: DoctorProfile) -> (DoctorCommandResponse, DoctorPip
         },
         DoctorPipelineTrace { tool_versions },
     )
+}
+
+fn probe_tool_specs(profile: Option<DoctorProfile>) -> &'static [ToolSpec] {
+    if profile.is_some() {
+        return &PROFILE_PROBE_TOOL_SPECS;
+    }
+    &BASE_TOOL_SPECS
 }
 
 fn collect_tool_versions(reports: &[DoctorToolReport]) -> BTreeMap<String, String> {

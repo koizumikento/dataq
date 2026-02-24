@@ -1010,8 +1010,8 @@ fn execute_doctor(args: &Map<String, Value>) -> ToolExecution {
             doctor::pipeline_steps(command_input.profile),
             doctor::deterministic_guards(command_input.profile),
         );
-        for tool in ["jq", "yq", "mlr"] {
-            report = report.mark_external_tool_used(tool);
+        for tool in doctor::pipeline_external_tools(command_input.profile) {
+            report = report.mark_external_tool_used(&tool);
         }
         execution.pipeline = pipeline_as_value(report).ok();
     }

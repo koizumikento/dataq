@@ -1722,8 +1722,8 @@ fn build_doctor_pipeline_report(profile: Option<doctor::DoctorProfile>) -> Pipel
         doctor::pipeline_steps(profile),
         doctor::deterministic_guards(profile),
     );
-    for tool in ["jq", "yq", "mlr"] {
-        report = report.mark_external_tool_used(tool);
+    for tool in doctor::pipeline_external_tools(profile) {
+        report = report.mark_external_tool_used(&tool);
     }
     report
 }

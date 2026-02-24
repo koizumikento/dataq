@@ -100,6 +100,11 @@ impl PipelineReport {
             .find(|tool| tool.name == tool_name)
         {
             tool.used = true;
+        } else {
+            self.external_tools.push(ExternalToolUsage {
+                name: tool_name.to_string(),
+                used: true,
+            });
         }
         self
     }
