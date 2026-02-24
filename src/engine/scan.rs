@@ -270,9 +270,7 @@ mod tests {
 
     #[test]
     fn strips_leading_dot_for_relative_paths() {
-        let raw = concat!(
-            "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"./notes/todo.txt\"},\"lines\":{\"text\":\"x\"},\"line_number\":1,\"submatches\":[{\"match\":{\"text\":\"x\"},\"start\":0,\"end\":1}]}}\n"
-        );
+        let raw = "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"./notes/todo.txt\"},\"lines\":{\"text\":\"x\"},\"line_number\":1,\"submatches\":[{\"match\":{\"text\":\"x\"},\"start\":0,\"end\":1}]}}\n";
         let parsed = parse_rg_json_stream(raw, Path::new("/repo")).expect("parse stream");
 
         assert_eq!(
@@ -289,9 +287,7 @@ mod tests {
 
     #[test]
     fn computes_relative_path_for_absolute_paths_outside_root() {
-        let raw = concat!(
-            "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"/tmp/dataq-scan/file.txt\"},\"lines\":{\"text\":\"x\"},\"line_number\":1,\"submatches\":[{\"match\":{\"text\":\"x\"},\"start\":0,\"end\":1}]}}\n"
-        );
+        let raw = "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"/tmp/dataq-scan/file.txt\"},\"lines\":{\"text\":\"x\"},\"line_number\":1,\"submatches\":[{\"match\":{\"text\":\"x\"},\"start\":0,\"end\":1}]}}\n";
         let parsed = parse_rg_json_stream(raw, Path::new("/Users/example/workspace/repo"))
             .expect("parse stream");
 

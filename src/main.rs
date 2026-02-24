@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Cursor, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 
 use clap::error::ErrorKind;
@@ -3084,7 +3084,7 @@ fn build_ingest_book_pipeline_report(
 
 fn build_scan_text_pipeline_report(
     _args: &ScanTextArgs,
-    path: &PathBuf,
+    path: &Path,
     trace: &scan::ScanTextPipelineTrace,
 ) -> PipelineReport {
     let mut report = ensure_external_tool(
