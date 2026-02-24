@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 18] = [
+const TOOL_ORDER: [&str; 19] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -15,6 +15,7 @@ const TOOL_ORDER: [&str; 18] = [
     "dataq.sdiff",
     "dataq.diff.source",
     "dataq.profile",
+    "dataq.ingest.doc",
     "dataq.join",
     "dataq.aggregate",
     "dataq.merge",
@@ -227,6 +228,13 @@ fn tools_call_minimal_success_for_all_tools() {
             "dataq.profile",
             json!({
                 "input": [{"id": 1}, {"id": 2}]
+            }),
+        ),
+        (
+            "dataq.ingest.doc",
+            json!({
+                "input": "# Overview\n\nSee [site](https://example.com/docs)\n",
+                "from": "md"
             }),
         ),
         (
@@ -957,6 +965,7 @@ impl FakeToolchain {
         write_fake_ingest_jq_script(bin_dir.join("jq"));
         write_fake_yq_script(bin_dir.join("yq"));
         write_fake_xh_script(bin_dir.join("xh"));
+        write_fake_pandoc_script(bin_dir.join("pandoc"));
 
         Self {
             _dir: dir,
@@ -980,7 +989,12 @@ if [ "$1" = "--version" ]; then
   printf 'jq-1.7\n'
   exit 0
 fi
-cat
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"pandoc-api-version"'; then
+  printf '{"meta":{"title":"Sample"},"headings":[],"links":[],"tables":[],"code_blocks":[]}'
+else
+  printf '%s' "$payload"
+fi
 "#;
     fs::write(&path, script).expect("write fake jq script");
     set_executable(&path);
@@ -1018,6 +1032,22 @@ X-Trace-Id: trace-123
 EOF
 "#;
     fs::write(&path, script).expect("write fake xh script");
+    set_executable(&path);
+}
+
+fn write_fake_pandoc_script(path: PathBuf) {
+    let script = r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    printf 'pandoc 3.5.0\n'
+    exit 0
+  fi
+done
+
+printf '{"pandoc-api-version":[1,23,1],"meta":{"title":{"t":"MetaString","c":"Sample"}},"blocks":[]}'
+"#;
+
+    fs::write(&path, script).expect("write fake pandoc script");
     set_executable(&path);
 }
 

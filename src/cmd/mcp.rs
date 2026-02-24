@@ -8,8 +8,8 @@ use serde_json::{Map, Value, json};
 use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
-    canon, contract, diff, doctor, emit, gate, ingest_api, ingest_yaml_jobs, join, merge, profile,
-    recipe, sdiff,
+    canon, contract, diff, doctor, emit, gate, ingest, ingest_api, ingest_yaml_jobs, join, merge,
+    profile, recipe, sdiff,
 };
 use crate::domain::ingest::IngestYamlJobsMode;
 use crate::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
@@ -17,6 +17,7 @@ use crate::domain::rules::AssertRules;
 use crate::engine::aggregate::AggregateMetric;
 use crate::engine::r#assert as assert_engine;
 use crate::engine::canon::{CanonOptions, canonicalize_values};
+use crate::engine::ingest::IngestDocInputFormat;
 use crate::engine::join::JoinHow;
 use crate::engine::merge::MergePolicy;
 use crate::io::{self, Format};
@@ -29,7 +30,7 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 18] = [
+const TOOL_ORDER: [&str; 19] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -39,6 +40,7 @@ const TOOL_ORDER: [&str; 18] = [
     "dataq.sdiff",
     "dataq.diff.source",
     "dataq.profile",
+    "dataq.ingest.doc",
     "dataq.join",
     "dataq.aggregate",
     "dataq.merge",
@@ -246,6 +248,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.sdiff" => execute_sdiff(args),
         "dataq.diff.source" => execute_diff_source(args),
         "dataq.profile" => execute_profile(args),
+        "dataq.ingest.doc" => execute_ingest_doc(args),
         "dataq.join" => execute_join(args),
         "dataq.aggregate" => execute_aggregate(args),
         "dataq.merge" => execute_merge(args),
@@ -1185,6 +1188,71 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
             profile::deterministic_guards(),
         );
         execution.pipeline = pipeline_as_value(pipeline).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_doc(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let from = match parse_required_string(args, &["from"], "from") {
+        Ok(value) => match parse_ingest_doc_format(value.as_str()) {
+            Ok(format) => format,
+            Err(message) => return input_usage_error(message),
+        },
+        Err(message) => return input_usage_error(message),
+    };
+    let input_path = match parse_optional_path(args, &["input_path", "input_file"], "input") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let input_text =
+        match parse_optional_string(args, &["input", "input_text", "input_inline"], "input") {
+            Ok(value) => value,
+            Err(message) => return input_usage_error(message),
+        };
+    if input_path.is_some() && input_text.is_some() {
+        return input_usage_error("`input` path and inline forms are mutually exclusive");
+    }
+    if input_path.is_none() && input_text.is_none() {
+        return input_usage_error("missing required `input`");
+    }
+
+    let command_args = ingest::IngestDocCommandArgs {
+        input: input_path.clone(),
+        from,
+    };
+    let stdin_payload = input_text.unwrap_or_default().into_bytes();
+    let response = ingest::run_with_stdin(&command_args, Cursor::new(stdin_payload));
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let source = if let Some(path) = input_path {
+            PipelineInputSource::path("input", path.display().to_string(), Some(from.as_str()))
+        } else {
+            PipelineInputSource {
+                label: "input".to_string(),
+                source: "inline".to_string(),
+                path: None,
+                format: Some(from.as_str().to_string()),
+            }
+        };
+        let report = PipelineReport::new(
+            "ingest.doc",
+            PipelineInput::new(vec![source]),
+            ingest::pipeline_steps(),
+            ingest::deterministic_guards(),
+        )
+        .mark_external_tool_used("jq");
+        execution.pipeline = pipeline_as_value(report).ok();
     }
 
     execution
@@ -2414,6 +2482,17 @@ fn pipeline_as_value(report: PipelineReport) -> Result<Value, String> {
         .map_err(|error| format!("failed to serialize pipeline report: {error}"))
 }
 
+fn parse_ingest_doc_format(value: &str) -> Result<IngestDocInputFormat, String> {
+    match value {
+        "md" => Ok(IngestDocInputFormat::Md),
+        "html" => Ok(IngestDocInputFormat::Html),
+        "docx" => Ok(IngestDocInputFormat::Docx),
+        "rst" => Ok(IngestDocInputFormat::Rst),
+        "latex" => Ok(IngestDocInputFormat::Latex),
+        _ => Err("`from` must be one of `md`, `html`, `docx`, `rst`, `latex`".to_string()),
+    }
+}
+
 fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, String> {
     match value {
         "canon" => Ok(contract::ContractCommand::Canon),
@@ -2425,6 +2504,7 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         "sdiff" => Ok(contract::ContractCommand::Sdiff),
         "diff-source" => Ok(contract::ContractCommand::DiffSource),
         "profile" => Ok(contract::ContractCommand::Profile),
+        "ingest-doc" => Ok(contract::ContractCommand::IngestDoc),
         "merge" => Ok(contract::ContractCommand::Merge),
         "doctor" => Ok(contract::ContractCommand::Doctor),
         "recipe" | "recipe-run" => Ok(contract::ContractCommand::RecipeRun),

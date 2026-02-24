@@ -59,6 +59,7 @@ fn contract_all_returns_deterministic_order() {
             "sdiff",
             "diff-source",
             "profile",
+            "ingest.doc",
             "merge",
             "doctor",
             "recipe-run",

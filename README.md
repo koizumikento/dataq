@@ -1,6 +1,6 @@
 # dataq
 
-`dataq` は、JSON / YAML / CSV を対象にした「決定的な前処理・検証・差分」CLIです。  
+`dataq` は、JSON / YAML / CSV とドキュメント入力を対象にした「決定的な前処理・検証・差分」CLIです。  
 AI処理そのものは行わず、エージェントやCIから呼びやすい機械可読I/Oを提供します。
 
 ## これは何か（3行要約）
@@ -20,7 +20,7 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 | 観点 | dataq | jq / yq / mlr |
 | --- | --- | --- |
 | 主目的 | よく使う複合パイプラインを契約化して再利用 | 抽出・変換・集計の表現力 |
-| 実行モデル | Rustオーケストレータ + 必要時 `jq/yq/mlr` 連携 | 各ツールのDSL/フィルタ実行 |
+| 実行モデル | Rustオーケストレータ + 必要時 `pandoc/jq/yq/mlr` 連携 | 各ツールのDSL/フィルタ実行 |
 | 出力契約 | 機械可読JSONを既定、スキーマ化しやすい | フィルタ次第で形式が変動 |
 | 終了コード契約 | `0/2/3/1` を意味付きで固定 | ツールごとに意味が異なる |
 | 決定性ガード | キー順・時刻正規化・差分順序などを固定 | フィルタ/オプション次第 |
@@ -71,6 +71,7 @@ dataq [--emit-pipeline] <command> [options]
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `diff source` | 2ソース（preset/path）を解決して構造差分を出力 | `--left <preset-or-path>` `--right <preset-or-path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
+| `ingest doc` | ドキュメントを共通JSONスキーマへ抽出 | `--input <path|->` `--from <md|html|docx|rst|latex>` |
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
@@ -122,6 +123,9 @@ dataq sdiff --left before.jsonl --right after.jsonl
 
 # 品質プロファイル
 dataq profile --from json --input out.jsonl
+
+# ドキュメント抽出（pandoc AST -> jq 投影）
+dataq ingest doc --input README.md --from md
 
 # 内部結合（idキー）
 dataq join --left users.json --right scores.json --on id --how inner
@@ -425,6 +429,16 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 - 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
 - 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
+### 7. `ingest doc`
+
+ドキュメント入力（Markdown/HTML/DOCX/reStructuredText/LaTeX）を、固定スキーマ JSON へ抽出します。
+
+- `--input <path|->`: 入力ファイルまたは stdin（`-`）
+- `--from <md|html|docx|rst|latex>`: 入力フォーマット
+- stage1: `pandoc -f <from> -t json` で AST 化
+- stage2: `jq` で `meta`, `headings`, `links`, `tables`, `code_blocks` へ投影
+- `pandoc` 不在・parse失敗・不正入力は終了コード `3`
+- `--emit-pipeline` 時のステップは `ingest_doc_pandoc_ast`, `ingest_doc_jq_project`
 ### 8. `merge`
 
 複数の JSON/YAML 入力をポリシー指定で決定的にマージ。
@@ -531,12 +545,12 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
+- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
   - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
@@ -582,6 +596,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.sdiff`
   - `dataq.diff.source`
   - `dataq.profile`
+  - `dataq.ingest.doc`
   - `dataq.join`
   - `dataq.aggregate`
   - `dataq.merge`
