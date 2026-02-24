@@ -12,6 +12,7 @@ dataq [--emit-pipeline] <command> [options]
 
 - `canon`: 入力を決定的に正規化し、JSON/JSONLへ変換
 - `ingest api`: HTTP API 応答を `xh -> jq` で決定的JSONへ正規化
+- `ingest yaml-jobs`: YAMLのCIジョブ定義を正規化JSON配列へ変換
 - `assert`: ルールまたはJSON Schemaで検証
 - `gate schema`: JSON Schemaで品質ゲートを実行（`assert --schema` ラッパー）
 - `gate policy`: ルールベース品質ゲートを実行（`matched/violations/details`）
@@ -32,12 +33,12 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|ingest-api|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
+  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
   - `--command recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `ingest-api`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -93,6 +94,7 @@ dataq [--emit-pipeline] <command> [options]
 - `tools/list` の tool 順序は固定:
   - `dataq.canon`
   - `dataq.ingest.api`
+  - `dataq.ingest.yaml_jobs`
   - `dataq.assert`
   - `dataq.gate.schema`
   - `dataq.gate.policy`
@@ -188,6 +190,7 @@ dataq [--emit-pipeline] <command> [options]
 - `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
 - `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義を `yq -> jq -> mlr` の固定3段でジョブ単位レコードへ正規化してから `--rules` 検証可能（`yq`/`jq`/`mlr` 必須）
+- 継続利用向けには `dataq ingest yaml-jobs` で正規化結果を固定してから `dataq assert --rules ...` へ接続する運用を推奨
 
 ## `gate schema` 契約（MVP）
 
@@ -313,6 +316,22 @@ dataq [--emit-pipeline] <command> [options]
   - `ingest_api_xh_fetch`
   - `ingest_api_jq_normalize`
 - `external_tools` には `jq` と `xh` の使用状態が反映される
+
+## `ingest yaml-jobs` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq ingest yaml-jobs --input <path|-> --mode <github-actions|gitlab-ci|generic-map>`
+- 出力: JSON 配列（stdout）
+- 実行方式:
+  - `yq` でジョブ定義を抽出
+  - `jq` でモード別の正規化フィールドへ変換
+  - `mlr` でジョブ識別子（`job_id`/`job_name`）順へ整列
+- `--emit-pipeline` 指定時の `steps`:
+  - `ingest_yaml_jobs_yq_extract`
+  - `ingest_yaml_jobs_jq_normalize`
+  - `ingest_yaml_jobs_mlr_shape`
+- 異常時契約:
+  - malformed YAML、未知 `--mode`、`jq`/`yq`/`mlr` 不足は exit `3`
 
 ### `sdiff` のCIゲート拡張
 

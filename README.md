@@ -64,6 +64,7 @@ dataq [--emit-pipeline] <command> [options]
 | --- | --- | --- |
 | `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>`（stdin時は省略可） |
 | `ingest api` | HTTP API 応答を `xh -> jq` で決定的JSONへ正規化 | `--url <http(s)://...>` |
+| `ingest yaml-jobs` | YAMLのCIジョブ定義を正規化JSON配列へ変換 | `--input <path|->` `--mode <github-actions|gitlab-ci|generic-map>` |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
 | `gate schema` | JSON Schema で品質ゲートを実行（`assert --schema` の専用ラッパー） | `--schema <path>` |
 | `gate policy` | ルールベース品質ゲートを実行（違反詳細を決定的順序で出力） | `--rules <path>` |
@@ -102,6 +103,10 @@ dataq assert --input out.jsonl --rules rules.yaml
 
 # API応答を取得して正規化
 dataq ingest api --url https://example.test/items --header 'accept:application/json'
+
+# YAMLのCIジョブ定義を正規化
+dataq ingest yaml-jobs --input .github/workflows/ci.yml --mode github-actions > jobs.json
+dataq assert --input jobs.json --rules examples/assert-rules/github-actions/jobs.rules.yaml
 
 # JSON Schema 検証
 dataq assert --input out.jsonl --schema schema.json
@@ -338,6 +343,17 @@ dataq assert \
   - `ingest-notes`
   - `ingest-book`
 
+### 2.3 `ingest yaml-jobs`
+
+YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決定的JSON配列へ変換します。
+
+- コマンド: `dataq ingest yaml-jobs --input <path|-> --mode <github-actions|gitlab-ci|generic-map>`
+- `--mode github-actions`: `job_id`, `runs_on`, `steps_count`, `uses_unpinned_action`
+- `--mode gitlab-ci`: `job_name`, `stage`, `script_count`, `uses_only_except`
+- `--mode generic-map`: `job_name`, `field_count`, `has_stage`, `has_script`
+- `--emit-pipeline` の `steps`: `ingest_yaml_jobs_yq_extract`, `ingest_yaml_jobs_jq_normalize`, `ingest_yaml_jobs_mlr_shape`
+- malformed YAML、未知 mode、`jq`/`yq`/`mlr` 不足は終了コード `3`
+
 ### 3. `sdiff`
 
 変換前後または2データセット間の構造差分を返す。
@@ -515,12 +531,12 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|ingest-api|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
+- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
   - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-- 順序: `canon`, `ingest-api`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
@@ -559,6 +575,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
 - `tools/list` のツール順序は固定:
   - `dataq.canon`
   - `dataq.ingest.api`
+  - `dataq.ingest.yaml_jobs`
   - `dataq.assert`
   - `dataq.gate.schema`
   - `dataq.gate.policy`

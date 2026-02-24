@@ -16,6 +16,8 @@ mod gate_policy_flow;
 mod gate_schema_flow;
 #[path = "integration/ingest_api_flow.rs"]
 mod ingest_api_flow;
+#[path = "integration/ingest_yaml_jobs_flow.rs"]
+mod ingest_yaml_jobs_flow;
 #[path = "integration/io_format_resolution.rs"]
 mod io_format_resolution;
 #[path = "integration/io_roundtrip.rs"]

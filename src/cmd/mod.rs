@@ -7,6 +7,7 @@ pub mod doctor;
 pub mod emit;
 pub mod gate;
 pub mod ingest_api;
+pub mod ingest_yaml_jobs;
 pub mod join;
 pub mod mcp;
 pub mod merge;

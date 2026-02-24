@@ -9,6 +9,8 @@ const GITHUB_ACTIONS_JOBS_EXTRACT_FILTER: &str =
 
 const GITLAB_CI_JOBS_EXTRACT_FILTER: &str =
     r#"[.[] | to_entries | sort_by(.key) | .[] | {"job_name": .key, "job": .value}]"#;
+const GENERIC_MAP_JOBS_EXTRACT_FILTER: &str =
+    r#"[.[] | to_entries | sort_by(.key) | .[] | {"job_name": .key, "job": .value}]"#;
 
 #[derive(Debug, Error)]
 pub enum YqError {
@@ -34,6 +36,10 @@ pub fn extract_github_actions_jobs(values: &[Value]) -> Result<Vec<Value>, YqErr
 
 pub fn extract_gitlab_ci_jobs(values: &[Value]) -> Result<Vec<Value>, YqError> {
     run_filter(values, GITLAB_CI_JOBS_EXTRACT_FILTER)
+}
+
+pub fn extract_generic_map_jobs(values: &[Value]) -> Result<Vec<Value>, YqError> {
+    run_filter(values, GENERIC_MAP_JOBS_EXTRACT_FILTER)
 }
 
 fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, YqError> {

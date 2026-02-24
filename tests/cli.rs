@@ -14,6 +14,8 @@ mod entry_cli;
 mod gate_cli;
 #[path = "cli/ingest_api_cli.rs"]
 mod ingest_api_cli;
+#[path = "cli/ingest_yaml_jobs_cli.rs"]
+mod ingest_yaml_jobs_cli;
 #[path = "cli/join_cli.rs"]
 mod join_cli;
 #[path = "cli/mcp_cli.rs"]

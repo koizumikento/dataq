@@ -60,6 +60,26 @@ map(
 )
 "#;
 
+const GENERIC_MAP_JOBS_FILTER: &str = r#"
+map(
+  if type != "object" then
+    error("normalize mode `generic-map` expects object rows from yq stage")
+  else . end
+  | .job_name as $job_name
+  | if ($job_name | type) != "string" then
+      error("normalize mode `generic-map` expects `job_name` string from yq stage")
+    else . end
+  | .job as $job
+  | if ($job | type) != "object" then empty else . end
+  | {
+      job_name: $job_name,
+      field_count: ($job | keys | length),
+      has_stage: ($job | has("stage")),
+      has_script: ($job | has("script"))
+    }
+)
+"#;
+
 const INGEST_API_NORMALIZE_FILTER: &str = r#"
 def allowlist: ["cache-control","content-type","date","etag","last-modified"];
 {
@@ -111,6 +131,10 @@ pub fn normalize_github_actions_jobs(values: &[Value]) -> Result<Vec<Value>, JqE
 
 pub fn normalize_gitlab_ci_jobs(values: &[Value]) -> Result<Vec<Value>, JqError> {
     run_filter(values, GITLAB_CI_JOBS_FILTER)
+}
+
+pub fn normalize_generic_map_jobs(values: &[Value]) -> Result<Vec<Value>, JqError> {
+    run_filter(values, GENERIC_MAP_JOBS_FILTER)
 }
 
 pub fn normalize_ingest_api_response(value: &Value) -> Result<Value, JqError> {
