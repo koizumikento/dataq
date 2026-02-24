@@ -56,7 +56,7 @@ const NO_FIXED_ROOT_FIELDS: &[&str] = &[];
 const ASSERT_FIELDS: &[&str] = &["matched", "mismatch_count", "mismatches"];
 const SDIFF_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values"];
 const PROFILE_FIELDS: &[&str] = &["record_count", "field_count", "fields"];
-const DOCTOR_FIELDS: &[&str] = &["tools", "capabilities"];
+const DOCTOR_FIELDS: &[&str] = &["tools"];
 const RECIPE_FIELDS: &[&str] = &["matched", "exit_code", "steps"];
 
 const CANON_NOTES: &[&str] = &[
