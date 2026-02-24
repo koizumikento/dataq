@@ -26,6 +26,8 @@ mod merge_flow;
 mod profile_determinism;
 #[path = "integration/recipe_lock_flow.rs"]
 mod recipe_lock_flow;
+#[path = "integration/recipe_replay_flow.rs"]
+mod recipe_replay_flow;
 #[path = "integration/util_sort.rs"]
 mod util_sort;
 #[path = "integration/util_time.rs"]

@@ -27,7 +27,7 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 15] = [
+const TOOL_ORDER: [&str; 16] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
@@ -43,6 +43,7 @@ const TOOL_ORDER: [&str; 15] = [
     "dataq.emit.plan",
     "dataq.recipe.run",
     "dataq.recipe.lock",
+    "dataq.recipe.replay",
 ];
 
 #[derive(Debug, Clone)]
@@ -247,6 +248,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.emit.plan" => execute_emit_plan(args),
         "dataq.recipe.run" => execute_recipe_run(args),
         "dataq.recipe.lock" => execute_recipe_lock(args),
+        "dataq.recipe.replay" => execute_recipe_replay(args),
         unknown => input_usage_error(format!("unknown tool `{unknown}`")),
     }
 }
@@ -1561,6 +1563,75 @@ fn execute_recipe_lock(args: &Map<String, Value>) -> ToolExecution {
         for tool_name in trace.tool_versions.keys() {
             report = report.mark_external_tool_used(tool_name);
         }
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_recipe_replay(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let file_path = match parse_optional_path(args, &["file_path", "file", "recipe_path"], "file") {
+        Ok(Some(path)) => path,
+        Ok(None) => return input_usage_error("missing required `file`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let lock_path = match parse_optional_path(args, &["lock_path", "lock"], "lock") {
+        Ok(Some(path)) => path,
+        Ok(None) => return input_usage_error("missing required `lock`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let strict = match parse_bool(args, &["strict"], false, "strict") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let (response, trace) = recipe::replay_with_trace(&recipe::RecipeReplayCommandArgs {
+        file_path: file_path.clone(),
+        lock_path: lock_path.clone(),
+        strict,
+    });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let steps = if trace.steps.is_empty() {
+            vec![
+                "recipe_replay_parse".to_string(),
+                "recipe_replay_verify_lock".to_string(),
+                "recipe_replay_execute".to_string(),
+            ]
+        } else {
+            trace.steps
+        };
+        let report = PipelineReport::new(
+            "recipe",
+            PipelineInput::new(vec![
+                PipelineInputSource::path(
+                    "recipe",
+                    file_path.display().to_string(),
+                    io::resolve_input_format(None, Some(file_path.as_path()))
+                        .ok()
+                        .map(Format::as_str),
+                ),
+                PipelineInputSource::path(
+                    "lock",
+                    lock_path.display().to_string(),
+                    io::resolve_input_format(None, Some(lock_path.as_path()))
+                        .ok()
+                        .map(Format::as_str),
+                ),
+            ]),
+            steps,
+            recipe::deterministic_guards_replay(),
+        );
         execution.pipeline = pipeline_as_value(report).ok();
     }
 

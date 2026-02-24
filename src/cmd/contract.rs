@@ -115,6 +115,7 @@ const DOCTOR_NOTES: &[&str] = &[
 ];
 const DOCTOR_EXIT_CODE_3: &str = "without `--profile`: missing/non-executable `jq|yq|mlr`; with `--profile`: selected profile requirements are unsatisfied";
 const RECIPE_RUN_NOTES: &[&str] = &[
+    "This contract describes `recipe run` output.",
     "`steps` preserves recipe definition order.",
     "Step-level unmatched results map to exit code 2.",
 ];

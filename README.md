@@ -75,6 +75,7 @@ dataq [--emit-pipeline] <command> [options]
 | `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
 | `recipe lock` | レシピ再現実行用のロック情報を生成 | `--file <path>` |
+| `recipe replay` | lock 制約を検証してレシピを再実行 | `--file <recipe-path>` `--lock <lock-path>` |
 | `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
 | `emit plan` | サブコマンドの静的実行計画（stage/dependency/tool）を出力 | `--command <name>` |
 | `mcp` | 1リクエスト単位の MCP(JSON-RPC 2.0) サーバーモード | stdin で JSON-RPC リクエストを1件入力 |
@@ -136,6 +137,9 @@ dataq contract --command assert
 
 # assert の静的ステージ計画を取得
 dataq emit plan --command assert --args '["--normalize","github-actions-jobs"]'
+
+# lock 制約付きでレシピを再実行（ミスマッチでも実行継続）
+dataq recipe replay --file recipe.json --lock recipe.lock.json
 
 # MCP単発リクエスト（tools/list）
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | dataq mcp
@@ -484,19 +488,39 @@ steps:
   - レシピ不正 / step引数不正 / ツール解決失敗は exit `3`
 - `--emit-pipeline` 有効時は `recipe_lock_parse`, `recipe_lock_probe_tools`, `recipe_lock_fingerprint` を stderr JSON へ出力
 
-### 12. `contract`
+### 12. `recipe replay`
+
+lock ファイルを検証したうえで `recipe run` と同じレシピ実行を行います。
+
+- 実行コマンド: `dataq recipe replay --file <recipe-path> --lock <lock-path> [--strict]`
+- lock 制約は固定順で検証:
+  - `lock.version`
+  - `lock.command_graph_hash`
+  - `lock.args_hash`
+  - `lock.dataq_version`
+  - `lock.tool_versions.<tool>`
+- stdout は実行サマリ JSON（`matched`, `exit_code`, `lock_check`, `steps`）を返す
+- `--strict` 指定時:
+  - lock mismatch は exit `2`（validation mismatch、実行はスキップ）
+- 非 strict 時:
+  - lock mismatch を `lock_check.mismatches` に報告しつつ実行継続
+  - 実行された step の検証不一致は従来どおり exit `2`
+- `--emit-pipeline` 有効時は `recipe_replay_parse`, `recipe_replay_verify_lock`, `recipe_replay_execute` を stderr JSON へ出力
+
+### 13. `contract`
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
 - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
+  - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
 - 順序: `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
-### 13. `emit plan`
+### 14. `emit plan`
 
 サブコマンドの静的実行計画を、実行せずに機械可読JSONで取得します（read-only）。
 
@@ -516,7 +540,7 @@ steps:
   - `emit plan`: 実行前の静的計画（外部ツール実行なし）
   - `--emit-pipeline`: 実行時に観測した診断（stderr）
 
-### 14. `mcp`
+### 15. `mcp`
 
 MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理します。
 
@@ -544,6 +568,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.emit.plan`
   - `dataq.recipe.run`
   - `dataq.recipe.lock`
+  - `dataq.recipe.replay`
 - `tools/call` レスポンス:
   - `structuredContent.exit_code`
   - `structuredContent.payload`

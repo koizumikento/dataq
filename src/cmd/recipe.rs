@@ -14,6 +14,14 @@ pub struct RecipeCommandArgs {
     pub base_dir: Option<PathBuf>,
 }
 
+/// Input arguments for `recipe replay` command execution API.
+#[derive(Debug, Clone)]
+pub struct RecipeReplayCommandArgs {
+    pub file_path: PathBuf,
+    pub lock_path: PathBuf,
+    pub strict: bool,
+}
+
 /// Structured command response that carries exit-code mapping and JSON payload.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RecipeCommandResponse {
@@ -100,30 +108,12 @@ pub fn run_with_trace(args: &RecipeCommandArgs) -> (RecipeCommandResponse, Recip
                 },
             )
         }
-        Err(error) => {
-            let response = match error.kind {
-                RecipeExecutionErrorKind::InputUsage(message) => RecipeCommandResponse {
-                    exit_code: 3,
-                    payload: json!({
-                        "error": "input_usage_error",
-                        "message": message,
-                    }),
-                },
-                RecipeExecutionErrorKind::Internal(message) => RecipeCommandResponse {
-                    exit_code: 1,
-                    payload: json!({
-                        "error": "internal_error",
-                        "message": message,
-                    }),
-                },
-            };
-            (
-                response,
-                RecipePipelineTrace {
-                    steps: error.pipeline_steps,
-                },
-            )
-        }
+        Err(error) => (
+            map_execution_error_response(error.kind),
+            RecipePipelineTrace {
+                steps: error.pipeline_steps,
+            },
+        ),
     }
 }
 
@@ -168,32 +158,81 @@ pub fn lock_with_trace(
                 Some(execution.serialized),
             )
         }
-        Err(error) => {
-            let response = match error.kind {
-                RecipeExecutionErrorKind::InputUsage(message) => RecipeCommandResponse {
-                    exit_code: 3,
-                    payload: json!({
-                        "error": "input_usage_error",
-                        "message": message,
-                    }),
-                },
-                RecipeExecutionErrorKind::Internal(message) => RecipeCommandResponse {
-                    exit_code: 1,
-                    payload: json!({
-                        "error": "internal_error",
-                        "message": message,
-                    }),
-                },
+        Err(error) => (
+            map_execution_error_response(error.kind),
+            RecipeLockPipelineTrace {
+                steps: error.pipeline_steps,
+                tool_versions: BTreeMap::new(),
+            },
+            None,
+        ),
+    }
+}
+
+pub fn replay_with_trace(
+    args: &RecipeReplayCommandArgs,
+) -> (RecipeCommandResponse, RecipePipelineTrace) {
+    let execution = recipe::replay(
+        args.file_path.as_path(),
+        args.lock_path.as_path(),
+        args.strict,
+    );
+
+    match execution {
+        Ok(execution) => {
+            let exit_code = execution.report.exit_code;
+            let payload = match serde_json::to_value(execution.report) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return (
+                        RecipeCommandResponse {
+                            exit_code: 1,
+                            payload: json!({
+                                "error": "internal_error",
+                                "message": format!(
+                                    "failed to serialize recipe replay report: {error}"
+                                ),
+                            }),
+                        },
+                        RecipePipelineTrace {
+                            steps: execution.pipeline_steps,
+                        },
+                    );
+                }
             };
+
             (
-                response,
-                RecipeLockPipelineTrace {
-                    steps: error.pipeline_steps,
-                    tool_versions: BTreeMap::new(),
+                RecipeCommandResponse { exit_code, payload },
+                RecipePipelineTrace {
+                    steps: execution.pipeline_steps,
                 },
-                None,
             )
         }
+        Err(error) => (
+            map_execution_error_response(error.kind),
+            RecipePipelineTrace {
+                steps: error.pipeline_steps,
+            },
+        ),
+    }
+}
+
+fn map_execution_error_response(error: RecipeExecutionErrorKind) -> RecipeCommandResponse {
+    match error {
+        RecipeExecutionErrorKind::InputUsage(message) => RecipeCommandResponse {
+            exit_code: 3,
+            payload: json!({
+                "error": "input_usage_error",
+                "message": message,
+            }),
+        },
+        RecipeExecutionErrorKind::Internal(message) => RecipeCommandResponse {
+            exit_code: 1,
+            payload: json!({
+                "error": "internal_error",
+                "message": message,
+            }),
+        },
     }
 }
 
@@ -219,4 +258,15 @@ pub fn deterministic_guards_lock() -> Vec<String> {
 /// Backward-compatible alias for recipe run guards.
 pub fn deterministic_guards() -> Vec<String> {
     deterministic_guards_run()
+}
+
+/// Determinism guards planned for the `recipe replay` command.
+pub fn deterministic_guards_replay() -> Vec<String> {
+    vec![
+        "rust_native_execution".to_string(),
+        "no_shell_interpolation_for_user_input".to_string(),
+        "recipe_replay_lock_constraints_checked_in_fixed_order".to_string(),
+        "recipe_step_order_from_definition".to_string(),
+        "recipe_step_handoff_in_memory".to_string(),
+    ]
 }
