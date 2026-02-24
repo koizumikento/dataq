@@ -105,6 +105,42 @@ def allowlist: ["cache-control","content-type","date","etag","last-modified"];
 }
 "#;
 
+const INGEST_NOTES_FILTER: &str = r#"
+def to_str:
+  if . == null then "" else tostring end;
+
+def normalize_tags:
+  if . == null then []
+  elif type == "array" then map(select(. != null) | tostring)
+  elif type == "string" then [.]
+  else []
+  end
+  | map(select(length > 0))
+  | unique
+  | sort;
+
+def normalized_note:
+  . as $note
+  | {
+      id: (($note.id // $note.note_id // $note.uuid // $note.slug // $note.path // "") | to_str),
+      title: (($note.title // $note.name // "") | to_str),
+      body: (($note.body // $note.content // $note.text // "") | to_str),
+      tags: (($note.tags // $note.tag_list // $note.metadata.tags // []) | normalize_tags),
+      created_at: (($note.created_at // $note.created // $note.timestamp // $note.date // "") | to_str),
+      updated_at: (
+        ($note.updated_at // $note.updated // $note.modified_at // null) as $updated
+        | if $updated == null then null else ($updated | to_str) end
+      ),
+      metadata: {
+        notebook: (($note.notebook // $note.folder // $note.collection // null) | if . == null then null else tostring end),
+        path: (($note.path // $note.file // $note.filename // null) | if . == null then null else tostring end)
+      }
+    }
+  | .metadata |= with_entries(select(.value != null));
+
+map(normalized_note)
+"#;
+
 const INGEST_DOC_PROJECT_FILTER: &str = r#"
 def trim:
   gsub("^[[:space:]]+";"")
@@ -246,6 +282,10 @@ pub fn normalize_ingest_api_response(value: &Value) -> Result<Value, JqError> {
         Value::Object(_) => Ok(parsed),
         _ => Err(JqError::OutputObjectShape),
     }
+}
+
+pub fn normalize_ingest_notes(values: &[Value]) -> Result<Vec<Value>, JqError> {
+    run_filter(values, INGEST_NOTES_FILTER)
 }
 
 pub fn project_document_ast(ast: &Value) -> Result<Value, JqError> {

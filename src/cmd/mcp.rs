@@ -17,6 +17,7 @@ use crate::domain::rules::AssertRules;
 use crate::engine::aggregate::AggregateMetric;
 use crate::engine::r#assert as assert_engine;
 use crate::engine::canon::{CanonOptions, canonicalize_values};
+use crate::engine::ingest as ingest_engine;
 use crate::engine::ingest::IngestDocInputFormat;
 use crate::engine::join::JoinHow;
 use crate::engine::merge::MergePolicy;
@@ -30,7 +31,7 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 19] = [
+const TOOL_ORDER: [&str; 20] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -41,6 +42,7 @@ const TOOL_ORDER: [&str; 19] = [
     "dataq.diff.source",
     "dataq.profile",
     "dataq.ingest.doc",
+    "dataq.ingest.notes",
     "dataq.join",
     "dataq.aggregate",
     "dataq.merge",
@@ -249,6 +251,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.diff.source" => execute_diff_source(args),
         "dataq.profile" => execute_profile(args),
         "dataq.ingest.doc" => execute_ingest_doc(args),
+        "dataq.ingest.notes" => execute_ingest_notes(args),
         "dataq.join" => execute_join(args),
         "dataq.aggregate" => execute_aggregate(args),
         "dataq.merge" => execute_merge(args),
@@ -1261,6 +1264,67 @@ fn execute_ingest_doc(args: &Map<String, Value>) -> ToolExecution {
         )
         .mark_external_tool_used("pandoc")
         .mark_external_tool_used("jq");
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_notes(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let tags = match parse_string_list(args, &["tag", "tags"], "tag") {
+        Ok(values) => values,
+        Err(message) => return input_usage_error(message),
+    };
+    let since = match parse_optional_string(args, &["since"], "since") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let until = match parse_optional_string(args, &["until"], "until") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let to = match parse_optional_string(args, &["to"], "to") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    if let Some(to) = to {
+        if !matches!(to.as_str(), "json" | "jsonl") {
+            return input_usage_error("`to` must be `json` or `jsonl`");
+        }
+    }
+
+    let time_range = match ingest_engine::resolve_time_range(since.as_deref(), until.as_deref()) {
+        Ok(range) => range,
+        Err(error) => return input_usage_error(error.to_string()),
+    };
+    let command_args = ingest::IngestNotesCommandArgs {
+        tags,
+        since: time_range.since,
+        until: time_range.until,
+    };
+    let (response, trace) = ingest::run_notes_with_trace(&command_args);
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "ingest.notes",
+            PipelineInput::new(Vec::new()),
+            ingest::notes_pipeline_steps(),
+            ingest::notes_deterministic_guards(),
+        );
+        for used_tool in &trace.used_tools {
+            report = report.mark_external_tool_used(used_tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
         execution.pipeline = pipeline_as_value(report).ok();
     }
 
