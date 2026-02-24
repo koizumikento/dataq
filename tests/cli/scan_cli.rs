@@ -81,6 +81,36 @@ fn scan_text_no_match_returns_empty_payload() {
 }
 
 #[test]
+fn scan_text_files_with_matches_uses_pre_truncation_match_set() {
+    let toolchain = FakeRgToolchain::new();
+    let scan_root = tempdir_in(std::env::current_dir().expect("cwd")).expect("scan root");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_RG_BIN", &toolchain.rg_bin)
+        .args([
+            "scan",
+            "text",
+            "--pattern",
+            "multi",
+            "--max-matches",
+            "1",
+            "--path",
+            scan_root.path().to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run scan text");
+
+    assert_eq!(output.status.code(), Some(0));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    let matches = payload["matches"].as_array().expect("matches array");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(payload["summary"]["total_matches"], json!(2));
+    assert_eq!(payload["summary"]["returned_matches"], json!(1));
+    assert_eq!(payload["summary"]["files_with_matches"], json!(2));
+    assert_eq!(payload["summary"]["truncated"], json!(true));
+}
+
+#[test]
 fn scan_text_invalid_regex_maps_to_exit_three() {
     let toolchain = FakeRgToolchain::new();
     let scan_root = tempdir().expect("scan root");

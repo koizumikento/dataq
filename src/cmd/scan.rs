@@ -217,18 +217,17 @@ pub fn run_with_trace(
     }
 
     let total_matches = matches.len();
+    let files_with_matches = matches
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
     if let Some(limit) = args.max_matches {
         if matches.len() > limit {
             matches.truncate(limit);
         }
     }
     let returned_matches = matches.len();
-
-    let files_with_matches = matches
-        .iter()
-        .map(|entry| entry.path.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
     let truncated = returned_matches < total_matches;
     let summary = ScanTextSummary {
         total_matches,
