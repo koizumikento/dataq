@@ -3112,10 +3112,12 @@ fn ensure_external_tool(mut report: PipelineReport, tool_name: &str) -> Pipeline
         .iter()
         .any(|tool| tool.name == tool_name)
     {
-        report.external_tools.push(dataq::domain::report::ExternalToolUsage {
-            name: tool_name.to_string(),
-            used: false,
-        });
+        report
+            .external_tools
+            .push(dataq::domain::report::ExternalToolUsage {
+                name: tool_name.to_string(),
+                used: false,
+            });
     }
     report
 }
