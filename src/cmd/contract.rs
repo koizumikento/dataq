@@ -115,10 +115,9 @@ const DOCTOR_NOTES: &[&str] = &[
 ];
 const DOCTOR_EXIT_CODE_3: &str = "without `--profile`: missing/non-executable `jq|yq|mlr`; with `--profile`: selected profile requirements are unsatisfied";
 const RECIPE_RUN_NOTES: &[&str] = &[
+    "This contract describes `recipe run` output.",
     "`steps` preserves recipe definition order.",
     "Step-level unmatched results map to exit code 2.",
-    "`recipe replay` adds `lock_check` and verifies lock constraints in fixed order.",
-    "`recipe replay --strict` maps lock mismatches to exit code 3.",
 ];
 const RECIPE_LOCK_NOTES: &[&str] = &[
     "`tool_versions` keys are deterministically sorted by tool name (`jq`, `mlr`, `yq`).",

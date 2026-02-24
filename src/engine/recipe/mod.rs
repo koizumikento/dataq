@@ -761,20 +761,27 @@ fn verify_lock_constraints(
     }
 
     for tool_name in ordered_lock_tool_names(lock) {
-        let expected = lock
-            .tool_versions
-            .get(tool_name.as_str())
-            .expect("ordered lock tools must exist in map");
         let actual = actual_tool_versions
             .get(tool_name.as_str())
             .cloned()
             .unwrap_or_else(|| format!("error: missing probed value for tool `{tool_name}`"));
-        if *expected != actual {
-            mismatches.push(RecipeReplayLockMismatchReport {
-                constraint: format!("lock.tool_versions.{tool_name}"),
-                expected: expected.clone(),
-                actual,
-            });
+        match lock.tool_versions.get(tool_name.as_str()) {
+            Some(expected) => {
+                if *expected != actual {
+                    mismatches.push(RecipeReplayLockMismatchReport {
+                        constraint: format!("lock.tool_versions.{tool_name}"),
+                        expected: expected.clone(),
+                        actual,
+                    });
+                }
+            }
+            None => {
+                mismatches.push(RecipeReplayLockMismatchReport {
+                    constraint: format!("lock.tool_versions.{tool_name}"),
+                    expected: "required key in lock.tool_versions".to_string(),
+                    actual: "missing".to_string(),
+                });
+            }
         }
     }
 
@@ -787,12 +794,10 @@ fn verify_lock_constraints(
 }
 
 fn ordered_lock_tool_names(lock: &RecipeLockFile) -> Vec<String> {
-    let mut names = Vec::new();
-    for tool in RECIPE_LOCK_TOOL_ORDER {
-        if lock.tool_versions.contains_key(tool) {
-            names.push(tool.to_string());
-        }
-    }
+    let mut names: Vec<String> = RECIPE_LOCK_TOOL_ORDER
+        .iter()
+        .map(|tool| (*tool).to_string())
+        .collect();
     for tool in lock.tool_versions.keys() {
         if !RECIPE_LOCK_TOOL_ORDER.contains(&tool.as_str()) {
             names.push(tool.clone());

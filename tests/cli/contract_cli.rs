@@ -140,6 +140,40 @@ fn contract_doctor_command_exit_three_describes_profile_aware_semantics() {
 }
 
 #[test]
+fn contract_recipe_run_command_matches_recipe_run_shape() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "recipe-run"])
+        .output()
+        .expect("run contract recipe-run");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], json!("recipe-run"));
+    assert_eq!(payload["schema"], json!("dataq.recipe.run.output.v1"));
+    assert_eq!(
+        payload["output_fields"],
+        json!(["matched", "exit_code", "steps"])
+    );
+    assert!(
+        !payload["output_fields"]
+            .as_array()
+            .expect("output_fields array")
+            .iter()
+            .any(|field| field == "lock_check")
+    );
+    assert!(
+        !payload["notes"]
+            .as_array()
+            .expect("notes array")
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .any(|note| note.contains("recipe replay") || note.contains("lock_check"))
+    );
+}
+
+#[test]
 fn contract_recipe_lock_command_reports_lock_output_shape() {
     let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["contract", "--command", "recipe-lock"])

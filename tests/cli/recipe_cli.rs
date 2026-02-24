@@ -979,6 +979,71 @@ fn recipe_replay_tool_version_mismatch_strict_returns_exit_three() {
 }
 
 #[test]
+fn recipe_replay_missing_required_tool_version_key_strict_returns_exit_three() {
+    let dir = tempdir().expect("temp dir");
+    let toolchain = FakeToolchain::new("jq-1.7", "yq 4.35.2", "mlr 6.13.0");
+    let input_path = dir.path().join("input.json");
+    let recipe_path = dir.path().join("recipe.json");
+    let lock_path = dir.path().join("recipe.lock.json");
+
+    fs::write(&input_path, r#"[{"id":"1"}]"#).expect("write input");
+    let recipe_value = json!({
+      "version": "dataq.recipe.v1",
+      "steps": [
+        {
+          "kind": "canon",
+          "args": {
+            "input": input_path.display().to_string(),
+            "from": "json"
+          }
+        }
+      ]
+    });
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec(&recipe_value).expect("serialize recipe"),
+    )
+    .expect("write recipe");
+    write_recipe_lock(
+        &lock_path,
+        &recipe_value,
+        BTreeMap::from([
+            ("jq".to_string(), "jq-1.7".to_string()),
+            ("mlr".to_string(), "mlr 6.13.0".to_string()),
+        ]),
+    );
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JQ_BIN", &toolchain.jq_bin)
+        .env("DATAQ_YQ_BIN", &toolchain.yq_bin)
+        .env("DATAQ_MLR_BIN", &toolchain.mlr_bin)
+        .args([
+            "recipe",
+            "replay",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+            "--lock",
+            lock_path.to_str().expect("utf8 path"),
+            "--strict",
+        ])
+        .output()
+        .expect("run replay");
+
+    assert_eq!(output.status.code(), Some(3));
+    let summary = parse_last_stderr_json(&output.stderr);
+    assert_eq!(summary["lock_check"]["strict"], Value::Bool(true));
+    assert_eq!(summary["lock_check"]["matched"], Value::Bool(false));
+    assert_eq!(summary["steps"], json!([]));
+    assert!(
+        summary["lock_check"]["mismatches"]
+            .as_array()
+            .expect("mismatches array")
+            .iter()
+            .any(|entry| entry["constraint"] == "lock.tool_versions.yq")
+    );
+}
+
+#[test]
 fn recipe_replay_tool_version_mismatch_non_strict_continues() {
     let dir = tempdir().expect("temp dir");
     let toolchain = FakeToolchain::new("jq-1.7", "yq 4.35.2", "mlr 6.13.0");

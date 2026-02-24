@@ -513,6 +513,7 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
 
 - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
+  - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
 - 順序: `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`

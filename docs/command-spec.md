@@ -34,6 +34,7 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
+  - `--command recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
   - `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
