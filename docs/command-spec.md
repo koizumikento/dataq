@@ -20,6 +20,7 @@ dataq [--emit-pipeline] <command> [options]
 - `doctor`: 依存ツール診断（`--profile` 指定でワークフロー別要件評価）
 - `recipe run`: 宣言的レシピを定義順に実行
 - `contract`: サブコマンド出力契約を機械可読JSONで取得
+- `emit plan`: サブコマンドの静的実行計画（stage/dependency/tool）を取得
 - `mcp`: MCP(JSON-RPC 2.0) 単発リクエストを処理
 
 ## `contract` 出力契約（MVP）
@@ -42,6 +43,28 @@ dataq [--emit-pipeline] <command> [options]
   - `1`: 予期しない内部エラー
 - 副作用:
   - `contract` は参照専用（read-only）で、入力データやファイル内容を変更しない
+
+## `emit plan` 出力契約（MVP）
+
+- コマンド:
+  - `dataq emit plan --command <subcommand> [--args <json-array>]`
+- `--args`:
+  - JSON配列文字列のみ受理（例: `'["--normalize","github-actions-jobs"]'`）
+  - 配列要素はすべて文字列
+- 出力キー:
+  - `command`: 対象サブコマンド名
+  - `args`: 計画解決に使った引数配列
+  - `stages`: 段情報配列（`order`, `step`, `tool`, `depends_on`）
+  - `tools`: `jq|yq|mlr` の期待利用有無（`expected`）
+- 終了コード:
+  - `0`: 成功
+  - `3`: 未対応サブコマンドまたは `--args` 形式不正
+  - `1`: 予期しない内部エラー
+- 実行制約:
+  - 計画解決は静的（外部コマンド実行なし）
+- `--emit-pipeline` との違い:
+  - `emit plan`: 実行前の静的計画
+  - `--emit-pipeline`: 実行時に観測された診断
 
 ## `mcp` 単発JSON-RPC契約（MVP）
 
@@ -70,6 +93,7 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.merge`
   - `dataq.doctor`
   - `dataq.contract`
+  - `dataq.emit.plan`
   - `dataq.recipe.run`
 - `tools/call` 結果契約:
   - `result.structuredContent.exit_code: i32`
@@ -259,6 +283,7 @@ pipeline JSON schema:
 - `deterministic_guards`: 適用した決定性ガード
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
 - `recipe run` では `steps` に `load_recipe_file`, `validate_recipe_schema`, `execute_step_<index>_<kind>` が入る
+- `emit plan` では `steps` が `emit_plan_parse`, `emit_plan_resolve` になる
 
 ```bash
 cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.json

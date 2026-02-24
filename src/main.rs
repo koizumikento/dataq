@@ -7,7 +7,7 @@ use std::process::{self, Command};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
-    aggregate, r#assert, canon, contract, doctor, join, mcp, merge, profile, recipe, sdiff,
+    aggregate, r#assert, canon, contract, doctor, emit, join, mcp, merge, profile, recipe, sdiff,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{
@@ -59,6 +59,8 @@ enum Commands {
     Doctor(DoctorArgs),
     /// Emit machine-readable output contracts for subcommands.
     Contract(ContractArgs),
+    /// Emit static execution plans for existing subcommands.
+    Emit(EmitArgs),
     /// Handle a single MCP JSON-RPC request from stdin.
     Mcp,
 }
@@ -226,6 +228,27 @@ struct ContractArgs {
 
     #[arg(long, default_value_t = false)]
     all: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct EmitArgs {
+    #[command(subcommand)]
+    command: EmitSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum EmitSubcommand {
+    /// Resolve static stage plan for one subcommand.
+    Plan(EmitPlanArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct EmitPlanArgs {
+    #[arg(long)]
+    command: String,
+
+    #[arg(long)]
+    args: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -406,6 +429,7 @@ fn run() -> i32 {
         Commands::Recipe(args) => run_recipe(args, emit_pipeline),
         Commands::Doctor(args) => run_doctor(args, emit_pipeline),
         Commands::Contract(args) => run_contract(args, emit_pipeline),
+        Commands::Emit(args) => run_emit(args, emit_pipeline),
         Commands::Mcp => run_mcp(),
     }
 }
@@ -1333,6 +1357,79 @@ fn run_contract(args: ContractArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
+fn run_emit(args: EmitArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        EmitSubcommand::Plan(plan_args) => run_emit_plan(plan_args, emit_pipeline),
+    }
+}
+
+fn run_emit_plan(args: EmitPlanArgs, emit_pipeline: bool) -> i32 {
+    let parsed_args = match emit::parse_args_json(args.args.as_deref()) {
+        Ok(values) => values,
+        Err(message) => {
+            emit_error(
+                "input_usage_error",
+                message,
+                json!({"command": "emit", "subcommand": "plan"}),
+                3,
+            );
+            if emit_pipeline {
+                emit_pipeline_report(&build_emit_plan_pipeline_report());
+            }
+            return 3;
+        }
+    };
+
+    let response = emit::run_plan(&emit::EmitPlanCommandArgs {
+        command: args.command,
+        args: parsed_args,
+    });
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize emit plan response".to_string(),
+                    json!({"command": "emit", "subcommand": "plan"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize emit plan error".to_string(),
+                    json!({"command": "emit", "subcommand": "plan"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected emit plan exit code: {other}"),
+                json!({"command": "emit", "subcommand": "plan"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        emit_pipeline_report(&build_emit_plan_pipeline_report());
+    }
+
+    exit_code
+}
+
 fn read_values_from_path(path: &PathBuf, format: Format) -> Result<(Vec<Value>, Vec<u8>), String> {
     let bytes = fs::read(path)
         .map_err(|error| format!("failed to read input file `{}`: {error}", path.display()))?;
@@ -1734,6 +1831,15 @@ fn build_contract_pipeline_report() -> PipelineReport {
         PipelineInput::new(Vec::new()),
         contract::pipeline_steps(),
         contract::deterministic_guards(),
+    )
+}
+
+fn build_emit_plan_pipeline_report() -> PipelineReport {
+    PipelineReport::new(
+        "emit",
+        PipelineInput::new(Vec::new()),
+        emit::pipeline_steps(),
+        emit::deterministic_guards(),
     )
 }
 

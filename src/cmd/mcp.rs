@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
-    canon, contract, doctor, join, merge, profile, recipe, sdiff,
+    canon, contract, doctor, emit, join, merge, profile, recipe, sdiff,
 };
 use crate::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
 use crate::domain::rules::AssertRules;
@@ -27,7 +27,7 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 10] = [
+const TOOL_ORDER: [&str; 11] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.sdiff",
@@ -37,6 +37,7 @@ const TOOL_ORDER: [&str; 10] = [
     "dataq.merge",
     "dataq.doctor",
     "dataq.contract",
+    "dataq.emit.plan",
     "dataq.recipe.run",
 ];
 
@@ -236,6 +237,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.merge" => execute_merge(args),
         "dataq.doctor" => execute_doctor(args),
         "dataq.contract" => execute_contract(args),
+        "dataq.emit.plan" => execute_emit_plan(args),
         "dataq.recipe.run" => execute_recipe_run(args),
         unknown => input_usage_error(format!("unknown tool `{unknown}`")),
     }
@@ -1064,6 +1066,49 @@ fn execute_contract(args: &Map<String, Value>) -> ToolExecution {
     execution
 }
 
+fn execute_emit_plan(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let command = match parse_required_string(args, &["command"], "command") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let plan_args = match parse_optional_string_array(args, &["args"], "args") {
+        Ok(Some(values)) => values,
+        Ok(None) => Vec::new(),
+        Err(message) => return input_usage_error(message),
+    };
+
+    let response = emit::run_plan(&emit::EmitPlanCommandArgs {
+        command,
+        args: plan_args.clone(),
+    });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut sources = vec![inline_source("command", Some(Format::Json))];
+        if !plan_args.is_empty() {
+            sources.push(inline_source("args", Some(Format::Json)));
+        }
+        let report = PipelineReport::new(
+            "emit",
+            PipelineInput::new(sources),
+            emit::pipeline_steps(),
+            emit::deterministic_guards(),
+        );
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
 fn execute_recipe_run(args: &Map<String, Value>) -> ToolExecution {
     let emit_pipeline = match parse_emit_pipeline(args) {
         Ok(value) => value,
@@ -1379,6 +1424,27 @@ fn parse_string_list(
             })
             .collect(),
         Some(_) => Err(format!("`{label}` must be a string or array<string>")),
+    }
+}
+
+fn parse_optional_string_array(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| format!("`{label}` array must contain only strings"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err(format!("`{label}` must be an array<string>")),
     }
 }
 

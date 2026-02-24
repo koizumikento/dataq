@@ -72,6 +72,7 @@ dataq [--emit-pipeline] <command> [options]
 | `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
 | `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
+| `emit plan` | サブコマンドの静的実行計画（stage/dependency/tool）を出力 | `--command <name>` |
 | `mcp` | 1リクエスト単位の MCP(JSON-RPC 2.0) サーバーモード | stdin で JSON-RPC リクエストを1件入力 |
 
 グローバルオプション:
@@ -122,6 +123,9 @@ dataq doctor --profile scan
 
 # assert 出力契約を取得
 dataq contract --command assert
+
+# assert の静的ステージ計画を取得
+dataq emit plan --command assert --args '["--normalize","github-actions-jobs"]'
 
 # MCP単発リクエスト（tools/list）
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | dataq mcp
@@ -398,7 +402,7 @@ steps:
             type: integer
 ```
 
-### 8. `contract`
+### 10. `contract`
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
@@ -410,7 +414,27 @@ steps:
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
-### 10. `mcp`
+### 11. `emit plan`
+
+サブコマンドの静的実行計画を、実行せずに機械可読JSONで取得します（read-only）。
+
+- 実行コマンド:
+  - `dataq emit plan --command <subcommand> [--args <json-array>]`
+- 出力キー:
+  - `command`: 対象サブコマンド
+  - `args`: 解決に使った引数配列
+  - `stages`: `order`, `step`, `tool`, `depends_on` を含む段情報
+  - `tools`: `jq|yq|mlr` の期待利用有無（`expected`）
+- `--args` は JSON 文字列で渡す（例: `'["--normalize","github-actions-jobs"]'`）
+- 終了コード:
+  - `0`: 計画生成成功
+  - `3`: 未対応サブコマンドまたは `--args` 形式不正
+  - `1`: 予期しない内部エラー
+- `emit plan` と `--emit-pipeline` の違い:
+  - `emit plan`: 実行前の静的計画（外部ツール実行なし）
+  - `--emit-pipeline`: 実行時に観測した診断（stderr）
+
+### 12. `mcp`
 
 MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理します。
 
@@ -432,6 +456,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.merge`
   - `dataq.doctor`
   - `dataq.contract`
+  - `dataq.emit.plan`
   - `dataq.recipe.run`
 - `tools/call` レスポンス:
   - `structuredContent.exit_code`

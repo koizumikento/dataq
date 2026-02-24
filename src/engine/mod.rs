@@ -1,6 +1,7 @@
 pub mod aggregate;
 pub mod assert;
 pub mod canon;
+pub mod emit_plan;
 pub mod join;
 pub mod merge;
 pub mod profile;

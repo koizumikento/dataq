@@ -4,6 +4,8 @@ mod assert_cli;
 mod canon_cli;
 #[path = "cli/doctor_cli.rs"]
 mod doctor_cli;
+#[path = "cli/emit_cli.rs"]
+mod emit_cli;
 #[path = "cli/entry_cli.rs"]
 mod entry_cli;
 #[path = "cli/join_cli.rs"]

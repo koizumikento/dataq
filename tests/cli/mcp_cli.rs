@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 10] = [
+const TOOL_ORDER: [&str; 11] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.sdiff",
@@ -15,6 +15,7 @@ const TOOL_ORDER: [&str; 10] = [
     "dataq.merge",
     "dataq.doctor",
     "dataq.contract",
+    "dataq.emit.plan",
     "dataq.recipe.run",
 ];
 
@@ -156,6 +157,12 @@ fn tools_call_minimal_success_for_all_tools() {
         ),
         ("dataq.doctor", json!({})),
         ("dataq.contract", json!({"all": true})),
+        (
+            "dataq.emit.plan",
+            json!({
+                "command": "canon"
+            }),
+        ),
         (
             "dataq.recipe.run",
             json!({
