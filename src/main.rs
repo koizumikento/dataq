@@ -7,10 +7,11 @@ use std::process::{self, Command};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
-    aggregate, r#assert, canon, contract, diff, doctor, emit, gate, ingest_api, join, mcp, merge,
-    profile, recipe, sdiff,
+    aggregate, r#assert, canon, contract, diff, doctor, emit, gate, ingest_api, ingest_yaml_jobs,
+    join, mcp, merge, profile, recipe, sdiff,
 };
 use dataq::domain::error::CanonError;
+use dataq::domain::ingest::IngestYamlJobsMode;
 use dataq::domain::report::{
     PipelineFingerprint, PipelineInput, PipelineInputSource, PipelineReport,
 };
@@ -42,7 +43,7 @@ struct Cli {
 enum Commands {
     /// Canonicalize input deterministically.
     Canon(CanonArgs),
-    /// Ingest API response via xh and normalize it via jq.
+    /// Ingest external sources into deterministic JSON records.
     Ingest(IngestArgs),
     /// Validate input values against rule definitions.
     Assert(AssertArgs),
@@ -130,6 +131,8 @@ struct IngestArgs {
 enum IngestSubcommand {
     /// Fetch and normalize one API response deterministically.
     Api(IngestApiArgs),
+    /// Extract and normalize job definitions from YAML.
+    YamlJobs(IngestYamlJobsArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -153,6 +156,15 @@ struct IngestApiArgs {
 
     #[arg(long)]
     expect_status: Option<u16>,
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestYamlJobsArgs {
+    #[arg(long)]
+    input: PathBuf,
+
+    #[arg(long, value_enum)]
+    mode: CliIngestYamlJobsMode,
 }
 
 #[derive(Debug, clap::Args)]
@@ -431,6 +443,13 @@ enum CliIngestApiMethod {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliIngestYamlJobsMode {
+    GithubActions,
+    GitlabCi,
+    GenericMap,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliGatePolicySource {
     ScanText,
     IngestDoc,
@@ -454,6 +473,7 @@ enum CliDoctorProfile {
 enum CliContractCommand {
     Canon,
     IngestApi,
+    Ingest,
     Assert,
     GateSchema,
     Gate,
@@ -542,6 +562,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
         match value {
             CliContractCommand::Canon => Self::Canon,
             CliContractCommand::IngestApi => Self::IngestApi,
+            CliContractCommand::Ingest => Self::Ingest,
             CliContractCommand::Assert => Self::Assert,
             CliContractCommand::GateSchema => Self::GateSchema,
             CliContractCommand::Gate => Self::Gate,
@@ -578,6 +599,16 @@ impl From<CliIngestApiMethod> for ingest_api::IngestApiMethod {
             CliIngestApiMethod::Put => Self::Put,
             CliIngestApiMethod::Patch => Self::Patch,
             CliIngestApiMethod::Delete => Self::Delete,
+        }
+    }
+}
+
+impl From<CliIngestYamlJobsMode> for IngestYamlJobsMode {
+    fn from(value: CliIngestYamlJobsMode) -> Self {
+        match value {
+            CliIngestYamlJobsMode::GithubActions => Self::GithubActions,
+            CliIngestYamlJobsMode::GitlabCi => Self::GitlabCi,
+            CliIngestYamlJobsMode::GenericMap => Self::GenericMap,
         }
     }
 }
@@ -939,6 +970,7 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
 fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         IngestSubcommand::Api(api_args) => run_ingest_api(api_args, emit_pipeline),
+        IngestSubcommand::YamlJobs(args) => run_ingest_yaml_jobs(args, emit_pipeline),
     }
 }
 
@@ -995,6 +1027,66 @@ fn run_ingest_api(args: IngestApiArgs, emit_pipeline: bool) -> i32 {
         emit_pipeline_report(&pipeline_report);
     }
 
+    exit_code
+}
+
+fn run_ingest_yaml_jobs(args: IngestYamlJobsArgs, emit_pipeline: bool) -> i32 {
+    let mode: IngestYamlJobsMode = args.mode.into();
+    let input_is_stdin = ingest_yaml_jobs::path_is_stdin(args.input.as_path());
+    let command_args = ingest_yaml_jobs::IngestYamlJobsCommandArgs {
+        input: if input_is_stdin {
+            ingest_yaml_jobs::IngestYamlJobsInput::Stdin
+        } else {
+            ingest_yaml_jobs::IngestYamlJobsInput::Path(args.input.clone())
+        },
+        mode,
+    };
+
+    let stdin = io::stdin();
+    let (response, trace) = ingest_yaml_jobs::run_with_stdin_and_trace(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest yaml-jobs output".to_string(),
+                    json!({"command": "ingest yaml-jobs"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest yaml-jobs error".to_string(),
+                    json!({"command": "ingest yaml-jobs"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected ingest yaml-jobs exit code: {other}"),
+                json!({"command": "ingest yaml-jobs"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let report = build_ingest_yaml_jobs_pipeline_report(&args, mode, input_is_stdin, &trace);
+        emit_pipeline_report(&report);
+    }
     exit_code
 }
 
@@ -2346,6 +2438,34 @@ fn build_ingest_api_pipeline_report(
         }]),
         ingest_api::pipeline_steps(),
         ingest_api::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
+fn build_ingest_yaml_jobs_pipeline_report(
+    args: &IngestYamlJobsArgs,
+    mode: IngestYamlJobsMode,
+    input_is_stdin: bool,
+    trace: &ingest_yaml_jobs::IngestYamlJobsPipelineTrace,
+) -> PipelineReport {
+    let source = if input_is_stdin {
+        PipelineInputSource::stdin("input", Some(Format::Yaml.as_str()))
+    } else {
+        PipelineInputSource::path(
+            "input",
+            args.input.display().to_string(),
+            Some(Format::Yaml.as_str()),
+        )
+    };
+
+    let mut report = PipelineReport::new(
+        "ingest_yaml_jobs",
+        PipelineInput::new(vec![source]),
+        ingest_yaml_jobs::pipeline_steps(),
+        ingest_yaml_jobs::deterministic_guards(mode),
     );
     for used_tool in &trace.used_tools {
         report = report.mark_external_tool_used(used_tool);

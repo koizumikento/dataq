@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 17] = [
+const TOOL_ORDER: [&str; 18] = [
     "dataq.canon",
     "dataq.ingest.api",
+    "dataq.ingest.yaml_jobs",
     "dataq.assert",
     "dataq.gate.schema",
     "dataq.gate.policy",
@@ -169,6 +170,18 @@ fn tools_call_minimal_success_for_all_tools() {
             }),
         ),
         (
+            "dataq.ingest.yaml_jobs",
+            json!({
+                "mode": "generic-map",
+                "input": [{
+                    "job_name": "build",
+                    "field_count": 2,
+                    "has_stage": true,
+                    "has_script": true
+                }]
+            }),
+        ),
+        (
             "dataq.assert",
             json!({
                 "input": [{"id": 1}],
@@ -324,6 +337,43 @@ fn tools_call_ingest_api_accepts_mixed_case_method() {
     assert_eq!(
         response["result"]["structuredContent"]["payload"]["status"],
         Value::from(200)
+    );
+}
+
+#[test]
+fn ingest_yaml_jobs_tool_supports_mode_and_pipeline() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        102,
+        "dataq.ingest.yaml_jobs",
+        json!({
+            "emit_pipeline": true,
+            "mode": "generic-map",
+            "input": [{
+                "job_name": "build",
+                "field_count": 2,
+                "has_stage": true,
+                "has_script": true
+            }]
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(false));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["pipeline"]["steps"],
+        json!([
+            "ingest_yaml_jobs_yq_extract",
+            "ingest_yaml_jobs_jq_normalize",
+            "ingest_yaml_jobs_mlr_shape"
+        ])
     );
 }
 
@@ -874,7 +924,7 @@ impl FakeToolchain {
 
         let mlr_bin = write_fake_mlr_script(bin_dir.join("mlr"));
         write_fake_ingest_jq_script(bin_dir.join("jq"));
-        write_fake_version_script(bin_dir.join("yq"), "yq 4.35.2");
+        write_fake_yq_script(bin_dir.join("yq"));
         write_fake_xh_script(bin_dir.join("xh"));
 
         Self {
@@ -893,18 +943,6 @@ impl FakeToolchain {
     }
 }
 
-fn write_fake_version_script(path: PathBuf, version: &str) {
-    fs::write(
-        &path,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
-            version.replace('\'', "")
-        ),
-    )
-    .expect("write version script");
-    set_executable(&path);
-}
-
 fn write_fake_ingest_jq_script(path: PathBuf) {
     let script = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -914,6 +952,18 @@ fi
 cat
 "#;
     fs::write(&path, script).expect("write fake jq script");
+    set_executable(&path);
+}
+
+fn write_fake_yq_script(path: PathBuf) {
+    let script = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'yq 4.35.2\n'
+  exit 0
+fi
+cat
+"#;
+    fs::write(&path, script).expect("write fake yq script");
     set_executable(&path);
 }
 
@@ -961,6 +1011,7 @@ for arg in "$@"; do
   fi
   if [ "$arg" = "join" ]; then mode="join"; fi
   if [ "$arg" = "stats1" ]; then mode="stats1"; fi
+  if [ "$arg" = "sort" ]; then mode="sort"; fi
   if [ "$arg" = "count" ] || [ "$arg" = "sum" ] || [ "$arg" = "mean" ]; then action="$arg"; fi
   if [ "$arg" = "-f" ]; then capture_next_f=1; fi
   if [ "$arg" = "--ul" ]; then left_join="1"; fi
@@ -988,6 +1039,11 @@ if [ "$mode" = "stats1" ]; then
     printf '[{"team":"a","price_mean":"7.5"},{"team":"b","price_mean":"7.0"}]'
     exit 0
   fi
+fi
+
+if [ "$mode" = "sort" ]; then
+  cat
+  exit 0
 fi
 
 echo 'unexpected mlr args' 1>&2

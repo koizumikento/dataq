@@ -8,8 +8,10 @@ use serde_json::{Map, Value, json};
 use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
-    canon, contract, diff, doctor, emit, gate, ingest_api, join, merge, profile, recipe, sdiff,
+    canon, contract, diff, doctor, emit, gate, ingest_api, ingest_yaml_jobs, join, merge,
+    profile, recipe, sdiff,
 };
+use crate::domain::ingest::IngestYamlJobsMode;
 use crate::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
 use crate::domain::rules::AssertRules;
 use crate::engine::aggregate::AggregateMetric;
@@ -27,9 +29,10 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 17] = [
+const TOOL_ORDER: [&str; 18] = [
     "dataq.canon",
     "dataq.ingest.api",
+    "dataq.ingest.yaml_jobs",
     "dataq.assert",
     "dataq.gate.schema",
     "dataq.gate.policy",
@@ -236,6 +239,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
     match tool_name {
         "dataq.canon" => execute_canon(args),
         "dataq.ingest.api" => execute_ingest_api(args),
+        "dataq.ingest.yaml_jobs" => execute_ingest_yaml_jobs(args),
         "dataq.assert" => execute_assert(args),
         "dataq.gate.schema" => execute_gate_schema(args),
         "dataq.gate.policy" => execute_gate_policy(args),
@@ -391,6 +395,61 @@ fn execute_ingest_api(args: &Map<String, Value>) -> ToolExecution {
         );
         for tool in &trace.used_tools {
             report = report.mark_external_tool_used(tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_yaml_jobs(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let mode = match parse_required_ingest_yaml_jobs_mode(args) {
+        Ok(mode) => mode,
+        Err(message) => return input_usage_error(message),
+    };
+    let input = match parse_value_input(
+        args,
+        &["input_path", "input_file"],
+        &["input", "input_inline", "input_value"],
+        "input",
+        true,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `input`"),
+        Err(message) => return input_usage_error(message),
+    };
+
+    let input_format = match &input {
+        ValueInputSource::Path(_) => Some(Format::Yaml),
+        ValueInputSource::Inline(_) => Some(Format::Json),
+    };
+    let command_args = ingest_yaml_jobs::IngestYamlJobsCommandArgs {
+        input: to_ingest_yaml_jobs_input(input.clone()),
+        mode,
+    };
+    let (response, trace) =
+        ingest_yaml_jobs::run_with_stdin_and_trace(&command_args, Cursor::new(Vec::new()));
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "ingest_yaml_jobs",
+            PipelineInput::new(vec![pipeline_source("input", &input, input_format)]),
+            ingest_yaml_jobs::pipeline_steps(),
+            ingest_yaml_jobs::deterministic_guards(mode),
+        );
+        for used_tool in &trace.used_tools {
+            report = report.mark_external_tool_used(used_tool);
         }
         report = report.with_stage_diagnostics(trace.stage_diagnostics);
         execution.pipeline = pipeline_as_value(report).ok();
@@ -1956,6 +2015,18 @@ fn parse_optional_normalize_mode(
     .transpose()
 }
 
+fn parse_required_ingest_yaml_jobs_mode(
+    args: &Map<String, Value>,
+) -> Result<IngestYamlJobsMode, String> {
+    let raw = parse_required_string(args, &["mode"], "mode")?;
+    match raw.as_str() {
+        "github-actions" => Ok(IngestYamlJobsMode::GithubActions),
+        "gitlab-ci" => Ok(IngestYamlJobsMode::GitlabCi),
+        "generic-map" => Ok(IngestYamlJobsMode::GenericMap),
+        _ => Err("`mode` must be `github-actions`, `gitlab-ci`, or `generic-map`".to_string()),
+    }
+}
+
 fn parse_optional_doctor_profile(
     args: &Map<String, Value>,
 ) -> Result<Option<doctor::DoctorProfile>, String> {
@@ -2205,6 +2276,16 @@ fn to_join_input(source: ValueInputSource) -> join::JoinCommandInput {
     }
 }
 
+fn to_ingest_yaml_jobs_input(source: ValueInputSource) -> ingest_yaml_jobs::IngestYamlJobsInput {
+    match source {
+        ValueInputSource::Path(path) if ingest_yaml_jobs::path_is_stdin(path.as_path()) => {
+            ingest_yaml_jobs::IngestYamlJobsInput::Stdin
+        }
+        ValueInputSource::Path(path) => ingest_yaml_jobs::IngestYamlJobsInput::Path(path),
+        ValueInputSource::Inline(values) => ingest_yaml_jobs::IngestYamlJobsInput::Inline(values),
+    }
+}
+
 fn to_aggregate_input(source: ValueInputSource) -> aggregate::AggregateCommandInput {
     match source {
         ValueInputSource::Path(path) => aggregate::AggregateCommandInput::Path(path),
@@ -2326,6 +2407,7 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
     match value {
         "canon" => Ok(contract::ContractCommand::Canon),
         "ingest-api" => Ok(contract::ContractCommand::IngestApi),
+        "ingest" => Ok(contract::ContractCommand::Ingest),
         "assert" => Ok(contract::ContractCommand::Assert),
         "gate-schema" => Ok(contract::ContractCommand::GateSchema),
         "gate" | "gate-policy" => Ok(contract::ContractCommand::Gate),

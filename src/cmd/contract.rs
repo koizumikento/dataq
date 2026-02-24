@@ -2,9 +2,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 12] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 13] = [
     ContractCommand::Canon,
     ContractCommand::IngestApi,
+    ContractCommand::Ingest,
     ContractCommand::Assert,
     ContractCommand::GateSchema,
     ContractCommand::Gate,
@@ -22,6 +23,7 @@ pub const ORDERED_COMMANDS: [ContractCommand; 12] = [
 pub enum ContractCommand {
     Canon,
     IngestApi,
+    Ingest,
     Assert,
     GateSchema,
     Gate,
@@ -87,6 +89,10 @@ const INGEST_API_NOTES: &[&str] = &[
     "Fetch stage uses `xh` and normalize stage uses `jq`.",
     "`headers` output is projected by explicit allowlist and deterministic order.",
 ];
+const INGEST_YAML_JOBS_NOTES: &[&str] = &[
+    "Output is a JSON array of normalized job records.",
+    "Mode-specific row schemas: github-actions, gitlab-ci, generic-map.",
+];
 const ASSERT_NOTES: &[&str] = &[
     "Validation mismatch details are emitted in `mismatches`.",
     "`--rules-help` and `--schema-help` have dedicated schema IDs.",
@@ -121,6 +127,8 @@ const DOCTOR_NOTES: &[&str] = &[
     "Exit code 3 means missing/non-executable `jq|yq|mlr` without `--profile`, or unsatisfied selected profile requirements with `--profile`.",
 ];
 const DOCTOR_EXIT_CODE_3: &str = "without `--profile`: missing/non-executable `jq|yq|mlr`; with `--profile`: selected profile requirements are unsatisfied";
+const INGEST_YAML_JOBS_EXIT_CODE_3: &str =
+    "input/usage error (malformed YAML, unknown mode, or missing `jq`/`yq`/`mlr`)";
 const RECIPE_RUN_NOTES: &[&str] = &[
     "This contract describes `recipe run` output.",
     "`steps` preserves recipe definition order.",
@@ -175,6 +183,16 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: INGEST_API_FIELDS,
             exit_codes: exit_codes("`--expect-status` mismatch"),
             notes: INGEST_API_NOTES,
+        },
+        ContractCommand::Ingest => CommandContract {
+            command: "ingest yaml-jobs",
+            schema: "dataq.ingest.yaml_jobs.output.v1",
+            output_fields: NO_FIXED_ROOT_FIELDS,
+            exit_codes: exit_codes_with_code_three(
+                "validation mismatch is not used by this command",
+                INGEST_YAML_JOBS_EXIT_CODE_3,
+            ),
+            notes: INGEST_YAML_JOBS_NOTES,
         },
         ContractCommand::Assert => CommandContract {
             command: "assert",

@@ -81,6 +81,10 @@ pub fn sort_gitlab_ci_jobs(values: &[Value]) -> Result<Vec<Value>, MlrError> {
     run_sort(values, "job_name")
 }
 
+pub fn sort_generic_map_jobs(values: &[Value]) -> Result<Vec<Value>, MlrError> {
+    run_sort(values, "job_name")
+}
+
 pub fn join_rows(
     left: &[Value],
     right: &[Value],

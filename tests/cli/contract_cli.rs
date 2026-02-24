@@ -52,6 +52,7 @@ fn contract_all_returns_deterministic_order() {
         vec![
             "canon",
             "ingest-api",
+            "ingest yaml-jobs",
             "assert",
             "gate-schema",
             "gate",
@@ -71,6 +72,28 @@ fn contract_all_returns_deterministic_order() {
         assert!(entry["exit_codes"].is_object());
         assert!(entry["notes"].is_array());
     }
+}
+
+#[test]
+fn contract_ingest_command_exit_three_describes_yaml_mode_tool_failures() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "ingest"])
+        .output()
+        .expect("run contract ingest");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], json!("ingest yaml-jobs"));
+    assert_eq!(
+        payload["schema"],
+        json!("dataq.ingest.yaml_jobs.output.v1")
+    );
+    assert_eq!(
+        payload["exit_codes"]["3"],
+        json!("input/usage error (malformed YAML, unknown mode, or missing `jq`/`yq`/`mlr`)")
+    );
 }
 
 #[test]
