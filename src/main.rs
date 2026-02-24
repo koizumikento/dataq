@@ -7,8 +7,8 @@ use std::process::{self, Command};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
-    aggregate, r#assert, canon, contract, diff, doctor, emit, gate, join, mcp, merge, profile,
-    recipe, sdiff, ingest_api,
+    aggregate, r#assert, canon, contract, diff, doctor, emit, gate, ingest_api, join, mcp, merge,
+    profile, recipe, sdiff,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{
