@@ -291,6 +291,9 @@ pub fn ingest_document(
     })?;
 
     let projected = jq::project_document_ast(&ast).map_err(|error| match error {
+        jq::JqError::InvalidFilter => {
+            IngestDocError::JqExecution("jq projection filter cannot be empty".to_string())
+        }
         jq::JqError::Unavailable => IngestDocError::MissingJq,
         jq::JqError::Execution(message) => IngestDocError::JqExecution(message),
         jq::JqError::Parse(source) => IngestDocError::JqExecution(source.to_string()),
