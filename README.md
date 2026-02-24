@@ -74,6 +74,7 @@ dataq [--emit-pipeline] <command> [options]
 | `ingest doc` | ドキュメントを共通JSONスキーマへ抽出 | `--input <path|->` `--from <md|html|docx|rst|latex>` |
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
+| `scan text` | テキストを正規表現で走査し構造化結果を出力 | `--pattern <regex>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
 | `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
@@ -133,6 +134,9 @@ dataq join --left users.json --right scores.json --on id --how inner
 
 # グループ集計（team単位でprice平均）
 dataq aggregate --input orders.json --group-by team --metric avg --target price
+
+# テキスト走査（policy mode ではヒット時に終了コード2）
+dataq scan text --pattern 'TODO|FIXME' --path . --glob '*.rs' --policy-mode
 
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
@@ -430,7 +434,7 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 - 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
 - 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
-### 7. `ingest doc`
+### 8. `ingest doc`
 
 ドキュメント入力（Markdown/HTML/DOCX/reStructuredText/LaTeX）を、固定スキーマ JSON へ抽出します。
 
@@ -442,7 +446,21 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 - `--emit-pipeline` 時のステップは `ingest_doc_pandoc_ast`, `ingest_doc_jq_project`
   - `external_tools` は `pandoc` と `jq` を `used=true` で記録
 
-### 8. `merge`
+### 9. `scan text`
+
+決定的な順序でテキストを走査し、マッチを構造化JSONで返す。
+
+- `dataq scan text --pattern <regex> [--path <dir>] [--glob <glob>...] [--max-matches <n>]`
+- `--policy-mode` を有効にすると、1件以上ヒット時に終了コード `2`
+- `--jq-project` で任意の jq 投影ステージ（`scan_text_jq_project`）を有効化
+- 出力は `matches`（path/line/column順）と `summary`
+- `rg` が未インストール、または regex 不正時は終了コード `3`
+- `--emit-pipeline` ステップ:
+  - `scan_text_rg_execute`
+  - `scan_text_parse`
+  - `scan_text_jq_project`
+
+### 10. `merge`
 
 複数の JSON/YAML 入力をポリシー指定で決定的にマージ。
 
@@ -455,7 +473,7 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
   - 解決順: 最長一致する `--policy-path` を優先し、同一深さの一致は後ろに指定した定義を優先。一致なしは `--policy` を適用
 - 出力は JSON 固定（キー順は決定的にソート）
 
-### 9. `doctor`
+### 11. `doctor`
 
 実行環境の依存を診断。`--capabilities` と `--profile` に対応。
 
@@ -476,7 +494,7 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
   - `--profile` 未指定: `doctor_probe_tools`, `doctor_probe_capabilities`
   - `--profile` 指定: `doctor_profile_probe`, `doctor_profile_evaluate`
 
-### 10. `recipe run`
+### 12. `recipe run`
 
 レシピファイル（YAML/JSON）を読み込み、`steps` を定義順で実行します。
 
@@ -507,7 +525,7 @@ steps:
             type: integer
 ```
 
-### 11. `recipe lock`
+### 13. `recipe lock`
 
 レシピファイル（YAML/JSON）から、再現実行のためのロック情報を生成します。
 
@@ -525,7 +543,7 @@ steps:
   - レシピ不正 / step引数不正 / ツール解決失敗は exit `3`
 - `--emit-pipeline` 有効時は `recipe_lock_parse`, `recipe_lock_probe_tools`, `recipe_lock_fingerprint` を stderr JSON へ出力
 
-### 12. `recipe replay`
+### 14. `recipe replay`
 
 lock ファイルを検証したうえで `recipe run` と同じレシピ実行を行います。
 
@@ -544,20 +562,20 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
   - 実行された step の検証不一致は従来どおり exit `2`
 - `--emit-pipeline` 有効時は `recipe_replay_parse`, `recipe_replay_verify_lock`, `recipe_replay_execute` を stderr JSON へ出力
 
-### 13. `contract`
+### 15. `contract`
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|merge|doctor|recipe-run|recipe-lock>`
+- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|scan|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
   - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
-### 14. `emit plan`
+### 16. `emit plan`
 
 サブコマンドの静的実行計画を、実行せずに機械可読JSONで取得します（read-only）。
 
@@ -577,7 +595,7 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
   - `emit plan`: 実行前の静的計画（外部ツール実行なし）
   - `--emit-pipeline`: 実行時に観測した診断（stderr）
 
-### 15. `mcp`
+### 17. `mcp`
 
 MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理します。
 
@@ -602,6 +620,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.ingest.doc`
   - `dataq.join`
   - `dataq.aggregate`
+  - `dataq.scan.text`
   - `dataq.merge`
   - `dataq.doctor`
   - `dataq.contract`

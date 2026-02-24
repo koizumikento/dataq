@@ -31,7 +31,7 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 21] = [
+const TOOL_ORDER: [&str; 22] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -46,6 +46,7 @@ const TOOL_ORDER: [&str; 21] = [
     "dataq.ingest.book",
     "dataq.join",
     "dataq.aggregate",
+    "dataq.scan.text",
     "dataq.merge",
     "dataq.doctor",
     "dataq.contract",
@@ -256,6 +257,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.ingest.book" => execute_ingest_book(args),
         "dataq.join" => execute_join(args),
         "dataq.aggregate" => execute_aggregate(args),
+        "dataq.scan.text" => execute_scan_text(args),
         "dataq.merge" => execute_merge(args),
         "dataq.doctor" => execute_doctor(args),
         "dataq.contract" => execute_contract(args),
@@ -2652,6 +2654,7 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         "ingest-doc" => Ok(contract::ContractCommand::IngestDoc),
         "ingest-notes" => Ok(contract::ContractCommand::IngestNotes),
         "ingest-book" => Ok(contract::ContractCommand::IngestBook),
+        "scan" => Ok(contract::ContractCommand::Scan),
         "merge" => Ok(contract::ContractCommand::Merge),
         "doctor" => Ok(contract::ContractCommand::Doctor),
         "recipe" | "recipe-run" => Ok(contract::ContractCommand::RecipeRun),

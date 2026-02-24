@@ -28,5 +28,7 @@ mod merge_cli;
 mod profile_cli;
 #[path = "cli/recipe_cli.rs"]
 mod recipe_cli;
+#[path = "cli/scan_cli.rs"]
+mod scan_cli;
 #[path = "cli/sdiff_cli.rs"]
 mod sdiff_cli;

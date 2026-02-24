@@ -14,5 +14,6 @@ pub mod mcp;
 pub mod merge;
 pub mod profile;
 pub mod recipe;
+pub mod scan;
 pub mod sdiff;
 pub(crate) mod stage_trace;
