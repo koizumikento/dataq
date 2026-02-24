@@ -879,6 +879,37 @@ fn recipe_lock_emit_pipeline_survives_out_path_write_failure() {
     );
 }
 
+#[test]
+fn ingest_yaml_jobs_tool_rejects_stdin_input_path_sentinels() {
+    for (index, sentinel) in ["-", "/dev/stdin"].into_iter().enumerate() {
+        let request = tool_call_request(
+            40 + index as i64,
+            "dataq.ingest.yaml_jobs",
+            json!({
+                "mode": "github-actions",
+                "input_path": sentinel,
+            }),
+        );
+        let output = run_mcp(&request, None);
+        assert_eq!(output.status.code(), Some(0));
+
+        let response = parse_stdout_json(&output.stdout);
+        assert_eq!(response["result"]["isError"], Value::Bool(true));
+        assert_eq!(
+            response["result"]["structuredContent"]["exit_code"],
+            Value::from(3)
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["payload"]["error"],
+            Value::from("input_usage_error")
+        );
+        let message = response["result"]["structuredContent"]["payload"]["message"]
+            .as_str()
+            .expect("usage message");
+        assert!(message.contains("stdin sentinels"));
+    }
+}
+
 fn tool_call_request(id: i64, tool_name: &str, arguments: Value) -> Value {
     json!({
         "jsonrpc": "2.0",

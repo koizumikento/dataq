@@ -423,6 +423,13 @@ fn execute_ingest_yaml_jobs(args: &Map<String, Value>) -> ToolExecution {
         Ok(None) => return input_usage_error("missing required `input`"),
         Err(message) => return input_usage_error(message),
     };
+    if let ValueInputSource::Path(path) = &input {
+        if is_stdin_input_path_sentinel(path.as_path()) {
+            return input_usage_error(
+                "`input_path` does not accept stdin sentinels (`-`, `/dev/stdin`) for `dataq.ingest.yaml_jobs`; use inline `input`",
+            );
+        }
+    }
 
     let input_format = match &input {
         ValueInputSource::Path(_) => Some(Format::Yaml),
@@ -2284,6 +2291,10 @@ fn to_ingest_yaml_jobs_input(source: ValueInputSource) -> ingest_yaml_jobs::Inge
         ValueInputSource::Path(path) => ingest_yaml_jobs::IngestYamlJobsInput::Path(path),
         ValueInputSource::Inline(values) => ingest_yaml_jobs::IngestYamlJobsInput::Inline(values),
     }
+}
+
+fn is_stdin_input_path_sentinel(path: &Path) -> bool {
+    ingest_yaml_jobs::path_is_stdin(path) || path == Path::new("/dev/stdin")
 }
 
 fn to_aggregate_input(source: ValueInputSource) -> aggregate::AggregateCommandInput {
