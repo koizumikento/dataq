@@ -501,7 +501,7 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
   - `lock.tool_versions.<tool>`
 - stdout は実行サマリ JSON（`matched`, `exit_code`, `lock_check`, `steps`）を返す
 - `--strict` 指定時:
-  - lock mismatch は exit `3`（実行はスキップ）
+  - lock mismatch は exit `2`（validation mismatch、実行はスキップ）
 - 非 strict 時:
   - lock mismatch を `lock_check.mismatches` に報告しつつ実行継続
   - 実行された step の検証不一致は従来どおり exit `2`

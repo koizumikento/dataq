@@ -296,7 +296,7 @@ pub fn replay(
         return Ok(RecipeReplayExecution {
             report: RecipeReplayReport {
                 matched: false,
-                exit_code: 3,
+                exit_code: 2,
                 lock_check,
                 steps: Vec::new(),
             },

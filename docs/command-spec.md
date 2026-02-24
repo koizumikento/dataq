@@ -405,7 +405,7 @@ cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.jso
   - `mismatch_count`
   - `mismatches[]` (`constraint`, `expected`, `actual`)
 - 終了コード契約:
-  - strict かつ lock mismatch: exit `3`（実行スキップ）
+  - strict かつ lock mismatch: exit `2`（validation mismatch、実行スキップ）
   - non-strict lock mismatch: mismatchを報告して実行継続
   - 実行された `assert` / `sdiff` の不一致: exit `2`
 

@@ -913,7 +913,7 @@ fn recipe_replay_matching_tool_versions_with_strict_succeeds() {
 }
 
 #[test]
-fn recipe_replay_tool_version_mismatch_strict_returns_exit_three() {
+fn recipe_replay_tool_version_mismatch_strict_returns_exit_two() {
     let dir = tempdir().expect("temp dir");
     let toolchain = FakeToolchain::new("jq-1.7", "yq 4.35.2", "mlr 6.13.0");
     let input_path = dir.path().join("input.json");
@@ -964,8 +964,10 @@ fn recipe_replay_tool_version_mismatch_strict_returns_exit_three() {
         .output()
         .expect("run replay");
 
-    assert_eq!(output.status.code(), Some(3));
-    let summary = parse_last_stderr_json(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let summary: Value = serde_json::from_slice(&output.stdout).expect("summary json");
+    assert_eq!(summary["exit_code"], Value::from(2));
     assert_eq!(summary["lock_check"]["strict"], Value::Bool(true));
     assert_eq!(summary["lock_check"]["matched"], Value::Bool(false));
     assert_eq!(summary["steps"], json!([]));
@@ -979,7 +981,7 @@ fn recipe_replay_tool_version_mismatch_strict_returns_exit_three() {
 }
 
 #[test]
-fn recipe_replay_missing_required_tool_version_key_strict_returns_exit_three() {
+fn recipe_replay_missing_required_tool_version_key_strict_returns_exit_two() {
     let dir = tempdir().expect("temp dir");
     let toolchain = FakeToolchain::new("jq-1.7", "yq 4.35.2", "mlr 6.13.0");
     let input_path = dir.path().join("input.json");
@@ -1029,8 +1031,10 @@ fn recipe_replay_missing_required_tool_version_key_strict_returns_exit_three() {
         .output()
         .expect("run replay");
 
-    assert_eq!(output.status.code(), Some(3));
-    let summary = parse_last_stderr_json(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let summary: Value = serde_json::from_slice(&output.stdout).expect("summary json");
+    assert_eq!(summary["exit_code"], Value::from(2));
     assert_eq!(summary["lock_check"]["strict"], Value::Bool(true));
     assert_eq!(summary["lock_check"]["matched"], Value::Bool(false));
     assert_eq!(summary["steps"], json!([]));
