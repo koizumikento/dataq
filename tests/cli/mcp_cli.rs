@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 20] = [
+const TOOL_ORDER: [&str; 21] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -17,6 +17,7 @@ const TOOL_ORDER: [&str; 20] = [
     "dataq.profile",
     "dataq.ingest.doc",
     "dataq.ingest.notes",
+    "dataq.ingest.book",
     "dataq.join",
     "dataq.aggregate",
     "dataq.merge",
