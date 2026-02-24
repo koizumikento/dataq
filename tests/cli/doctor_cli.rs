@@ -179,6 +179,72 @@ fn doctor_returns_exit_three_when_any_tool_is_not_executable() {
 }
 
 #[test]
+fn doctor_profile_scan_passes_when_profile_requirements_are_satisfied() {
+    let dir = tempdir().expect("tempdir");
+    write_exec_script(&dir.path().join("jq"), "#!/bin/sh\necho 'jq-1.7'\n");
+    write_exec_script(&dir.path().join("rg"), "#!/bin/sh\necho 'ripgrep 14.1.0'\n");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", dir.path())
+        .args(["doctor", "--profile", "scan"])
+        .output()
+        .expect("run doctor");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    let tools = stdout_json["tools"].as_array().expect("tools array");
+    assert_eq!(tools[1]["name"], json!("yq"));
+    assert_eq!(tools[1]["executable"], json!(false));
+    assert_eq!(tools[2]["name"], json!("mlr"));
+    assert_eq!(tools[2]["executable"], json!(false));
+    assert_eq!(stdout_json["profile"]["name"], json!("scan"));
+    assert_eq!(stdout_json["profile"]["satisfied"], json!(true));
+    assert_eq!(
+        stdout_json["profile"]["version"],
+        json!("dataq.doctor.profile.requirements.v1")
+    );
+    assert_eq!(
+        stdout_json["profile"]["requirements"][0]["capability"],
+        json!("jq.available")
+    );
+    assert_eq!(
+        stdout_json["profile"]["requirements"][1]["capability"],
+        json!("rg.available")
+    );
+    assert_eq!(
+        stdout_json["profile"]["requirements"][1]["satisfied"],
+        json!(true)
+    );
+}
+
+#[test]
+fn doctor_profile_doc_returns_exit_three_when_profile_requirement_is_missing() {
+    let dir = tempdir().expect("tempdir");
+    write_exec_script(&dir.path().join("jq"), "#!/bin/sh\necho 'jq-1.7'\n");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", dir.path())
+        .args(["doctor", "--profile", "doc"])
+        .output()
+        .expect("run doctor");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(stdout_json["profile"]["name"], json!("doc"));
+    assert_eq!(stdout_json["profile"]["satisfied"], json!(false));
+    assert_eq!(
+        stdout_json["profile"]["requirements"][1]["capability"],
+        json!("pandoc.available")
+    );
+    assert_eq!(
+        stdout_json["profile"]["requirements"][1]["satisfied"],
+        json!(false)
+    );
+}
+
+#[test]
 fn doctor_emit_pipeline_writes_doctor_steps_to_stderr() {
     let dir = tempdir().expect("tempdir");
     write_exec_script(&dir.path().join("jq"), "#!/bin/sh\necho 'jq-1.7'\n");
@@ -212,6 +278,51 @@ fn doctor_emit_pipeline_writes_doctor_steps_to_stderr() {
 }
 
 #[test]
+fn doctor_profile_emit_pipeline_writes_profile_steps_to_stderr() {
+    let dir = tempdir().expect("tempdir");
+    write_exec_script(&dir.path().join("jq"), "#!/bin/sh\necho 'jq-1.7'\n");
+    write_exec_script(&dir.path().join("rg"), "#!/bin/sh\necho 'ripgrep 14.1.0'\n");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", dir.path())
+        .args(["--emit-pipeline", "doctor", "--profile", "scan"])
+        .output()
+        .expect("run doctor");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(
+        stderr_json["steps"],
+        json!(["doctor_profile_probe", "doctor_profile_evaluate"])
+    );
+    let guards = stderr_json["deterministic_guards"]
+        .as_array()
+        .expect("deterministic_guards array");
+    assert!(
+        guards
+            .iter()
+            .any(|guard| guard == &json!("static_profile_requirement_table_v1"))
+    );
+
+    let tools = stderr_json["external_tools"]
+        .as_array()
+        .expect("external_tools array");
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|tool| {
+            tool["name"]
+                .as_str()
+                .expect("external_tools[*].name must be string")
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec!["jq", "yq", "mlr", "pandoc", "xh", "nb", "mdbook", "rg"]
+    );
+    assert!(tools.iter().all(|tool| tool["used"] == Value::Bool(true)));
+}
+
+#[test]
 fn doctor_emit_pipeline_fingerprint_reuses_probe_versions() {
     let dir = tempdir().expect("tempdir");
     let jq_counter = dir.path().join("jq.counter");
@@ -239,6 +350,34 @@ fn doctor_emit_pipeline_fingerprint_reuses_probe_versions() {
     assert_eq!(
         stderr_json["fingerprint"]["tool_versions"]["jq"],
         json!("jq-v1")
+    );
+}
+
+#[test]
+fn doctor_profile_emit_pipeline_fingerprint_includes_profile_probes() {
+    let dir = tempdir().expect("tempdir");
+    write_exec_script(&dir.path().join("jq"), "#!/bin/sh\necho 'jq-1.7'\n");
+    write_exec_script(&dir.path().join("rg"), "#!/bin/sh\necho 'ripgrep 14.1.0'\n");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", dir.path())
+        .args(["--emit-pipeline", "doctor", "--profile", "scan"])
+        .output()
+        .expect("run doctor");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"]["jq"],
+        json!("jq-1.7")
+    );
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"]["rg"],
+        json!("ripgrep 14.1.0")
+    );
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"]["pandoc"],
+        json!("error: unavailable in PATH")
     );
 }
 

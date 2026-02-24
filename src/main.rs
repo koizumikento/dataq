@@ -192,12 +192,6 @@ struct RecipeArgs {
     command: RecipeSubcommand,
 }
 
-#[derive(Debug, clap::Args)]
-struct DoctorArgs {
-    #[arg(long, default_value_t = false)]
-    capabilities: bool,
-}
-
 #[derive(Debug, Subcommand)]
 enum RecipeSubcommand {
     /// Run a declarative recipe file.
@@ -208,6 +202,15 @@ enum RecipeSubcommand {
 struct RecipeRunArgs {
     #[arg(long)]
     file: PathBuf,
+}
+
+#[derive(Debug, clap::Args)]
+struct DoctorArgs {
+    #[arg(long, default_value_t = false)]
+    capabilities: bool,
+
+    #[arg(long, value_enum)]
+    profile: Option<CliDoctorProfile>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -263,6 +266,17 @@ enum CliAggregateMetric {
 enum CliAssertNormalizeMode {
     GithubActionsJobs,
     GitlabCiJobs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliDoctorProfile {
+    Core,
+    CiJobs,
+    Doc,
+    Api,
+    Notes,
+    Book,
+    Scan,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -344,6 +358,20 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
             CliContractCommand::Recipe => Self::Recipe,
+        }
+    }
+}
+
+impl From<CliDoctorProfile> for doctor::DoctorProfile {
+    fn from(value: CliDoctorProfile) -> Self {
+        match value {
+            CliDoctorProfile::Core => Self::Core,
+            CliDoctorProfile::CiJobs => Self::CiJobs,
+            CliDoctorProfile::Doc => Self::Doc,
+            CliDoctorProfile::Api => Self::Api,
+            CliDoctorProfile::Notes => Self::Notes,
+            CliDoctorProfile::Book => Self::Book,
+            CliDoctorProfile::Scan => Self::Scan,
         }
     }
 }
@@ -1124,11 +1152,11 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
 }
 
 fn run_doctor(args: DoctorArgs, emit_pipeline: bool) -> i32 {
-    let doctor_args = doctor::DoctorCommandArgs {
+    let command_input = doctor::DoctorCommandInput {
         capabilities: args.capabilities,
-        profile: None,
+        profile: args.profile.map(Into::into),
     };
-    let (response, trace) = doctor::run_with_args_and_trace(&doctor_args);
+    let (response, trace) = doctor::run_with_input_and_trace(command_input);
     let exit_code = match response.exit_code {
         0 | 3 => {
             if emit_json_stdout(&response.payload) {
@@ -1172,7 +1200,7 @@ fn run_doctor(args: DoctorArgs, emit_pipeline: bool) -> i32 {
             preferred_tool_versions: trace.tool_versions,
             ..Default::default()
         };
-        let pipeline_report = build_doctor_pipeline_report();
+        let pipeline_report = build_doctor_pipeline_report(command_input.profile);
         emit_pipeline_report_with_context(&pipeline_report, &fingerprint_context);
     }
     exit_code
@@ -1687,15 +1715,15 @@ fn build_aggregate_pipeline_report(
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
-fn build_doctor_pipeline_report() -> PipelineReport {
+fn build_doctor_pipeline_report(profile: Option<doctor::DoctorProfile>) -> PipelineReport {
     let mut report = PipelineReport::new(
         "doctor",
         PipelineInput::new(Vec::new()),
-        doctor::pipeline_steps(),
-        doctor::deterministic_guards(),
+        doctor::pipeline_steps(profile),
+        doctor::deterministic_guards(profile),
     );
-    for tool in ["jq", "yq", "mlr"] {
-        report = report.mark_external_tool_used(tool);
+    for tool in doctor::pipeline_external_tools(profile) {
+        report = report.mark_external_tool_used(&tool);
     }
     report
 }

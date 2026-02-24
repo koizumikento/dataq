@@ -17,7 +17,7 @@ dataq [--emit-pipeline] <command> [options]
 - `join`: 2入力をキー結合してJSON配列を出力
 - `aggregate`: グループ集計をJSON配列で出力
 - `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
-- `doctor`: `jq` / `yq` / `mlr` の実行前診断
+- `doctor`: 依存ツール診断（`--profile` 指定でワークフロー別要件評価）
 - `recipe run`: 宣言的レシピを定義順に実行
 - `contract`: サブコマンド出力契約を機械可読JSONで取得
 - `mcp`: MCP(JSON-RPC 2.0) 単発リクエストを処理
@@ -81,6 +81,8 @@ dataq [--emit-pipeline] <command> [options]
   - すべてのtoolで共通引数として受理（default: `false`）
   - `true` のときのみ `structuredContent.pipeline` を返す
   - 従来CLIの stderr pipeline 出力契約は不変（`mcp` ではstderrへ出さない）
+- `dataq.doctor` の追加引数:
+  - `profile`（任意）: `core|ci-jobs|doc|api|notes|book|scan`
 - 競合入力（path + inline を同一logical inputで同時指定）:
   - JSON-RPCエラーではなく `tools/call` 成功レスポンス内で `exit_code=3` / `isError=true` を返す
 - `mcp` モードのプロセス終了コード:
@@ -195,12 +197,12 @@ dataq [--emit-pipeline] <command> [options]
 
 - `0`: 成功
 - `2`: 検証失敗（期待仕様に不一致）
-- `3`: 入力不正（フォーマット不正、必須引数不足など）または `doctor` の必須ツール不足/起動不可、要求プロファイルの必須 capability 不足
+- `3`: 入力不正（フォーマット不正、必須引数不足など）または `doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）
 - `1`: その他実行時エラー
 
 ## `doctor` コマンド契約（MVP）
 
-- コマンド: `dataq doctor`
+- コマンド: `dataq doctor [--capabilities] [--profile <core|ci-jobs|doc|api|notes|book|scan>]`
 - 出力: JSON（stdout）
 - 診断対象ツール順: `jq`, `yq`, `mlr`（固定順）
 - 各ツールの出力項目:
@@ -209,17 +211,25 @@ dataq [--emit-pipeline] <command> [options]
   - `version`: 取得できたバージョン文字列（取得不可時は `null`）
   - `executable`: `--version` で起動できたか
   - `message`: 判定理由（失敗時は対処案内を含む）
-- `--capabilities` 指定時は `capabilities` 配列を追加:
-  - `name`: capability 名
-  - `tool`: 関連ツール名
-  - `available`: capability probe 成否
-  - `message`: 判定理由
+- `--capabilities` 指定時:
+  - `capabilities`: 固定順の capability probe 結果
   - 固定順: `jq.null_input_eval`, `yq.null_input_eval`, `mlr.help_command`
+  - 各項目: `name`, `tool`, `available`, `message`
+- `--profile` 指定時:
+  - `capabilities`: 固定順の capability probe 結果（`*.available`）
+  - `profile`: 要件評価結果
+    - `version`: `dataq.doctor.profile.requirements.v1`
+    - `name`: 指定プロフィール名
+    - `description`: プロフィール用途
+    - `satisfied`: 要件充足可否
+    - `requirements[*]`: `capability`, `tool`, `reason`, `satisfied`, `message`
 - 終了コード:
-  - `0`: 全ツール起動可能
-  - `3`: 1つ以上が欠如または起動不可、または要求プロファイルの必須 capability 不足
+  - `0`: `--profile` 未指定時は `jq|yq|mlr` が全て起動可能、`--profile` 指定時は選択 profile 要件を充足
+  - `3`: `--profile` 未指定時は `jq|yq|mlr` のいずれかが欠如または起動不可、`--profile` 指定時は選択 profile 要件未達
   - `1`: 予期しない内部エラー
-- `--emit-pipeline` 指定時の `steps`: `doctor_probe_tools`, `doctor_probe_capabilities`
+- `--emit-pipeline` 指定時の `steps`:
+  - `--profile` 未指定: `doctor_probe_tools`, `doctor_probe_capabilities`
+  - `--profile` 指定時: `doctor_profile_probe`, `doctor_profile_evaluate`
 
 ### `sdiff` のCIゲート拡張
 
@@ -243,7 +253,7 @@ pipeline JSON schema:
 - `command`: 実行サブコマンド名
 - `input`: 入力ソース情報（stdin/path, format）
 - `steps`: 実行ステップ配列
-- `external_tools`: `jq|yq|mlr` の使用有無（ツール名順で固定）
+- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
 - `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ), `dataq_version`）
 - `deterministic_guards`: 適用した決定性ガード

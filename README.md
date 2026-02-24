@@ -69,7 +69,7 @@ dataq [--emit-pipeline] <command> [options]
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
-| `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | `--capabilities` |
+| `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
 | `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
 | `mcp` | 1リクエスト単位の MCP(JSON-RPC 2.0) サーバーモード | stdin で JSON-RPC リクエストを1件入力 |
@@ -116,6 +116,9 @@ dataq doctor
 
 # 依存ツールの機能診断
 dataq doctor --capabilities
+
+# ワークフロー別プリフライト（例: scan）
+dataq doctor --profile scan
 
 # assert 出力契約を取得
 dataq contract --command assert
@@ -345,18 +348,24 @@ dataq assert \
 
 ### 8. `doctor`
 
-実行環境で `jq` / `yq` / `mlr` が利用可能かを、固定順 (`jq`, `yq`, `mlr`) で診断。
+実行環境の依存を診断。`--capabilities` と `--profile` に対応。
 
 - 出力は JSON 固定（stdout）
 - 各ツールの診断項目: `name`, `found`, `version`, `executable`, `message`
-- `--capabilities` 指定時は `capabilities` 配列を追加出力
+- `--capabilities` 指定時:
+  - `capabilities`（固定順）を追加: `jq.null_input_eval`, `yq.null_input_eval`, `mlr.help_command`
   - 項目: `name`, `tool`, `available`, `message`
-  - 固定順: `jq.null_input_eval`, `yq.null_input_eval`, `mlr.help_command`
+- `--profile <core|ci-jobs|doc|api|notes|book|scan>` 指定時:
+  - `capabilities`（固定順の `*.available` probe）を追加
+  - `profile`（`version`, `name`, `description`, `satisfied`, `requirements`）を追加
+  - `version` は `dataq.doctor.profile.requirements.v1` で固定
 - 終了コード:
-  - `0`: 3ツールすべて起動可能
-  - `3`: 1つ以上が欠如または起動不可、または要求プロファイルの必須 capability 不足
+  - `0`: `--profile` 未指定時は `jq|yq|mlr` が全て起動可能、`--profile` 指定時は選択 profile 要件を充足
+  - `3`: `--profile` 未指定時は `jq|yq|mlr` のいずれかが欠如または起動不可、`--profile` 指定時は選択 profile 要件未達
   - `1`: 予期しない内部エラー
-- `--emit-pipeline` 指定時は stderr に診断ステップ (`doctor_probe_tools`, `doctor_probe_capabilities`) を追加出力
+- `--emit-pipeline` 指定時の stderr ステップ:
+  - `--profile` 未指定: `doctor_probe_tools`, `doctor_probe_capabilities`
+  - `--profile` 指定: `doctor_profile_probe`, `doctor_profile_evaluate`
 
 ### 9. `recipe run`
 

@@ -81,10 +81,10 @@ const MERGE_NOTES: &[&str] = &[
 ];
 const DOCTOR_NOTES: &[&str] = &[
     "Tool reports are always ordered as `jq`, `yq`, `mlr`.",
-    "`capabilities` is included when `doctor --capabilities` (or MCP `capabilities=true`) is requested.",
-    "Exit code 3 indicates missing/non-executable dependencies or missing required capabilities for a requested profile.",
+    "`--capabilities` adds capability probes; `--profile` adds `capabilities` and `profile` with static requirement table versioning.",
+    "Exit code 3 means missing/non-executable `jq|yq|mlr` without `--profile`, or unsatisfied selected profile requirements with `--profile`.",
 ];
-const DOCTOR_EXIT_CODE_3: &str = "tool/dependency availability failure (missing or non-executable `jq`, `yq`, or `mlr`) or missing required capabilities for a requested profile";
+const DOCTOR_EXIT_CODE_3: &str = "without `--profile`: missing/non-executable `jq|yq|mlr`; with `--profile`: selected profile requirements are unsatisfied";
 const RECIPE_NOTES: &[&str] = &[
     "`steps` preserves recipe definition order.",
     "Step-level unmatched results map to exit code 2.",
