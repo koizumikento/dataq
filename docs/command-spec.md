@@ -12,6 +12,7 @@ dataq [--emit-pipeline] <command> [options]
 
 - `canon`: 入力を決定的に正規化し、JSON/JSONLへ変換
 - `assert`: ルールまたはJSON Schemaで検証
+- `gate schema`: JSON Schemaで品質ゲートを実行（`assert --schema` ラッパー）
 - `sdiff`: 2データセットの構造差分を出力
 - `profile`: フィールド統計を決定的JSONで出力
 - `join`: 2入力をキー結合してJSON配列を出力
@@ -26,11 +27,11 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|assert|sdiff|profile|merge|doctor|recipe>`
+  - `dataq contract --command <canon|assert|gate-schema|sdiff|profile|merge|doctor|recipe>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `assert`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+  - `canon`, `assert`, `gate-schema`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -86,6 +87,7 @@ dataq [--emit-pipeline] <command> [options]
 - `tools/list` の tool 順序は固定:
   - `dataq.canon`
   - `dataq.assert`
+  - `dataq.gate.schema`
   - `dataq.sdiff`
   - `dataq.profile`
   - `dataq.join`
@@ -175,6 +177,19 @@ dataq [--emit-pipeline] <command> [options]
 - `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
 - `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義を `yq -> jq -> mlr` の固定3段でジョブ単位レコードへ正規化してから `--rules` 検証可能（`yq`/`jq`/`mlr` 必須）
+
+## `gate schema` 契約（MVP）
+
+- コマンド:
+  - `dataq gate schema --schema <path> [--input <path|->] [--from <preset>]`
+- 目的:
+  - JSON Schema 検証を専用 gate コマンドとして固定化
+  - 出力JSONは `assert --schema` と同一形状（`matched`, `mismatch_count`, `mismatches`）
+- `--from`:
+  - 対応 preset: `github-actions-jobs`, `gitlab-ci-jobs`
+  - 未対応 preset は明示的エラーで exit `3`
+- `--emit-pipeline`:
+  - `steps`: `gate_schema_ingest`, `gate_schema_validate`
 
 ## `merge` パス別ポリシー（MVP）
 

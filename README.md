@@ -64,6 +64,7 @@ dataq [--emit-pipeline] <command> [options]
 | --- | --- | --- |
 | `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>`（stdin時は省略可） |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
+| `gate schema` | JSON Schema で品質ゲートを実行（`assert --schema` の専用ラッパー） | `--schema <path>` |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
@@ -96,6 +97,9 @@ dataq assert --input out.jsonl --rules rules.yaml
 
 # JSON Schema 検証
 dataq assert --input out.jsonl --schema schema.json
+
+# schema 専用ゲート（assert --schema からの移行先）
+dataq gate schema --input out.jsonl --schema schema.json
 
 # 差分確認
 dataq sdiff --left before.jsonl --right after.jsonl
@@ -277,6 +281,25 @@ dataq assert \
   --rules examples/assert-rules/github-actions/jobs.rules.yaml
 ```
 
+### 2.1 `gate schema`
+
+`assert --schema` と同じ JSON Schema 検証レポートを、schema gate 用コマンドとして明示化。
+
+- コマンド: `dataq gate schema --schema <path> [--input <path|->] [--from <preset>]`
+- 出力JSON: `assert --schema` と同一（`matched`, `mismatch_count`, `mismatches`）
+- 終了コード:
+  - `0`: すべて一致
+  - `2`: schema mismatch
+  - `3`: schema/input/`--from` の入力不正
+  - `1`: 予期しない内部エラー
+- `--from`（任意）:
+  - `github-actions-jobs`
+  - `gitlab-ci-jobs`
+  - 未対応 preset は明示的エラーで終了コード `3`
+- 移行ガイド:
+  - 旧: `dataq assert --schema schema.json --input in.json`
+  - 新: `dataq gate schema --schema schema.json --input in.json`
+
 ### 3. `sdiff`
 
 変換前後または2データセット間の構造差分を返す。
@@ -406,11 +429,11 @@ steps:
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|assert|sdiff|profile|merge|doctor|recipe>`
+- `dataq contract --command <canon|assert|gate-schema|sdiff|profile|merge|doctor|recipe>`
   - 単一コマンドの契約を1オブジェクトで返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-  - 順序: `canon`, `assert`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+  - 順序: `canon`, `assert`, `gate-schema`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
@@ -449,6 +472,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
 - `tools/list` のツール順序は固定:
   - `dataq.canon`
   - `dataq.assert`
+  - `dataq.gate.schema`
   - `dataq.sdiff`
   - `dataq.profile`
   - `dataq.join`

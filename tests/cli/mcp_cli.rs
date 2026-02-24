@@ -8,6 +8,7 @@ use tempfile::{TempDir, tempdir};
 const TOOL_ORDER: [&str; 11] = [
     "dataq.canon",
     "dataq.assert",
+    "dataq.gate.schema",
     "dataq.sdiff",
     "dataq.profile",
     "dataq.join",
@@ -91,6 +92,20 @@ fn tools_list_is_deterministic_and_in_fixed_order() {
 #[test]
 fn tools_call_minimal_success_for_all_tools() {
     let toolchain = FakeToolchain::new();
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("gate-schema.json");
+    fs::write(
+        &schema_path,
+        r#"{
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer"}
+            }
+        }"#,
+    )
+    .expect("write schema");
+
     let requests = vec![
         (
             "dataq.canon",
@@ -110,6 +125,13 @@ fn tools_call_minimal_success_for_all_tools() {
                     },
                     "count": {"min": 1, "max": 1}
                 }
+            }),
+        ),
+        (
+            "dataq.gate.schema",
+            json!({
+                "input": [{"id": 1}],
+                "schema_path": schema_path,
             }),
         ),
         (

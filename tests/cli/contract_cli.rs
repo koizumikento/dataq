@@ -50,7 +50,14 @@ fn contract_all_returns_deterministic_order() {
     assert_eq!(
         commands,
         vec![
-            "canon", "assert", "sdiff", "profile", "merge", "doctor", "recipe"
+            "canon",
+            "assert",
+            "gate-schema",
+            "sdiff",
+            "profile",
+            "merge",
+            "doctor",
+            "recipe"
         ]
     );
     for entry in contracts {
