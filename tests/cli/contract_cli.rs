@@ -86,7 +86,7 @@ fn contract_doctor_command_exit_three_describes_dependency_failure() {
     assert_eq!(
         payload["exit_codes"]["3"],
         json!(
-            "tool/dependency availability failure (missing or non-executable `jq`, `yq`, or `mlr`)"
+            "tool/dependency availability failure (missing or non-executable `jq`, `yq`, or `mlr`) or missing required capabilities for a requested profile"
         )
     );
 }

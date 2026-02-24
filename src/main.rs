@@ -56,7 +56,7 @@ enum Commands {
     /// Execute a declarative deterministic recipe.
     Recipe(RecipeArgs),
     /// Diagnose jq/yq/mlr availability and executability.
-    Doctor,
+    Doctor(DoctorArgs),
     /// Emit machine-readable output contracts for subcommands.
     Contract(ContractArgs),
     /// Handle a single MCP JSON-RPC request from stdin.
@@ -190,6 +190,12 @@ struct AggregateArgs {
 struct RecipeArgs {
     #[command(subcommand)]
     command: RecipeSubcommand,
+}
+
+#[derive(Debug, clap::Args)]
+struct DoctorArgs {
+    #[arg(long, default_value_t = false)]
+    capabilities: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -370,7 +376,7 @@ fn run() -> i32 {
         Commands::Aggregate(args) => run_aggregate(args, emit_pipeline),
         Commands::Merge(args) => run_merge(args, emit_pipeline),
         Commands::Recipe(args) => run_recipe(args, emit_pipeline),
-        Commands::Doctor => run_doctor(emit_pipeline),
+        Commands::Doctor(args) => run_doctor(args, emit_pipeline),
         Commands::Contract(args) => run_contract(args, emit_pipeline),
         Commands::Mcp => run_mcp(),
     }
@@ -1117,8 +1123,12 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_doctor(emit_pipeline: bool) -> i32 {
-    let (response, trace) = doctor::run_with_trace();
+fn run_doctor(args: DoctorArgs, emit_pipeline: bool) -> i32 {
+    let doctor_args = doctor::DoctorCommandArgs {
+        capabilities: args.capabilities,
+        profile: None,
+    };
+    let (response, trace) = doctor::run_with_args_and_trace(&doctor_args);
     let exit_code = match response.exit_code {
         0 | 3 => {
             if emit_json_stdout(&response.payload) {
