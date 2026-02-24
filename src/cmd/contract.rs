@@ -84,8 +84,7 @@ const DOCTOR_NOTES: &[&str] = &[
     "`--capabilities` adds capability probes; `--profile` adds `capabilities` and `profile` with static requirement table versioning.",
     "Exit code 3 means missing/non-executable `jq|yq|mlr` without `--profile`, or unsatisfied selected profile requirements with `--profile`.",
 ];
-const DOCTOR_EXIT_CODE_3: &str =
-    "without `--profile`: missing/non-executable `jq|yq|mlr`; with `--profile`: selected profile requirements are unsatisfied";
+const DOCTOR_EXIT_CODE_3: &str = "without `--profile`: missing/non-executable `jq|yq|mlr`; with `--profile`: selected profile requirements are unsatisfied";
 const RECIPE_NOTES: &[&str] = &[
     "`steps` preserves recipe definition order.",
     "Step-level unmatched results map to exit code 2.",
