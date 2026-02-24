@@ -20,6 +20,7 @@ dataq [--emit-pipeline] <command> [options]
 - `doctor`: `jq` / `yq` / `mlr` の実行前診断
 - `recipe run`: 宣言的レシピを定義順に実行
 - `contract`: サブコマンド出力契約を機械可読JSONで取得
+- `mcp`: MCP(JSON-RPC 2.0) 単発リクエストを処理
 
 ## `contract` 出力契約（MVP）
 
@@ -41,6 +42,50 @@ dataq [--emit-pipeline] <command> [options]
   - `1`: 予期しない内部エラー
 - 副作用:
   - `contract` は参照専用（read-only）で、入力データやファイル内容を変更しない
+
+## `mcp` 単発JSON-RPC契約（MVP）
+
+- 実行形式:
+  - `dataq mcp`
+- 入出力:
+  - stdin: JSON-RPC 2.0 request 1件
+  - stdout: JSON-RPC 2.0 response 1件
+- 対応method:
+  - `initialize`
+  - `tools/list`
+  - `tools/call`
+- JSON-RPCエラーコード:
+  - `-32700` parse error
+  - `-32600` invalid request
+  - `-32601` method not found
+  - `-32602` invalid params
+  - `-32603` internal error
+- `tools/list` の tool 順序は固定:
+  - `dataq.canon`
+  - `dataq.assert`
+  - `dataq.sdiff`
+  - `dataq.profile`
+  - `dataq.join`
+  - `dataq.aggregate`
+  - `dataq.merge`
+  - `dataq.doctor`
+  - `dataq.contract`
+  - `dataq.recipe.run`
+- `tools/call` 結果契約:
+  - `result.structuredContent.exit_code: i32`
+  - `result.structuredContent.payload: JSON`
+  - `result.structuredContent.pipeline: JSON`（`emit_pipeline=true`時のみ）
+  - `result.isError = (exit_code != 0)`
+  - `result.content[0].text` は `structuredContent` と等価なJSON文字列
+- `emit_pipeline`:
+  - すべてのtoolで共通引数として受理（default: `false`）
+  - `true` のときのみ `structuredContent.pipeline` を返す
+  - 従来CLIの stderr pipeline 出力契約は不変（`mcp` ではstderrへ出さない）
+- 競合入力（path + inline を同一logical inputで同時指定）:
+  - JSON-RPCエラーではなく `tools/call` 成功レスポンス内で `exit_code=3` / `isError=true` を返す
+- `mcp` モードのプロセス終了コード:
+  - JSON-RPCレスポンスを書き出せた場合は tool `exit_code` に関係なく `0`
+  - レスポンス出力不能な致命的I/O時のみ `3`
 
 ## `join` コマンド契約（MVP）
 

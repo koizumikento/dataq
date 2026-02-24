@@ -21,7 +21,8 @@ fn help_is_available() {
         .stdout(predicate::str::contains("sdiff"))
         .stdout(predicate::str::contains("profile"))
         .stdout(predicate::str::contains("doctor"))
-        .stdout(predicate::str::contains("contract"));
+        .stdout(predicate::str::contains("contract"))
+        .stdout(predicate::str::contains("mcp"));
 }
 
 #[test]

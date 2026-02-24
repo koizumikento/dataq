@@ -12,10 +12,17 @@ use crate::io;
 /// Input arguments for join command execution API.
 #[derive(Debug, Clone)]
 pub struct JoinCommandArgs {
-    pub left: PathBuf,
-    pub right: PathBuf,
+    pub left: JoinCommandInput,
+    pub right: JoinCommandInput,
     pub on: String,
     pub how: JoinHow,
+}
+
+/// Input source descriptor for join command execution.
+#[derive(Debug, Clone)]
+pub enum JoinCommandInput {
+    Path(PathBuf),
+    Inline(Vec<Value>),
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -44,7 +51,7 @@ impl JoinPipelineTrace {
 pub fn run_with_trace(args: &JoinCommandArgs) -> (JoinCommandResponse, JoinPipelineTrace) {
     let mut trace = JoinPipelineTrace::default();
 
-    let left = match load_input_rows(args.left.as_path(), "left") {
+    let left = match resolve_input_rows(&args.left, "left") {
         Ok(values) => values,
         Err(message) => {
             return (
@@ -60,7 +67,7 @@ pub fn run_with_trace(args: &JoinCommandArgs) -> (JoinCommandResponse, JoinPipel
         }
     };
 
-    let right = match load_input_rows(args.right.as_path(), "right") {
+    let right = match resolve_input_rows(&args.right, "right") {
         Ok(values) => values,
         Err(message) => {
             return (
@@ -128,6 +135,13 @@ pub fn run_with_trace(args: &JoinCommandArgs) -> (JoinCommandResponse, JoinPipel
             },
             trace,
         ),
+    }
+}
+
+fn resolve_input_rows(source: &JoinCommandInput, role: &'static str) -> Result<Vec<Value>, String> {
+    match source {
+        JoinCommandInput::Path(path) => load_input_rows(path.as_path(), role),
+        JoinCommandInput::Inline(values) => Ok(values.clone()),
     }
 }
 

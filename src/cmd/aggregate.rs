@@ -12,10 +12,17 @@ use crate::io;
 /// Input arguments for aggregate command execution API.
 #[derive(Debug, Clone)]
 pub struct AggregateCommandArgs {
-    pub input: PathBuf,
+    pub input: AggregateCommandInput,
     pub group_by: String,
     pub metric: AggregateMetric,
     pub target: String,
+}
+
+/// Input source descriptor for aggregate command execution.
+#[derive(Debug, Clone)]
+pub enum AggregateCommandInput {
+    Path(PathBuf),
+    Inline(Vec<Value>),
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -46,7 +53,7 @@ pub fn run_with_trace(
 ) -> (AggregateCommandResponse, AggregatePipelineTrace) {
     let mut trace = AggregatePipelineTrace::default();
 
-    let values = match load_input_rows(args.input.as_path()) {
+    let values = match resolve_input_rows(&args.input) {
         Ok(values) => values,
         Err(message) => {
             return (
@@ -114,6 +121,13 @@ pub fn run_with_trace(
             },
             trace,
         ),
+    }
+}
+
+fn resolve_input_rows(source: &AggregateCommandInput) -> Result<Vec<Value>, String> {
+    match source {
+        AggregateCommandInput::Path(path) => load_input_rows(path.as_path()),
+        AggregateCommandInput::Inline(values) => Ok(values.clone()),
     }
 }
 

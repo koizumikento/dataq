@@ -19,6 +19,7 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 ## 責務分離
 
 - `cmd`: CLI境界（引数・入出力・終了コード）
+  - `mcp` は JSON-RPC 2.0 envelope を厳密検証し、tool呼び出し結果を `structuredContent` へ正規化
 - `engine`: ビジネスロジック（正規化・検証・差分）
 - `io`: フォーマット入出力（JSON/YAML/CSV/JSONL）
 - `adapters`: 外部ツール呼び出し（`jq`/`yq`/`mlr`）
@@ -57,6 +58,7 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - `--emit-pipeline` で内部実行ステップと外部ツール使用有無を表示可能にする
 - `--emit-pipeline` の `stage_diagnostics` で、段ごとの順序・件数・状態を追跡可能にする
 - 多段連携機能では、機能ごとに定義したステップ順を仕様化し、診断出力でも同順序で表示する
+- `mcp` 境界では、tool失敗はJSON-RPCエラーへ昇格させず `structuredContent.exit_code` で保持し、JSON-RPCレイヤはtransport/envelope責務に限定する
 
 ## 関連ドキュメント
 

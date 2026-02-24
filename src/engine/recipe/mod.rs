@@ -106,22 +106,52 @@ pub fn run(recipe_path: &Path) -> Result<RecipeExecution, RecipeExecutionError> 
         Err(kind) => {
             return Err(RecipeExecutionError {
                 kind,
-                pipeline_steps,
+                pipeline_steps: pipeline_steps.clone(),
             });
         }
     };
 
+    execute_loaded_recipe(loaded, recipe_base_dir.as_path(), &mut pipeline_steps)
+}
+
+/// Runs a recipe from an already-loaded JSON value.
+///
+/// `base_dir` is used to resolve relative file paths referenced by recipe steps.
+/// When `None`, the current directory (`.`) is used.
+pub fn run_from_value(
+    recipe_value: Value,
+    base_dir: Option<&Path>,
+) -> Result<RecipeExecution, RecipeExecutionError> {
+    let mut pipeline_steps = vec![
+        "load_recipe_inline".to_string(),
+        "validate_recipe_schema".to_string(),
+    ];
+    let resolved_base_dir = base_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    execute_loaded_recipe(
+        recipe_value,
+        resolved_base_dir.as_path(),
+        &mut pipeline_steps,
+    )
+}
+
+fn execute_loaded_recipe(
+    loaded: Value,
+    recipe_base_dir: &Path,
+    pipeline_steps: &mut Vec<String>,
+) -> Result<RecipeExecution, RecipeExecutionError> {
     let recipe = match parse_recipe(loaded) {
         Ok(recipe) => recipe,
         Err(kind) => {
             return Err(RecipeExecutionError {
                 kind,
-                pipeline_steps,
+                pipeline_steps: pipeline_steps.clone(),
             });
         }
     };
 
-    execute_recipe(recipe, recipe_base_dir.as_path(), &mut pipeline_steps)
+    execute_recipe(recipe, recipe_base_dir, pipeline_steps)
 }
 
 fn execute_recipe(

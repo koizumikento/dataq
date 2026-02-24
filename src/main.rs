@@ -7,7 +7,7 @@ use std::process::{self, Command};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
-    aggregate, r#assert, canon, contract, doctor, join, merge, profile, recipe, sdiff,
+    aggregate, r#assert, canon, contract, doctor, join, mcp, merge, profile, recipe, sdiff,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{
@@ -59,6 +59,8 @@ enum Commands {
     Doctor,
     /// Emit machine-readable output contracts for subcommands.
     Contract(ContractArgs),
+    /// Handle a single MCP JSON-RPC request from stdin.
+    Mcp,
 }
 
 #[derive(Debug, clap::Args)]
@@ -370,6 +372,7 @@ fn run() -> i32 {
         Commands::Recipe(args) => run_recipe(args, emit_pipeline),
         Commands::Doctor => run_doctor(emit_pipeline),
         Commands::Contract(args) => run_contract(args, emit_pipeline),
+        Commands::Mcp => run_mcp(),
     }
 }
 
@@ -781,8 +784,8 @@ fn run_join(args: JoinArgs, emit_pipeline: bool) -> i32 {
     let left_format = dataq_io::resolve_input_format(None, Some(args.left.as_path())).ok();
     let right_format = dataq_io::resolve_input_format(None, Some(args.right.as_path())).ok();
     let command_args = join::JoinCommandArgs {
-        left: args.left.clone(),
-        right: args.right.clone(),
+        left: join::JoinCommandInput::Path(args.left.clone()),
+        right: join::JoinCommandInput::Path(args.right.clone()),
         on: args.on.clone(),
         how: args.how.into(),
     };
@@ -836,7 +839,7 @@ fn run_join(args: JoinArgs, emit_pipeline: bool) -> i32 {
 fn run_aggregate(args: AggregateArgs, emit_pipeline: bool) -> i32 {
     let input_format = dataq_io::resolve_input_format(None, Some(args.input.as_path())).ok();
     let command_args = aggregate::AggregateCommandArgs {
-        input: args.input.clone(),
+        input: aggregate::AggregateCommandInput::Path(args.input.clone()),
         group_by: args.group_by.clone(),
         metric: args.metric.into(),
         target: args.target.clone(),
@@ -1174,7 +1177,9 @@ fn run_recipe(args: RecipeArgs, emit_pipeline: bool) -> i32 {
 fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool) -> i32 {
     let recipe_format = dataq_io::resolve_input_format(None, Some(args.file.as_path())).ok();
     let command_args = recipe::RecipeCommandArgs {
-        file: args.file.clone(),
+        file_path: Some(args.file.clone()),
+        recipe: None,
+        base_dir: None,
     };
     let (response, trace) = recipe::run_with_trace(&command_args);
 
@@ -1221,6 +1226,12 @@ fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool) -> i32 {
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
+}
+
+fn run_mcp() -> i32 {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    mcp::run_single_request(stdin.lock(), stdout.lock())
 }
 
 fn run_contract(args: ContractArgs, emit_pipeline: bool) -> i32 {

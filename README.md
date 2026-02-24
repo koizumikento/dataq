@@ -72,6 +72,7 @@ dataq [--emit-pipeline] <command> [options]
 | `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
 | `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
+| `mcp` | 1リクエスト単位の MCP(JSON-RPC 2.0) サーバーモード | stdin で JSON-RPC リクエストを1件入力 |
 
 グローバルオプション:
 
@@ -115,6 +116,9 @@ dataq doctor
 
 # assert 出力契約を取得
 dataq contract --command assert
+
+# MCP単発リクエスト（tools/list）
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | dataq mcp
 
 # ID で対応付けし、更新時刻は差分対象外
 dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-path '$["updated_at"]'
@@ -390,6 +394,45 @@ steps:
   - 順序: `canon`, `assert`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
+
+### 10. `mcp`
+
+MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理します。
+
+- 実行コマンド: `dataq mcp`
+- 入出力:
+  - stdin: JSON-RPC 2.0 リクエスト1件
+  - stdout: JSON-RPC 2.0 レスポンス1件
+- 対応メソッド:
+  - `initialize`
+  - `tools/list`
+  - `tools/call`
+- `tools/list` のツール順序は固定:
+  - `dataq.canon`
+  - `dataq.assert`
+  - `dataq.sdiff`
+  - `dataq.profile`
+  - `dataq.join`
+  - `dataq.aggregate`
+  - `dataq.merge`
+  - `dataq.doctor`
+  - `dataq.contract`
+  - `dataq.recipe.run`
+- `tools/call` レスポンス:
+  - `structuredContent.exit_code`
+  - `structuredContent.payload`
+  - `structuredContent.pipeline`（`emit_pipeline=true` のときのみ）
+  - `isError = (exit_code != 0)`
+  - `content[0].text` には `structuredContent` と等価なJSON文字列を格納
+- JSON-RPCエラーコード:
+  - `-32700` parse error
+  - `-32600` invalid request
+  - `-32601` method not found
+  - `-32602` invalid params
+  - `-32603` internal error
+- `mcp` モードのプロセス終了コード:
+  - レスポンスを書き出せた場合は、ツール実行結果に関係なく `0`
+  - レスポンス出力不能な致命的I/O時のみ `3`
 
 ## 設計ドキュメント
 

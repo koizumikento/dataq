@@ -4,6 +4,7 @@ pub mod canon;
 pub mod contract;
 pub mod doctor;
 pub mod join;
+pub mod mcp;
 pub mod merge;
 pub mod profile;
 pub mod recipe;

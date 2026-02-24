@@ -8,7 +8,9 @@ use crate::engine::recipe::{self, RecipeExecutionErrorKind};
 /// Input arguments for recipe run command execution API.
 #[derive(Debug, Clone)]
 pub struct RecipeCommandArgs {
-    pub file: PathBuf,
+    pub file_path: Option<PathBuf>,
+    pub recipe: Option<Value>,
+    pub base_dir: Option<PathBuf>,
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -25,7 +27,38 @@ pub struct RecipePipelineTrace {
 }
 
 pub fn run_with_trace(args: &RecipeCommandArgs) -> (RecipeCommandResponse, RecipePipelineTrace) {
-    match recipe::run(args.file.as_path()) {
+    let execution = match (&args.file_path, &args.recipe) {
+        (Some(_), Some(_)) => {
+            return (
+                RecipeCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": "`file_path` and inline `recipe` are mutually exclusive",
+                    }),
+                },
+                RecipePipelineTrace::default(),
+            );
+        }
+        (None, None) => {
+            return (
+                RecipeCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": "either `file_path` or inline `recipe` must be provided",
+                    }),
+                },
+                RecipePipelineTrace::default(),
+            );
+        }
+        (Some(file_path), None) => recipe::run(file_path.as_path()),
+        (None, Some(recipe_value)) => {
+            recipe::run_from_value(recipe_value.clone(), args.base_dir.as_deref())
+        }
+    };
+
+    match execution {
         Ok(execution) => {
             let exit_code = execution.report.exit_code;
             let payload = match serde_json::to_value(execution.report) {

@@ -23,6 +23,21 @@ pub struct MergeCommandResponse {
     pub payload: Value,
 }
 
+/// Input source descriptor for merge command execution.
+#[derive(Debug, Clone)]
+pub enum MergeCommandInput {
+    Path(PathBuf),
+    Inline(Value),
+}
+
+/// Input arguments for inline-capable merge command execution.
+#[derive(Debug, Clone)]
+pub struct MergeCommandInputArgs {
+    pub base: MergeCommandInput,
+    pub overlays: Vec<MergeCommandInput>,
+    pub policy: MergePolicy,
+}
+
 pub fn run(args: &MergeCommandArgs) -> MergeCommandResponse {
     run_with_policy_paths(args, &[])
 }
@@ -32,7 +47,25 @@ pub fn run_with_policy_paths(
     args: &MergeCommandArgs,
     policy_paths: &[String],
 ) -> MergeCommandResponse {
-    match execute(args, policy_paths) {
+    let input_args = MergeCommandInputArgs {
+        base: MergeCommandInput::Path(args.base.clone()),
+        overlays: args
+            .overlays
+            .iter()
+            .cloned()
+            .map(MergeCommandInput::Path)
+            .collect(),
+        policy: args.policy,
+    };
+    run_with_policy_paths_from_inputs(&input_args, policy_paths)
+}
+
+/// Runs merge command with optional path-scoped policy overrides from mixed path/inline inputs.
+pub fn run_with_policy_paths_from_inputs(
+    args: &MergeCommandInputArgs,
+    policy_paths: &[String],
+) -> MergeCommandResponse {
+    match execute_from_inputs(args, policy_paths) {
         Ok(merged) => MergeCommandResponse {
             exit_code: 0,
             payload: merged,
@@ -47,7 +80,10 @@ pub fn run_with_policy_paths(
     }
 }
 
-fn execute(args: &MergeCommandArgs, policy_paths: &[String]) -> Result<Value, CommandError> {
+fn execute_from_inputs(
+    args: &MergeCommandInputArgs,
+    policy_paths: &[String],
+) -> Result<Value, CommandError> {
     if args.overlays.is_empty() {
         return Err(CommandError::InputUsage(
             "at least one --overlay is required".to_string(),
@@ -56,8 +92,8 @@ fn execute(args: &MergeCommandArgs, policy_paths: &[String]) -> Result<Value, Co
 
     let base = load_document(&args.base, "base")?;
     let mut overlays = Vec::with_capacity(args.overlays.len());
-    for overlay_path in &args.overlays {
-        overlays.push(load_document(overlay_path, "overlay")?);
+    for overlay in &args.overlays {
+        overlays.push(load_document(overlay, "overlay")?);
     }
     let path_policies = parse_policy_paths(policy_paths)?;
 
@@ -69,7 +105,14 @@ fn execute(args: &MergeCommandArgs, policy_paths: &[String]) -> Result<Value, Co
     ))
 }
 
-fn load_document(path: &Path, role: &'static str) -> Result<Value, CommandError> {
+fn load_document(source: &MergeCommandInput, role: &'static str) -> Result<Value, CommandError> {
+    match source {
+        MergeCommandInput::Path(path) => load_document_from_path(path.as_path(), role),
+        MergeCommandInput::Inline(value) => Ok(value.clone()),
+    }
+}
+
+fn load_document_from_path(path: &Path, role: &'static str) -> Result<Value, CommandError> {
     let format = io::resolve_input_format(None, Some(path)).map_err(|error| {
         CommandError::InputUsage(format!(
             "unable to resolve {role} format from `{}`: {error}",
