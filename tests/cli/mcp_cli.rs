@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 21] = [
+const TOOL_ORDER: [&str; 22] = [
     "dataq.canon",
     "dataq.ingest.api",
     "dataq.ingest.yaml_jobs",
@@ -20,6 +20,7 @@ const TOOL_ORDER: [&str; 21] = [
     "dataq.ingest.book",
     "dataq.join",
     "dataq.aggregate",
+    "dataq.scan.text",
     "dataq.merge",
     "dataq.doctor",
     "dataq.contract",
@@ -1063,6 +1064,7 @@ impl FakeToolchain {
         write_fake_yq_script(bin_dir.join("yq"));
         write_fake_xh_script(bin_dir.join("xh"));
         write_fake_pandoc_script(bin_dir.join("pandoc"));
+        write_fake_rg_script(bin_dir.join("rg"));
 
         Self {
             _dir: dir,
@@ -1213,6 +1215,67 @@ exit 9
     path
 }
 
+fn write_fake_rg_script(path: PathBuf) -> PathBuf {
+    let script = r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    printf 'ripgrep 14.1.1\n'
+    exit 0
+  fi
+done
+
+pattern=""
+root=""
+capture_pattern=0
+capture_path=0
+for arg in "$@"; do
+  if [ "$capture_pattern" = "1" ]; then
+    pattern="$arg"
+    capture_pattern=0
+    continue
+  fi
+  if [ "$capture_path" = "1" ]; then
+    root="$arg"
+    capture_path=0
+    continue
+  fi
+  if [ "$arg" = "-e" ]; then
+    capture_pattern=1
+    continue
+  fi
+  if [ "$arg" = "--" ]; then
+    capture_path=1
+    continue
+  fi
+done
+
+if [ -z "$pattern" ] || [ -z "$root" ]; then
+  prev=""
+  last=""
+  for arg in "$@"; do
+    prev="$last"
+    last="$arg"
+  done
+  if [ -z "$pattern" ]; then
+    pattern="$prev"
+  fi
+  if [ -z "$root" ]; then
+    root="$last"
+  fi
+fi
+
+if [ "$pattern" = "token" ]; then
+  printf '{"type":"match","data":{"path":{"text":"%s/file.txt"},"lines":{"text":"token\\n"},"line_number":1,"submatches":[{"match":{"text":"token"},"start":0,"end":5}]}}\n' "$root"
+  exit 0
+fi
+
+exit 1
+"#;
+
+    fs::write(&path, script).expect("write fake rg script");
+    set_executable(&path);
+    path
+}
 fn set_executable(path: &PathBuf) {
     #[cfg(unix)]
     {

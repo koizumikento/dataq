@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Cursor, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
     aggregate, r#assert, canon, contract, diff, doctor, emit, gate, ingest, ingest_api,
-    ingest_yaml_jobs, join, mcp, merge, profile, recipe, sdiff,
+    ingest_yaml_jobs, join, mcp, merge, profile, recipe, scan, sdiff,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::ingest::IngestYamlJobsMode;
@@ -60,6 +60,8 @@ enum Commands {
     Join(JoinArgs),
     /// Aggregate grouped metrics with deterministic JSON output.
     Aggregate(AggregateArgs),
+    /// Scan repository text with deterministic structured match output.
+    Scan(ScanArgs),
     /// Merge base and overlays with a deterministic merge policy.
     Merge(MergeArgs),
     /// Execute a declarative deterministic recipe.
@@ -346,6 +348,40 @@ struct AggregateArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct ScanArgs {
+    #[command(subcommand)]
+    command: ScanSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ScanSubcommand {
+    /// Scan text files for a regex pattern.
+    Text(ScanTextArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ScanTextArgs {
+    #[arg(long)]
+    pattern: String,
+
+    #[arg(long)]
+    path: Option<PathBuf>,
+
+    #[arg(long = "glob")]
+    glob: Vec<String>,
+
+    #[arg(long)]
+    max_matches: Option<usize>,
+
+    #[arg(long, default_value_t = false)]
+    policy_mode: bool,
+
+    /// Enable optional jq projection stage for parsed matches.
+    #[arg(long, default_value_t = false)]
+    jq_project: bool,
+}
+
+#[derive(Debug, clap::Args)]
 struct RecipeArgs {
     #[command(subcommand)]
     command: RecipeSubcommand,
@@ -539,6 +575,7 @@ enum CliContractCommand {
     #[value(name = "ingest-notes")]
     IngestNotes,
     IngestBook,
+    Scan,
     Merge,
     Doctor,
     #[value(name = "recipe-run", alias = "recipe")]
@@ -631,6 +668,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::IngestDoc => Self::IngestDoc,
             CliContractCommand::IngestNotes => Self::IngestNotes,
             CliContractCommand::IngestBook => Self::IngestBook,
+            CliContractCommand::Scan => Self::Scan,
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
             CliContractCommand::RecipeRun => Self::RecipeRun,
@@ -716,6 +754,7 @@ fn run() -> i32 {
         Commands::Profile(args) => run_profile(args, emit_pipeline),
         Commands::Join(args) => run_join(args, emit_pipeline),
         Commands::Aggregate(args) => run_aggregate(args, emit_pipeline),
+        Commands::Scan(args) => run_scan(args, emit_pipeline),
         Commands::Merge(args) => run_merge(args, emit_pipeline),
         Commands::Recipe(args) => run_recipe(args, emit_pipeline),
         Commands::Doctor(args) => run_doctor(args, emit_pipeline),
@@ -1734,6 +1773,69 @@ fn run_aggregate(args: AggregateArgs, emit_pipeline: bool) -> i32 {
 
     if emit_pipeline {
         let pipeline_report = build_aggregate_pipeline_report(&args, input_format, &trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn run_scan(args: ScanArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        ScanSubcommand::Text(text_args) => run_scan_text(text_args, emit_pipeline),
+    }
+}
+
+fn run_scan_text(args: ScanTextArgs, emit_pipeline: bool) -> i32 {
+    let path = args.path.clone().unwrap_or_else(|| PathBuf::from("."));
+    let command_args = scan::ScanTextCommandArgs {
+        pattern: args.pattern.clone(),
+        path: path.clone(),
+        glob: args.glob.clone(),
+        max_matches: args.max_matches,
+        policy_mode: args.policy_mode,
+        jq_project: args.jq_project,
+    };
+    let (response, trace) = scan::run_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 | 2 => {
+            if emit_json_stdout(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize scan text output".to_string(),
+                    json!({"command": "scan"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize scan text error".to_string(),
+                    json!({"command": "scan"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected scan text exit code: {other}"),
+                json!({"command": "scan"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_scan_text_pipeline_report(&args, &path, &trace);
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
@@ -2980,6 +3082,46 @@ fn build_ingest_book_pipeline_report(
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
+fn build_scan_text_pipeline_report(
+    _args: &ScanTextArgs,
+    path: &Path,
+    trace: &scan::ScanTextPipelineTrace,
+) -> PipelineReport {
+    let mut report = ensure_external_tool(
+        PipelineReport::new(
+            "scan",
+            PipelineInput::new(vec![PipelineInputSource::path(
+                "path",
+                path.display().to_string(),
+                None,
+            )]),
+            scan::pipeline_steps(),
+            scan::deterministic_guards(),
+        ),
+        "rg",
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
+fn ensure_external_tool(mut report: PipelineReport, tool_name: &str) -> PipelineReport {
+    if !report
+        .external_tools
+        .iter()
+        .any(|tool| tool.name == tool_name)
+    {
+        report
+            .external_tools
+            .push(dataq::domain::report::ExternalToolUsage {
+                name: tool_name.to_string(),
+                used: false,
+            });
+    }
+    report
+}
+
 fn build_merge_pipeline_report(
     args: &MergeArgs,
     base_format: Option<Format>,
@@ -3283,6 +3425,7 @@ fn resolve_tool_executable(tool_name: &str) -> String {
         "xh" => Some("DATAQ_XH_BIN"),
         "pandoc" => Some("DATAQ_PANDOC_BIN"),
         "mdbook" => Some("DATAQ_MDBOOK_BIN"),
+        "rg" => Some("DATAQ_RG_BIN"),
         "nb" => Some("DATAQ_NB_BIN"),
         _ => None,
     };

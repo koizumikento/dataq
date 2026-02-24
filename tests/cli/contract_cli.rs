@@ -62,6 +62,7 @@ fn contract_all_returns_deterministic_order() {
             "ingest.doc",
             "ingest.notes",
             "ingest-book",
+            "scan",
             "merge",
             "doctor",
             "recipe-run",

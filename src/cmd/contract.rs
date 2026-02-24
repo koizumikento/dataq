@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 16] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 17] = [
     ContractCommand::Canon,
     ContractCommand::IngestApi,
     ContractCommand::Ingest,
@@ -15,6 +15,7 @@ pub const ORDERED_COMMANDS: [ContractCommand; 16] = [
     ContractCommand::IngestDoc,
     ContractCommand::IngestNotes,
     ContractCommand::IngestBook,
+    ContractCommand::Scan,
     ContractCommand::Merge,
     ContractCommand::Doctor,
     ContractCommand::RecipeRun,
@@ -36,6 +37,7 @@ pub enum ContractCommand {
     IngestDoc,
     IngestNotes,
     IngestBook,
+    Scan,
     Merge,
     Doctor,
     RecipeRun,
@@ -88,6 +90,7 @@ const INGEST_NOTES_FIELDS: &[&str] = &[
     "metadata",
 ];
 const INGEST_BOOK_FIELDS: &[&str] = &["book", "summary"];
+const SCAN_FIELDS: &[&str] = &["matches", "summary"];
 const DOCTOR_FIELDS: &[&str] = &["tools"];
 const RECIPE_RUN_FIELDS: &[&str] = &["matched", "exit_code", "steps"];
 const RECIPE_LOCK_FIELDS: &[&str] = &[
@@ -145,6 +148,10 @@ const INGEST_NOTES_NOTES: &[&str] = &[
 const INGEST_BOOK_NOTES: &[&str] = &[
     "`summary.order` preserves `SUMMARY.md` chapter ordering.",
     "`--include-files` controls optional chapter `file` metadata fields.",
+];
+const SCAN_NOTES: &[&str] = &[
+    "`matches` is deterministically sorted by `path`, `line`, `column`.",
+    "When `policy_mode=true`, exit code 2 indicates forbidden patterns were found.",
 ];
 const MERGE_NOTES: &[&str] = &[
     "Output is the merged root JSON value.",
@@ -294,6 +301,13 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
                 "input/usage error or missing `jq`/`mdbook`",
             ),
             notes: INGEST_BOOK_NOTES,
+        },
+        ContractCommand::Scan => CommandContract {
+            command: "scan",
+            schema: "dataq.scan.text.output.v1",
+            output_fields: SCAN_FIELDS,
+            exit_codes: exit_codes("forbidden-pattern matches when `policy_mode` is enabled"),
+            notes: SCAN_NOTES,
         },
         ContractCommand::Merge => CommandContract {
             command: "merge",

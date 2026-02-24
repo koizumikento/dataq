@@ -262,6 +262,8 @@ const INGEST_BOOK_PROJECT_FILTER: &str = r#"
   }
 }
 "#;
+const SCAN_TEXT_PROJECT_FILTER: &str =
+    r#"map({path: .path, line: .line, column: .column, text: .text, line_text: .line_text})"#;
 
 #[derive(Debug, Error)]
 pub enum JqError {
@@ -313,6 +315,10 @@ pub fn project_document_ast(ast: &Value) -> Result<Value, JqError> {
 
 pub fn project_ingest_book(payload: &Value) -> Result<Value, JqError> {
     run_filter_value(payload, INGEST_BOOK_PROJECT_FILTER)
+}
+
+pub fn project_scan_text_matches(values: &[Value]) -> Result<Vec<Value>, JqError> {
+    run_filter(values, SCAN_TEXT_PROJECT_FILTER)
 }
 
 fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {

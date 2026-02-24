@@ -7,4 +7,5 @@ pub mod join;
 pub mod merge;
 pub mod profile;
 pub mod recipe;
+pub mod scan;
 pub mod sdiff;
