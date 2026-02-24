@@ -74,6 +74,32 @@ fn ingest_api_success_emits_normalized_payload_and_pipeline() {
 }
 
 #[test]
+fn ingest_api_uses_xh_print_hb_output_contract() {
+    let Some((tool_dir, xh_bin, jq_bin)) = create_ingest_tool_shims_with_print_guard() else {
+        return;
+    };
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_XH_BIN", &xh_bin)
+        .env("DATAQ_JQ_BIN", &jq_bin)
+        .args(["ingest", "api", "--url", "https://example.test/items"])
+        .output()
+        .expect("run ingest api");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(stdout_json["status"], Value::from(200));
+    assert_eq!(stdout_json["body"]["ok"], Value::Bool(true));
+
+    drop(tool_dir);
+}
+
+#[test]
 fn ingest_api_expect_status_mismatch_returns_exit_two_with_payload() {
     let Some((tool_dir, xh_bin, jq_bin)) = create_ingest_tool_shims() else {
         return;
@@ -132,6 +158,16 @@ fn parse_last_stderr_json(stderr: &[u8]) -> Value {
 }
 
 fn create_ingest_tool_shims() -> Option<(tempfile::TempDir, String, String)> {
+    create_ingest_tool_shims_internal(false)
+}
+
+fn create_ingest_tool_shims_with_print_guard() -> Option<(tempfile::TempDir, String, String)> {
+    create_ingest_tool_shims_internal(true)
+}
+
+fn create_ingest_tool_shims_internal(
+    enforce_response_print_mode: bool,
+) -> Option<(tempfile::TempDir, String, String)> {
     if Command::new("python3").arg("--version").output().is_err() {
         return None;
     }
@@ -140,8 +176,41 @@ fn create_ingest_tool_shims() -> Option<(tempfile::TempDir, String, String)> {
     let xh_path = dir.path().join("fake-xh");
     let jq_path = dir.path().join("fake-jq");
 
-    write_exec_script(
-        &xh_path,
+    let xh_script = if enforce_response_print_mode {
+        r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    printf 'xh 0.23.0\n'
+    exit 0
+  fi
+done
+
+print_mode_ok=0
+for arg in "$@"; do
+  if [ "$arg" = "--print=hb" ]; then
+    print_mode_ok=1
+    break
+  fi
+done
+
+if [ "$print_mode_ok" != "1" ]; then
+  cat <<'EOF'
+NOT_HTTP
+EOF
+  exit 0
+fi
+
+cat <<'EOF'
+HTTP/1.1 200 OK
+Date: Mon, 24 Feb 2025 10:00:00 GMT
+Content-Type: application/json
+ETag: W/"abc"
+X-Trace-Id: trace-123
+
+{"ok":true,"n":1}
+EOF
+"#
+    } else {
         r#"#!/bin/sh
 for arg in "$@"; do
   if [ "$arg" = "--version" ]; then
@@ -159,8 +228,10 @@ X-Trace-Id: trace-123
 
 {"ok":true,"n":1}
 EOF
-"#,
-    );
+"#
+    };
+    write_exec_script(&xh_path, xh_script);
+
     write_exec_script(
         &jq_path,
         r#"#!/bin/sh

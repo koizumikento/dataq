@@ -59,7 +59,7 @@ pub fn fetch(request: &XhRequest) -> Result<XhResponse, XhError> {
     command
         .arg("--ignore-stdin")
         .arg("--pretty=none")
-        .arg("--print=Hb")
+        .arg("--print=hb")
         .arg(request.method.as_str())
         .arg(request.url.as_str());
 

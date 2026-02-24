@@ -333,12 +333,12 @@ fn execute_ingest_api(args: &Map<String, Value>) -> ToolExecution {
         Err(message) => return input_usage_error(message),
     };
     let method = match parse_optional_string(args, &["method"], "method") {
-        Ok(Some(value)) => match value.as_str() {
-            "GET" | "get" => ingest_api::IngestApiMethod::Get,
-            "POST" | "post" => ingest_api::IngestApiMethod::Post,
-            "PUT" | "put" => ingest_api::IngestApiMethod::Put,
-            "PATCH" | "patch" => ingest_api::IngestApiMethod::Patch,
-            "DELETE" | "delete" => ingest_api::IngestApiMethod::Delete,
+        Ok(Some(value)) => match value.to_ascii_uppercase().as_str() {
+            "GET" => ingest_api::IngestApiMethod::Get,
+            "POST" => ingest_api::IngestApiMethod::Post,
+            "PUT" => ingest_api::IngestApiMethod::Put,
+            "PATCH" => ingest_api::IngestApiMethod::Patch,
+            "DELETE" => ingest_api::IngestApiMethod::Delete,
             _ => return input_usage_error("`method` must be GET|POST|PUT|PATCH|DELETE"),
         },
         Ok(None) => ingest_api::IngestApiMethod::Get,

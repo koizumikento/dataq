@@ -300,6 +300,34 @@ fn tools_call_minimal_success_for_all_tools() {
 }
 
 #[test]
+fn tools_call_ingest_api_accepts_mixed_case_method() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        101,
+        "dataq.ingest.api",
+        json!({
+            "url": "https://example.test/items",
+            "method": "Get",
+            "header": ["accept:application/json"]
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(false));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["status"],
+        Value::from(200)
+    );
+}
+
+#[test]
 fn emit_pipeline_true_includes_pipeline() {
     let request = tool_call_request(
         1,
