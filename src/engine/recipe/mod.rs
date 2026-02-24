@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -809,61 +808,22 @@ fn ordered_lock_tool_names(lock: &RecipeLockFile) -> Vec<String> {
 fn collect_actual_tool_versions(lock: &RecipeLockFile) -> BTreeMap<String, String> {
     let mut versions = BTreeMap::new();
     for tool_name in ordered_lock_tool_names(lock) {
-        versions.insert(
-            tool_name.clone(),
-            probe_recipe_lock_tool_version(tool_name.as_str()),
-        );
+        let value = match probe_recipe_lock_tool_version(tool_name.as_str()) {
+            Ok(version) => version,
+            Err(error) => lock_probe_failure_as_replay_value(error),
+        };
+        versions.insert(tool_name, value);
     }
     versions
 }
 
-fn probe_recipe_lock_tool_version(tool_name: &str) -> String {
-    if !RECIPE_LOCK_TOOL_ORDER.contains(&tool_name) {
-        return format!("error: unsupported tool `{tool_name}`");
-    }
-
-    let executable = resolve_recipe_lock_tool_executable(tool_name);
-    match Command::new(executable).arg("--version").output() {
-        Ok(output) => {
-            let captured = first_non_empty_line(&output.stdout)
-                .or_else(|| first_non_empty_line(&output.stderr))
-                .unwrap_or_else(|| "error: empty --version output".to_string());
-            if output.status.success() {
-                captured
-            } else {
-                format!(
-                    "error: `--version` exited with status {} ({captured})",
-                    status_label(output.status.code()),
-                )
-            }
+fn lock_probe_failure_as_replay_value(error: RecipeExecutionErrorKind) -> String {
+    match error {
+        RecipeExecutionErrorKind::InputUsage(message)
+        | RecipeExecutionErrorKind::Internal(message) => {
+            format!("error: {message}")
         }
-        Err(error) => match error.kind() {
-            std::io::ErrorKind::NotFound => "error: unavailable in PATH".to_string(),
-            std::io::ErrorKind::PermissionDenied => "error: not executable".to_string(),
-            _ => format!("error: failed to execute --version ({error})"),
-        },
     }
-}
-
-fn resolve_recipe_lock_tool_executable(tool_name: &str) -> String {
-    match tool_name {
-        "jq" => env::var("DATAQ_JQ_BIN").unwrap_or_else(|_| "jq".to_string()),
-        "yq" => env::var("DATAQ_YQ_BIN").unwrap_or_else(|_| "yq".to_string()),
-        "mlr" => env::var("DATAQ_MLR_BIN").unwrap_or_else(|_| "mlr".to_string()),
-        _ => tool_name.to_string(),
-    }
-}
-
-fn first_non_empty_line(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    text.lines()
-        .find(|line| !line.trim().is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn status_label(code: Option<i32>) -> String {
-    code.map(|value| value.to_string())
-        .unwrap_or_else(|| "terminated by signal".to_string())
 }
 
 fn parse_step_args<T: for<'de> Deserialize<'de>>(
@@ -1024,7 +984,7 @@ fn hash_recipe_command_graph(recipe: &RecipeFile) -> String {
     hasher.update_len_prefixed(b"dataq.recipe.lock.command_graph.v1");
     hasher.update_len_prefixed(recipe.version.as_bytes());
     for (index, step) in recipe.steps.iter().enumerate() {
-        hasher.update_len_prefixed(&(index as u64).to_le_bytes());
+        hasher.update_len_prefixed(index.to_string().as_bytes());
         hasher.update_len_prefixed(step.kind.as_bytes());
     }
     hasher.finish_hex()
@@ -1034,7 +994,7 @@ fn hash_recipe_args(recipe: &RecipeFile) -> Result<String, RecipeExecutionErrorK
     let mut hasher = DeterministicHasher::new();
     hasher.update_len_prefixed(b"dataq.recipe.lock.args.v1");
     for (index, step) in recipe.steps.iter().enumerate() {
-        hasher.update_len_prefixed(&(index as u64).to_le_bytes());
+        hasher.update_len_prefixed(index.to_string().as_bytes());
         hasher.update_len_prefixed(step.kind.as_bytes());
 
         let canonical_args = canonicalize_value(

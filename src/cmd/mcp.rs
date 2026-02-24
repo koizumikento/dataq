@@ -27,7 +27,7 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 15] = [
+const TOOL_ORDER: [&str; 16] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
@@ -1574,8 +1574,7 @@ fn execute_recipe_replay(args: &Map<String, Value>) -> ToolExecution {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
-    let file_path = match parse_optional_path(args, &["file_path", "file", "recipe_path"], "file")
-    {
+    let file_path = match parse_optional_path(args, &["file_path", "file", "recipe_path"], "file") {
         Ok(Some(path)) => path,
         Ok(None) => return input_usage_error("missing required `file`"),
         Err(message) => return input_usage_error(message),

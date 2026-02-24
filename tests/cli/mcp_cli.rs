@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 15] = [
+const TOOL_ORDER: [&str; 16] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
