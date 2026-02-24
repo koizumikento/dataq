@@ -3,6 +3,7 @@ pub mod assert;
 pub mod canon;
 pub mod contract;
 pub mod doctor;
+pub mod emit;
 pub mod join;
 pub mod mcp;
 pub mod merge;
