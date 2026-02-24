@@ -718,9 +718,15 @@ fn execute_gate_policy(args: &Map<String, Value>) -> ToolExecution {
         Ok(None) => return input_usage_error("missing required `input`"),
         Err(message) => return input_usage_error(message),
     };
+    if let ValueInputSource::Path(path) = &input
+        && gate::is_stdin_path(path.as_path())
+    {
+        return input_usage_error(
+            "`dataq.gate.policy` does not accept stdin sentinel paths for `input_path` (`-`, `/dev/stdin`); provide a file path or inline `input`",
+        );
+    }
 
     let input_format = match &input {
-        ValueInputSource::Path(path) if gate::is_stdin_path(path.as_path()) => Some(Format::Json),
         ValueInputSource::Path(path) => io::resolve_input_format(None, Some(path.as_path())).ok(),
         ValueInputSource::Inline(_) => Some(Format::Json),
     };
@@ -753,12 +759,6 @@ fn execute_gate_policy(args: &Map<String, Value>) -> ToolExecution {
                 .map(Format::as_str),
         ));
         match &input {
-            ValueInputSource::Path(path) if gate::is_stdin_path(path.as_path()) => {
-                sources.push(PipelineInputSource::stdin(
-                    "input",
-                    input_format.map(Format::as_str),
-                ));
-            }
             ValueInputSource::Path(path) => {
                 sources.push(PipelineInputSource::path(
                     "input",

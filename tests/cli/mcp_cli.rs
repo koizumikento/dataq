@@ -379,6 +379,54 @@ fn gate_policy_unknown_source_returns_exit_three() {
 }
 
 #[test]
+fn gate_policy_rejects_stdin_sentinel_input_path() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": ["id"],
+            "forbid_keys": [],
+            "fields": {
+                "id": {"type": "integer"}
+            },
+            "count": {"min": 1, "max": 1}
+        }"#,
+    )
+    .expect("write rules");
+
+    let expected_message = "`dataq.gate.policy` does not accept stdin sentinel paths for `input_path` (`-`, `/dev/stdin`); provide a file path or inline `input`";
+    for (index, input_path) in ["-", "/dev/stdin"].into_iter().enumerate() {
+        let request = tool_call_request(
+            20 + index as i64,
+            "dataq.gate.policy",
+            json!({
+                "input_path": input_path,
+                "rules_path": rules_path
+            }),
+        );
+
+        let output = run_mcp(&request, None);
+        assert_eq!(output.status.code(), Some(0), "input_path: {input_path}");
+
+        let response = parse_stdout_json(&output.stdout);
+        assert_eq!(response["result"]["isError"], Value::Bool(true));
+        assert_eq!(
+            response["result"]["structuredContent"]["exit_code"],
+            Value::from(3)
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["payload"]["error"],
+            Value::from("input_usage_error")
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["payload"]["message"],
+            Value::from(expected_message)
+        );
+    }
+}
+
+#[test]
 fn unknown_tool_name_returns_exit_three() {
     let request = tool_call_request(2, "dataq.unknown", json!({}));
 
