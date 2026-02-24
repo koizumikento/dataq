@@ -436,6 +436,8 @@ pub enum IngestBookError {
         #[source]
         source: std::io::Error,
     },
+    #[error("summary file `{path}` resolves outside book root")]
+    SummaryPathOutsideRoot { path: String },
     #[error("invalid SUMMARY.md line {line}: {message}")]
     SummaryParse { line: usize, message: String },
     #[error("chapter path `{path}` at SUMMARY.md line {line} resolves outside book root")]
@@ -496,6 +498,15 @@ pub fn ingest_book(options: &IngestBookOptions) -> Result<IngestBookReport, Inge
         normalize_lexical_path(root.join(Path::new(metadata.src.as_str()))).join("SUMMARY.md");
     if !summary_path.is_file() {
         return Err(IngestBookError::MissingSummary {
+            path: normalize_path_string(&summary_path),
+        });
+    }
+    let summary_containment_path = canonicalize_for_containment(summary_path.as_path());
+    if summary_containment_path
+        .strip_prefix(root.as_path())
+        .is_err()
+    {
+        return Err(IngestBookError::SummaryPathOutsideRoot {
             path: normalize_path_string(&summary_path),
         });
     }
@@ -639,6 +650,13 @@ fn parse_summary(
                 path: parsed.target.clone(),
             }
         })?;
+        let canonical_target = canonicalize_for_containment(absolute_target.as_path());
+        if canonical_target.strip_prefix(root).is_err() {
+            return Err(IngestBookError::ChapterPathOutsideRoot {
+                line: line_no,
+                path: parsed.target.clone(),
+            });
+        }
 
         let index = chapters.len() + 1;
         chapters.push(FlatChapter {
@@ -972,6 +990,10 @@ fn normalize_lexical_path(path: impl AsRef<Path>) -> PathBuf {
     normalized
 }
 
+fn canonicalize_for_containment(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| normalize_lexical_path(path))
+}
+
 fn value_to_string(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(text)) => text.clone(),
@@ -1163,6 +1185,64 @@ src = "src"
             "src/chapters and guides/intro page.md"
         );
         assert_eq!(report.summary.order[1].path, "src/guides/quick start.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_summary_path_that_resolves_outside_root_via_src_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("book");
+        let outside = dir.path().join("outside-src");
+        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(&outside).expect("create outside src");
+        fs::write(root.join("book.toml"), "[book]\nsrc = \"src\"\n").expect("write book.toml");
+        fs::write(outside.join("SUMMARY.md"), "- [Escape](escape.md)\n").expect("write summary");
+        fs::write(outside.join("escape.md"), "# Escape\n").expect("write chapter");
+        symlink(&outside, root.join("src")).expect("symlink src");
+
+        let error = ingest_book(&IngestBookOptions {
+            root: root.clone(),
+            include_files: false,
+        })
+        .expect_err("must reject src symlink escape");
+        match error {
+            IngestBookError::SummaryPathOutsideRoot { path } => {
+                assert!(path.ends_with("/src/SUMMARY.md"), "unexpected path: {path}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_chapter_path_that_resolves_outside_root_via_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("book");
+        let src = root.join("src");
+        let outside = dir.path().join("outside-chapters");
+        fs::create_dir_all(&src).expect("create src");
+        fs::create_dir_all(&outside).expect("create outside chapters");
+        fs::write(root.join("book.toml"), "[book]\nsrc = \"src\"\n").expect("write book.toml");
+        fs::write(src.join("SUMMARY.md"), "- [Escape](escape.md)\n").expect("write summary");
+        fs::write(outside.join("escape.md"), "# Escape\n").expect("write chapter");
+        symlink(outside.join("escape.md"), src.join("escape.md")).expect("symlink chapter");
+
+        let error = ingest_book(&IngestBookOptions {
+            root: root.clone(),
+            include_files: false,
+        })
+        .expect_err("must reject chapter symlink escape");
+        match error {
+            IngestBookError::ChapterPathOutsideRoot { line, path } => {
+                assert_eq!(line, 1);
+                assert_eq!(path, "escape.md");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }
 
