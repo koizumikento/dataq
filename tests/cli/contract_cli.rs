@@ -86,10 +86,7 @@ fn contract_ingest_command_exit_three_describes_yaml_mode_tool_failures() {
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
     assert_eq!(payload["command"], json!("ingest yaml-jobs"));
-    assert_eq!(
-        payload["schema"],
-        json!("dataq.ingest.yaml_jobs.output.v1")
-    );
+    assert_eq!(payload["schema"], json!("dataq.ingest.yaml_jobs.output.v1"));
     assert_eq!(
         payload["exit_codes"]["3"],
         json!("input/usage error (malformed YAML, unknown mode, or missing `jq`/`yq`/`mlr`)")

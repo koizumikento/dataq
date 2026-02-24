@@ -8,8 +8,8 @@ use serde_json::{Map, Value, json};
 use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
-    canon, contract, diff, doctor, emit, gate, ingest_api, ingest_yaml_jobs, join, merge,
-    profile, recipe, sdiff,
+    canon, contract, diff, doctor, emit, gate, ingest_api, ingest_yaml_jobs, join, merge, profile,
+    recipe, sdiff,
 };
 use crate::domain::ingest::IngestYamlJobsMode;
 use crate::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
