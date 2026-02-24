@@ -51,6 +51,7 @@ fn contract_all_returns_deterministic_order() {
         commands,
         vec![
             "canon",
+            "ingest-api",
             "assert",
             "gate-schema",
             "gate",

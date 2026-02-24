@@ -2,8 +2,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 11] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 12] = [
     ContractCommand::Canon,
+    ContractCommand::IngestApi,
     ContractCommand::Assert,
     ContractCommand::GateSchema,
     ContractCommand::Gate,
@@ -20,6 +21,7 @@ pub const ORDERED_COMMANDS: [ContractCommand; 11] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractCommand {
     Canon,
+    IngestApi,
     Assert,
     GateSchema,
     Gate,
@@ -61,6 +63,7 @@ struct ExitCodeContract<'a> {
 }
 
 const NO_FIXED_ROOT_FIELDS: &[&str] = &[];
+const INGEST_API_FIELDS: &[&str] = &["source", "status", "headers", "body", "fetched_at"];
 const ASSERT_FIELDS: &[&str] = &["matched", "mismatch_count", "mismatches"];
 const GATE_FIELDS: &[&str] = &["matched", "violations", "details"];
 const SDIFF_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values"];
@@ -79,6 +82,10 @@ const RECIPE_LOCK_FIELDS: &[&str] = &[
 const CANON_NOTES: &[&str] = &[
     "Output is the canonicalized root JSON value.",
     "Top-level keys are input-dependent and therefore not fixed.",
+];
+const INGEST_API_NOTES: &[&str] = &[
+    "Fetch stage uses `xh` and normalize stage uses `jq`.",
+    "`headers` output is projected by explicit allowlist and deterministic order.",
 ];
 const ASSERT_NOTES: &[&str] = &[
     "Validation mismatch details are emitted in `mismatches`.",
@@ -161,6 +168,13 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: NO_FIXED_ROOT_FIELDS,
             exit_codes: exit_codes("validation mismatch is not used by this command"),
             notes: CANON_NOTES,
+        },
+        ContractCommand::IngestApi => CommandContract {
+            command: "ingest-api",
+            schema: "dataq.ingest.api.output.v1",
+            output_fields: INGEST_API_FIELDS,
+            exit_codes: exit_codes("`--expect-status` mismatch"),
+            notes: INGEST_API_NOTES,
         },
         ContractCommand::Assert => CommandContract {
             command: "assert",

@@ -60,6 +60,31 @@ map(
 )
 "#;
 
+const INGEST_API_NORMALIZE_FILTER: &str = r#"
+def allowlist: ["cache-control","content-type","date","etag","last-modified"];
+{
+  source: .source,
+  status: (.status | tonumber),
+  headers: (
+    (.headers // {})
+    | to_entries
+    | map({key: (.key | ascii_downcase), value: (.value | tostring)})
+    | map(select(.key as $k | allowlist | index($k)))
+    | sort_by(.key)
+    | from_entries
+  ),
+  body: (
+    .body as $body
+    | if ($body | type) == "string" then
+        (try ($body | fromjson) catch $body)
+      else
+        $body
+      end
+  ),
+  fetched_at: .fetched_at
+}
+"#;
+
 #[derive(Debug, Error)]
 pub enum JqError {
     #[error("`jq` is not available in PATH")]
@@ -74,6 +99,8 @@ pub enum JqError {
     Parse(serde_json::Error),
     #[error("jq output must be a JSON array")]
     OutputShape,
+    #[error("jq output must be a JSON object")]
+    OutputObjectShape,
     #[error("failed to serialize jq input: {0}")]
     Serialize(serde_json::Error),
 }
@@ -86,9 +113,30 @@ pub fn normalize_gitlab_ci_jobs(values: &[Value]) -> Result<Vec<Value>, JqError>
     run_filter(values, GITLAB_CI_JOBS_FILTER)
 }
 
+pub fn normalize_ingest_api_response(value: &Value) -> Result<Value, JqError> {
+    let parsed = run_filter_value(value, INGEST_API_NORMALIZE_FILTER)?;
+    match parsed {
+        Value::Object(_) => Ok(parsed),
+        _ => Err(JqError::OutputObjectShape),
+    }
+}
+
 fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {
-    let jq_bin = std::env::var("DATAQ_JQ_BIN").unwrap_or_else(|_| "jq".to_string());
     let input = serde_json::to_vec(values).map_err(JqError::Serialize)?;
+    let parsed = run_filter_bytes(&input, filter)?;
+    match parsed {
+        Value::Array(items) => Ok(items),
+        _ => Err(JqError::OutputShape),
+    }
+}
+
+fn run_filter_value(value: &Value, filter: &str) -> Result<Value, JqError> {
+    let input = serde_json::to_vec(value).map_err(JqError::Serialize)?;
+    run_filter_bytes(&input, filter)
+}
+
+fn run_filter_bytes(input: &[u8], filter: &str) -> Result<Value, JqError> {
+    let jq_bin = std::env::var("DATAQ_JQ_BIN").unwrap_or_else(|_| "jq".to_string());
     let mut child = match Command::new(&jq_bin)
         .arg("-c")
         .arg(filter)
@@ -117,9 +165,5 @@ fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {
         return Err(JqError::Execution(stderr.trim().to_string()));
     }
 
-    let parsed: Value = serde_json::from_slice(&output.stdout).map_err(JqError::Parse)?;
-    match parsed {
-        Value::Array(items) => Ok(items),
-        _ => Err(JqError::OutputShape),
-    }
+    serde_json::from_slice(&output.stdout).map_err(JqError::Parse)
 }

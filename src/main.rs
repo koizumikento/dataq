@@ -8,7 +8,7 @@ use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
     aggregate, r#assert, canon, contract, diff, doctor, emit, gate, join, mcp, merge, profile,
-    recipe, sdiff,
+    recipe, sdiff, ingest_api,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{
@@ -42,6 +42,8 @@ struct Cli {
 enum Commands {
     /// Canonicalize input deterministically.
     Canon(CanonArgs),
+    /// Ingest API response via xh and normalize it via jq.
+    Ingest(IngestArgs),
     /// Validate input values against rule definitions.
     Assert(AssertArgs),
     /// Run deterministic quality gates.
@@ -116,6 +118,41 @@ struct AssertArgs {
     /// Print machine-readable JSON Schema help for `--schema` and exit.
     #[arg(long, default_value_t = false)]
     schema_help: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestArgs {
+    #[command(subcommand)]
+    command: IngestSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum IngestSubcommand {
+    /// Fetch and normalize one API response deterministically.
+    Api(IngestApiArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestApiArgs {
+    #[arg(long)]
+    url: String,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = CliIngestApiMethod::Get,
+        ignore_case = true
+    )]
+    method: CliIngestApiMethod,
+
+    #[arg(long = "header")]
+    header: Vec<String>,
+
+    #[arg(long)]
+    body: Option<String>,
+
+    #[arg(long)]
+    expect_status: Option<u16>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -385,6 +422,15 @@ enum CliAssertNormalizeMode {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliIngestApiMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliGatePolicySource {
     ScanText,
     IngestDoc,
@@ -407,6 +453,7 @@ enum CliDoctorProfile {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliContractCommand {
     Canon,
+    IngestApi,
     Assert,
     GateSchema,
     Gate,
@@ -494,6 +541,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
     fn from(value: CliContractCommand) -> Self {
         match value {
             CliContractCommand::Canon => Self::Canon,
+            CliContractCommand::IngestApi => Self::IngestApi,
             CliContractCommand::Assert => Self::Assert,
             CliContractCommand::GateSchema => Self::GateSchema,
             CliContractCommand::Gate => Self::Gate,
@@ -522,6 +570,18 @@ impl From<CliDoctorProfile> for doctor::DoctorProfile {
     }
 }
 
+impl From<CliIngestApiMethod> for ingest_api::IngestApiMethod {
+    fn from(value: CliIngestApiMethod) -> Self {
+        match value {
+            CliIngestApiMethod::Get => Self::Get,
+            CliIngestApiMethod::Post => Self::Post,
+            CliIngestApiMethod::Put => Self::Put,
+            CliIngestApiMethod::Patch => Self::Patch,
+            CliIngestApiMethod::Delete => Self::Delete,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct CliError<'a> {
     error: &'a str,
@@ -543,6 +603,7 @@ fn run() -> i32 {
     let emit_pipeline = cli.emit_pipeline;
     match cli.command {
         Commands::Canon(args) => run_canon(args, emit_pipeline),
+        Commands::Ingest(args) => run_ingest(args, emit_pipeline),
         Commands::Assert(args) => run_assert(args, emit_pipeline),
         Commands::Gate(args) => run_gate(args, emit_pipeline),
         Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
@@ -872,6 +933,68 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         );
         emit_pipeline_report(&pipeline_report);
     }
+    exit_code
+}
+
+fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        IngestSubcommand::Api(api_args) => run_ingest_api(api_args, emit_pipeline),
+    }
+}
+
+fn run_ingest_api(args: IngestApiArgs, emit_pipeline: bool) -> i32 {
+    let command_args = ingest_api::IngestApiCommandArgs {
+        url: args.url.clone(),
+        method: args.method.into(),
+        headers: args.header.clone(),
+        body: args.body.clone(),
+        expect_status: args.expect_status,
+    };
+
+    let (response, trace) = ingest_api::run_with_trace(&command_args);
+    let exit_code = match response.exit_code {
+        0 | 2 => {
+            if emit_json_stdout(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest api response".to_string(),
+                    json!({"command": "ingest api"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest api error".to_string(),
+                    json!({"command": "ingest api"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected ingest api exit code: {other}"),
+                json!({"command": "ingest api"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_ingest_api_pipeline_report(&args, &trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+
     exit_code
 }
 
@@ -2209,6 +2332,27 @@ fn build_assert_pipeline_report(
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
+fn build_ingest_api_pipeline_report(
+    args: &IngestApiArgs,
+    trace: &ingest_api::IngestApiPipelineTrace,
+) -> PipelineReport {
+    let mut report = PipelineReport::new(
+        "ingest_api",
+        PipelineInput::new(vec![PipelineInputSource {
+            label: "url".to_string(),
+            source: "url".to_string(),
+            path: Some(args.url.clone()),
+            format: Some("http".to_string()),
+        }]),
+        ingest_api::pipeline_steps(),
+        ingest_api::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
 fn build_gate_schema_pipeline_report(
     args: &GateSchemaArgs,
     input_is_stdin: bool,
@@ -2281,7 +2425,6 @@ fn build_gate_policy_pipeline_report(
         gate::policy_deterministic_guards(source),
     )
 }
-
 fn build_sdiff_pipeline_report(
     args: &SdiffArgs,
     left_format: Option<Format>,
@@ -2673,15 +2816,12 @@ fn detect_tool_version(tool_name: &str, command_name: &str) -> String {
     }
 }
 
-fn resolve_tool_executable(tool_name: &str, command_name: &str) -> String {
-    if !matches!(command_name, "assert" | "gate.schema" | "diff.source") {
-        return tool_name.to_string();
-    }
-
+fn resolve_tool_executable(tool_name: &str, _command_name: &str) -> String {
     let env_key = match tool_name {
         "jq" => Some("DATAQ_JQ_BIN"),
         "yq" => Some("DATAQ_YQ_BIN"),
         "mlr" => Some("DATAQ_MLR_BIN"),
+        "xh" => Some("DATAQ_XH_BIN"),
         _ => None,
     };
 

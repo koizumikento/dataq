@@ -6,6 +6,7 @@ pub mod diff;
 pub mod doctor;
 pub mod emit;
 pub mod gate;
+pub mod ingest_api;
 pub mod join;
 pub mod mcp;
 pub mod merge;

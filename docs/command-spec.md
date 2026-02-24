@@ -11,6 +11,7 @@ dataq [--emit-pipeline] <command> [options]
 サブコマンド:
 
 - `canon`: 入力を決定的に正規化し、JSON/JSONLへ変換
+- `ingest api`: HTTP API 応答を `xh -> jq` で決定的JSONへ正規化
 - `assert`: ルールまたはJSON Schemaで検証
 - `gate schema`: JSON Schemaで品質ゲートを実行（`assert --schema` ラッパー）
 - `gate policy`: ルールベース品質ゲートを実行（`matched/violations/details`）
@@ -31,12 +32,12 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
+  - `dataq contract --command <canon|ingest-api|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
   - `--command recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+  - `canon`, `ingest-api`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -91,6 +92,7 @@ dataq [--emit-pipeline] <command> [options]
   - `-32603` internal error
 - `tools/list` の tool 順序は固定:
   - `dataq.canon`
+  - `dataq.ingest.api`
   - `dataq.assert`
   - `dataq.gate.schema`
   - `dataq.gate.policy`
@@ -291,6 +293,26 @@ dataq [--emit-pipeline] <command> [options]
 - `--emit-pipeline` 指定時の `steps`:
   - `--profile` 未指定: `doctor_probe_tools`, `doctor_probe_capabilities`
   - `--profile` 指定時: `doctor_profile_probe`, `doctor_profile_evaluate`
+
+## `ingest api` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq ingest api --url <url> [--method <GET|POST|PUT|PATCH|DELETE>] [--header <k:v>...] [--body <json>] [--expect-status <u16>]`
+- 出力: JSON オブジェクト（stdout）
+  - `source`: `{"kind":"api","url":"...","method":"..."}`
+  - `status`: HTTP status code (number)
+  - `headers`: allowlist 投影済みヘッダー
+  - `body`: JSONとして解釈可能ならJSON値、不能なら文字列
+  - `fetched_at`: RFC3339 UTC
+- 終了コード:
+  - `0`: 成功
+  - `2`: `--expect-status` 不一致
+  - `3`: 入力不正/依存不足（`xh` 不在・URL不正・`--body` 不正JSON）
+  - `1`: 予期しない内部エラー
+- `--emit-pipeline` 指定時の `steps`:
+  - `ingest_api_xh_fetch`
+  - `ingest_api_jq_normalize`
+- `external_tools` には `jq` と `xh` の使用状態が反映される
 
 ### `sdiff` のCIゲート拡張
 

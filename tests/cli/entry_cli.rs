@@ -17,6 +17,7 @@ fn help_is_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains("canon"))
+        .stdout(predicate::str::contains("ingest"))
         .stdout(predicate::str::contains("assert"))
         .stdout(predicate::str::contains("gate"))
         .stdout(predicate::str::contains("sdiff"))
