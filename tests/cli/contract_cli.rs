@@ -55,6 +55,7 @@ fn contract_all_returns_deterministic_order() {
             "gate-schema",
             "gate",
             "sdiff",
+            "diff-source",
             "profile",
             "merge",
             "doctor",
@@ -86,6 +87,25 @@ fn contract_gate_command_reports_policy_contract_fields() {
     assert_eq!(
         payload["output_fields"],
         json!(["matched", "violations", "details"])
+    );
+}
+
+#[test]
+fn contract_diff_source_command_includes_sources_field() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "diff-source"])
+        .output()
+        .expect("run contract diff-source");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], json!("diff-source"));
+    assert_eq!(payload["schema"], json!("dataq.diff.source.output.v1"));
+    assert_eq!(
+        payload["output_fields"],
+        json!(["counts", "keys", "ignored_paths", "values", "sources"])
     );
 }
 

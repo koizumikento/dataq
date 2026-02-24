@@ -2,6 +2,7 @@ pub mod aggregate;
 pub mod assert;
 pub mod canon;
 pub mod contract;
+pub mod diff;
 pub mod doctor;
 pub mod emit;
 pub mod gate;

@@ -7,8 +7,8 @@ use std::process::{self, Command};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
-    aggregate, r#assert, canon, contract, doctor, emit, gate, join, mcp, merge, profile, recipe,
-    sdiff,
+    aggregate, r#assert, canon, contract, diff, doctor, emit, gate, join, mcp, merge, profile,
+    recipe, sdiff,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{
@@ -48,6 +48,8 @@ enum Commands {
     Gate(GateArgs),
     /// Compare structural differences across two datasets.
     Sdiff(SdiffArgs),
+    /// Compare normalized outputs resolved from source presets or files.
+    Diff(DiffArgs),
     /// Generate deterministic field profile statistics.
     Profile(ProfileArgs),
     /// Join two datasets by key using deterministic JSON output.
@@ -174,6 +176,30 @@ struct SdiffArgs {
 
     #[arg(long, default_value_t = sdiff::DEFAULT_VALUE_DIFF_CAP)]
     value_diff_cap: usize,
+}
+
+#[derive(Debug, clap::Args)]
+struct DiffArgs {
+    #[command(subcommand)]
+    command: DiffSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum DiffSubcommand {
+    /// Compare two sources (file or preset) via structural diff.
+    Source(DiffSourceArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct DiffSourceArgs {
+    #[arg(long)]
+    left: String,
+
+    #[arg(long)]
+    right: String,
+
+    #[arg(long, default_value_t = false)]
+    fail_on_diff: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -360,6 +386,7 @@ enum CliContractCommand {
     GateSchema,
     Gate,
     Sdiff,
+    DiffSource,
     Profile,
     Merge,
     Doctor,
@@ -444,6 +471,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::GateSchema => Self::GateSchema,
             CliContractCommand::Gate => Self::Gate,
             CliContractCommand::Sdiff => Self::Sdiff,
+            CliContractCommand::DiffSource => Self::DiffSource,
             CliContractCommand::Profile => Self::Profile,
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
@@ -490,6 +518,7 @@ fn run() -> i32 {
         Commands::Assert(args) => run_assert(args, emit_pipeline),
         Commands::Gate(args) => run_gate(args, emit_pipeline),
         Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
+        Commands::Diff(args) => run_diff(args, emit_pipeline),
         Commands::Profile(args) => run_profile(args, emit_pipeline),
         Commands::Join(args) => run_join(args, emit_pipeline),
         Commands::Aggregate(args) => run_aggregate(args, emit_pipeline),
@@ -1354,6 +1383,91 @@ fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
+fn run_diff(args: DiffArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        DiffSubcommand::Source(source_args) => run_diff_source(source_args, emit_pipeline),
+    }
+}
+
+fn run_diff_source(args: DiffSourceArgs, emit_pipeline: bool) -> i32 {
+    let execution = match diff::execute(&args.left, &args.right) {
+        Ok(execution) => execution,
+        Err(error) => {
+            emit_error(
+                "input_usage_error",
+                error.to_string(),
+                json!({
+                    "command": "diff.source",
+                    "left": args.left,
+                    "right": args.right,
+                }),
+                3,
+            );
+            if emit_pipeline {
+                emit_pipeline_report(&build_diff_source_pipeline_report(&args, None, None, &[]));
+            }
+            return 3;
+        }
+    };
+
+    let success_exit_code = if args.fail_on_diff && execution.report.values.total > 0 {
+        2
+    } else {
+        0
+    };
+    let response_payload = diff::DiffSourceReport::new(execution.report, execution.sources);
+    let exit_code = match serde_json::to_string(&response_payload) {
+        Ok(serialized) => {
+            println!("{serialized}");
+            success_exit_code
+        }
+        Err(error) => {
+            emit_error(
+                "internal_error",
+                format!("failed to serialize diff source report: {error}"),
+                json!({"command": "diff.source"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let left_path = execution.left.metadata.path.as_str();
+        let right_path = execution.right.metadata.path.as_str();
+        let fingerprint_context = FingerprintContext {
+            input_hash: hash_consumed_input_entries(&[
+                ConsumedInputHashEntry {
+                    label: "left",
+                    source: execution.left.hash_source.as_str(),
+                    path: Some(left_path),
+                    format: Some(execution.left.format.as_str()),
+                    bytes: execution.left.bytes.as_slice(),
+                },
+                ConsumedInputHashEntry {
+                    label: "right",
+                    source: execution.right.hash_source.as_str(),
+                    path: Some(right_path),
+                    format: Some(execution.right.format.as_str()),
+                    bytes: execution.right.bytes.as_slice(),
+                },
+            ]),
+            ..Default::default()
+        };
+        emit_pipeline_report_with_context(
+            &build_diff_source_pipeline_report(
+                &args,
+                Some(&execution.left),
+                Some(&execution.right),
+                &execution.used_tools,
+            ),
+            &fingerprint_context,
+        );
+    }
+
+    exit_code
+}
+
 fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     let input_format = Some(args.from.into());
     let pipeline_report = build_profile_pipeline_report(&args, input_format);
@@ -2017,6 +2131,56 @@ fn build_sdiff_pipeline_report(
         sdiff::pipeline_steps(),
         sdiff::deterministic_guards(),
     )
+}
+
+fn build_diff_source_pipeline_report(
+    args: &DiffSourceArgs,
+    left_source: Option<&diff::ResolvedDiffSource>,
+    right_source: Option<&diff::ResolvedDiffSource>,
+    used_tools: &[String],
+) -> PipelineReport {
+    let left_input = if let Some(source) = left_source {
+        PipelineInputSource {
+            label: "left".to_string(),
+            source: source.metadata.kind.clone(),
+            path: Some(source.metadata.path.clone()),
+            format: Some(source.metadata.format.clone()),
+        }
+    } else {
+        PipelineInputSource {
+            label: "left".to_string(),
+            source: "locator".to_string(),
+            path: Some(args.left.clone()),
+            format: None,
+        }
+    };
+
+    let right_input = if let Some(source) = right_source {
+        PipelineInputSource {
+            label: "right".to_string(),
+            source: source.metadata.kind.clone(),
+            path: Some(source.metadata.path.clone()),
+            format: Some(source.metadata.format.clone()),
+        }
+    } else {
+        PipelineInputSource {
+            label: "right".to_string(),
+            source: "locator".to_string(),
+            path: Some(args.right.clone()),
+            format: None,
+        }
+    };
+
+    let mut report = PipelineReport::new(
+        "diff.source",
+        PipelineInput::new(vec![left_input, right_input]),
+        diff::pipeline_steps(),
+        diff::deterministic_guards(),
+    );
+    for tool in used_tools {
+        report = report.mark_external_tool_used(tool);
+    }
+    report
 }
 
 fn build_profile_pipeline_report(

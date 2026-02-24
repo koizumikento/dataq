@@ -15,6 +15,7 @@ dataq [--emit-pipeline] <command> [options]
 - `gate schema`: JSON Schemaで品質ゲートを実行（`assert --schema` ラッパー）
 - `gate policy`: ルールベース品質ゲートを実行（`matched/violations/details`）
 - `sdiff`: 2データセットの構造差分を出力
+- `diff source`: 2ソース（preset/path）を解決して構造差分を出力
 - `profile`: フィールド統計を決定的JSONで出力
 - `join`: 2入力をキー結合してJSON配列を出力
 - `aggregate`: グループ集計をJSON配列で出力
@@ -28,11 +29,11 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|profile|merge|doctor|recipe>`
+  - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+  - `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -91,6 +92,7 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.gate.schema`
   - `dataq.gate.policy`
   - `dataq.sdiff`
+  - `dataq.diff.source`
   - `dataq.profile`
   - `dataq.join`
   - `dataq.aggregate`
@@ -294,6 +296,24 @@ dataq [--emit-pipeline] <command> [options]
 - レポートJSON契約（`counts`, `keys`, `ignored_paths`, `values`）は不変
 - `values.total` は実差分件数を維持し、上限超過時のみ `values.truncated=true`
 - `--emit-pipeline` のstderr JSON出力契約は `sdiff` 拡張後も不変
+
+### `diff source` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq diff source --left <preset-or-path> --right <preset-or-path> [--fail-on-diff]`
+- source 指定:
+  - file: `<path>`
+  - preset: `preset:<github-actions-jobs|gitlab-ci-jobs>:<path>`
+- 出力:
+  - `sdiff` レポート（`counts`, `keys`, `ignored_paths`, `values`）を維持
+  - `sources.left` / `sources.right` に解決メタデータ（`kind`, `preset?`, `path`, `format`）を追加
+- 終了コード:
+  - `0`: 成功
+  - `2`: `--fail-on-diff` かつ `values.total > 0`
+  - `3`: source解決またはpreset指定エラー
+  - `1`: 予期しない内部エラー
+- `--emit-pipeline`:
+  - `steps` は `diff_source_resolve_left`, `diff_source_resolve_right`, `diff_source_compare`
 
 ### `--emit-pipeline`（診断出力）
 
