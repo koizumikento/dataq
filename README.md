@@ -69,7 +69,7 @@ dataq [--emit-pipeline] <command> [options]
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
-| `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
+| `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | `--capabilities` |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
 | `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
 | `mcp` | 1リクエスト単位の MCP(JSON-RPC 2.0) サーバーモード | stdin で JSON-RPC リクエストを1件入力 |
@@ -113,6 +113,9 @@ dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --polic
 
 # 依存ツール診断
 dataq doctor
+
+# 依存ツールの機能診断
+dataq doctor --capabilities
 
 # assert 出力契約を取得
 dataq contract --command assert
@@ -346,11 +349,14 @@ dataq assert \
 
 - 出力は JSON 固定（stdout）
 - 各ツールの診断項目: `name`, `found`, `version`, `executable`, `message`
+- `--capabilities` 指定時は `capabilities` 配列を追加出力
+  - 項目: `name`, `tool`, `available`, `message`
+  - 固定順: `jq.null_input_eval`, `yq.null_input_eval`, `mlr.help_command`
 - 終了コード:
   - `0`: 3ツールすべて起動可能
-  - `3`: 1つ以上が欠如または起動不可
+  - `3`: 1つ以上が欠如または起動不可、または要求プロファイルの必須 capability 不足
   - `1`: 予期しない内部エラー
-- `--emit-pipeline` 指定時は stderr に診断ステップ (`doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`) を追加出力
+- `--emit-pipeline` 指定時は stderr に診断ステップ (`doctor_probe_tools`, `doctor_probe_capabilities`) を追加出力
 
 ### 9. `recipe run`
 

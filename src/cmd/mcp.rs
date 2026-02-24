@@ -983,8 +983,20 @@ fn execute_doctor(args: &Map<String, Value>) -> ToolExecution {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
+    let capabilities = match parse_bool(args, &["capabilities"], false, "capabilities") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let profile = match parse_optional_string(args, &["profile"], "profile") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
 
-    let (response, _) = doctor::run_with_trace();
+    let doctor_args = doctor::DoctorCommandArgs {
+        capabilities,
+        profile,
+    };
+    let (response, _) = doctor::run_with_args_and_trace(&doctor_args);
     let mut execution = ToolExecution {
         exit_code: response.exit_code,
         payload: response.payload,

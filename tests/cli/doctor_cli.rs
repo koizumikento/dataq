@@ -24,6 +24,7 @@ fn doctor_returns_exit_zero_with_fixed_order_and_schema_when_all_tools_are_avail
     assert!(output.stderr.is_empty());
 
     let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert!(stdout_json.get("capabilities").is_none());
     let tools = stdout_json["tools"].as_array().expect("tools array");
     assert_eq!(tools.len(), 3);
 
@@ -42,6 +43,45 @@ fn doctor_returns_exit_zero_with_fixed_order_and_schema_when_all_tools_are_avail
     assert_eq!(tools[2]["found"], json!(true));
     assert_eq!(tools[2]["executable"], json!(true));
     assert_eq!(tools[2]["message"], json!("ok"));
+}
+
+#[test]
+fn doctor_capabilities_reports_capability_array_in_fixed_order() {
+    let dir = tempdir().expect("tempdir");
+    write_exec_script(&dir.path().join("jq"), "#!/bin/sh\necho 'jq-1.7'\n");
+    write_exec_script(
+        &dir.path().join("yq"),
+        "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version 4.44.6'\n",
+    );
+    write_exec_script(&dir.path().join("mlr"), "#!/bin/sh\necho 'mlr 6.13.0'\n");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", dir.path())
+        .args(["doctor", "--capabilities"])
+        .output()
+        .expect("run doctor");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    let tools = stdout_json["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 3);
+
+    let capabilities = stdout_json["capabilities"]
+        .as_array()
+        .expect("capabilities array");
+    assert_eq!(capabilities.len(), 3);
+    assert_eq!(capabilities[0]["name"], json!("jq.null_input_eval"));
+    assert_eq!(capabilities[0]["tool"], json!("jq"));
+    assert_eq!(capabilities[0]["available"], json!(true));
+    assert_eq!(capabilities[0]["message"], json!("ok"));
+    assert_eq!(capabilities[1]["name"], json!("yq.null_input_eval"));
+    assert_eq!(capabilities[1]["tool"], json!("yq"));
+    assert_eq!(capabilities[1]["available"], json!(true));
+    assert_eq!(capabilities[2]["name"], json!("mlr.help_command"));
+    assert_eq!(capabilities[2]["tool"], json!("mlr"));
+    assert_eq!(capabilities[2]["available"], json!(true));
 }
 
 #[test]
@@ -70,6 +110,44 @@ fn doctor_returns_exit_three_when_any_tool_is_missing() {
             .expect("message")
             .contains("Install `mlr`")
     );
+}
+
+#[test]
+fn doctor_capabilities_can_report_partial_state_without_failing_default_exit_logic() {
+    let dir = tempdir().expect("tempdir");
+    write_exec_script(
+        &dir.path().join("jq"),
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'jq-1.7'\nelse\n  echo 'null'\nfi\n",
+    );
+    write_exec_script(
+        &dir.path().join("yq"),
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'yq-4.44.6'\n  exit 0\nfi\necho 'capability probe failed' 1>&2\nexit 9\n",
+    );
+    write_exec_script(
+        &dir.path().join("mlr"),
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'mlr-6.13.0'\nelse\n  echo 'help text'\nfi\n",
+    );
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", dir.path())
+        .args(["doctor", "--capabilities"])
+        .output()
+        .expect("run doctor");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    let capabilities = stdout_json["capabilities"]
+        .as_array()
+        .expect("capabilities array");
+
+    assert_eq!(capabilities[0]["name"], json!("jq.null_input_eval"));
+    assert_eq!(capabilities[0]["available"], json!(true));
+    assert_eq!(capabilities[1]["name"], json!("yq.null_input_eval"));
+    assert_eq!(capabilities[1]["available"], json!(false));
+    assert_eq!(capabilities[2]["name"], json!("mlr.help_command"));
+    assert_eq!(capabilities[2]["available"], json!(true));
 }
 
 #[test]
@@ -119,7 +197,7 @@ fn doctor_emit_pipeline_writes_doctor_steps_to_stderr() {
     assert_eq!(stderr_json["command"], json!("doctor"));
     assert_eq!(
         stderr_json["steps"],
-        json!(["doctor_probe_jq", "doctor_probe_yq", "doctor_probe_mlr"])
+        json!(["doctor_probe_tools", "doctor_probe_capabilities"])
     );
 
     let tools = stderr_json["external_tools"]

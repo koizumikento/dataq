@@ -195,7 +195,7 @@ dataq [--emit-pipeline] <command> [options]
 
 - `0`: 成功
 - `2`: 検証失敗（期待仕様に不一致）
-- `3`: 入力不正（フォーマット不正、必須引数不足など）または `doctor` の必須ツール不足/起動不可
+- `3`: 入力不正（フォーマット不正、必須引数不足など）または `doctor` の必須ツール不足/起動不可、要求プロファイルの必須 capability 不足
 - `1`: その他実行時エラー
 
 ## `doctor` コマンド契約（MVP）
@@ -209,11 +209,17 @@ dataq [--emit-pipeline] <command> [options]
   - `version`: 取得できたバージョン文字列（取得不可時は `null`）
   - `executable`: `--version` で起動できたか
   - `message`: 判定理由（失敗時は対処案内を含む）
+- `--capabilities` 指定時は `capabilities` 配列を追加:
+  - `name`: capability 名
+  - `tool`: 関連ツール名
+  - `available`: capability probe 成否
+  - `message`: 判定理由
+  - 固定順: `jq.null_input_eval`, `yq.null_input_eval`, `mlr.help_command`
 - 終了コード:
   - `0`: 全ツール起動可能
-  - `3`: 1つ以上が欠如または起動不可
+  - `3`: 1つ以上が欠如または起動不可、または要求プロファイルの必須 capability 不足
   - `1`: 予期しない内部エラー
-- `--emit-pipeline` 指定時の `steps`: `doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`
+- `--emit-pipeline` 指定時の `steps`: `doctor_probe_tools`, `doctor_probe_capabilities`
 
 ### `sdiff` のCIゲート拡張
 

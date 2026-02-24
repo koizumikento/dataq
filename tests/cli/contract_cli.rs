@@ -1,5 +1,9 @@
+use std::fs;
+use std::path::Path;
+
 use predicates::prelude::predicate;
 use serde_json::{Value, json};
+use tempfile::tempdir;
 
 #[test]
 fn contract_command_returns_expected_machine_readable_shape() {
@@ -86,7 +90,59 @@ fn contract_doctor_command_exit_three_describes_dependency_failure() {
     assert_eq!(
         payload["exit_codes"]["3"],
         json!(
-            "tool/dependency availability failure (missing or non-executable `jq`, `yq`, or `mlr`)"
+            "tool/dependency availability failure (missing or non-executable `jq`, `yq`, or `mlr`) or missing required capabilities for a requested profile"
         )
     );
+}
+
+#[test]
+fn contract_doctor_output_fields_match_guaranteed_default_doctor_root_fields() {
+    let dir = tempdir().expect("tempdir");
+    write_exec_script(&dir.path().join("jq"), "#!/bin/sh\necho 'jq-1.7'\n");
+    write_exec_script(
+        &dir.path().join("yq"),
+        "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version 4.44.6'\n",
+    );
+    write_exec_script(&dir.path().join("mlr"), "#!/bin/sh\necho 'mlr 6.13.0'\n");
+
+    let doctor_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("PATH", dir.path())
+        .arg("doctor")
+        .output()
+        .expect("run doctor");
+    assert_eq!(doctor_output.status.code(), Some(0));
+
+    let doctor_payload: Value = serde_json::from_slice(&doctor_output.stdout).expect("doctor json");
+    let guaranteed_root_fields: Vec<String> = doctor_payload
+        .as_object()
+        .expect("doctor object")
+        .keys()
+        .cloned()
+        .collect();
+
+    let contract_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "doctor"])
+        .output()
+        .expect("run contract doctor");
+    assert_eq!(contract_output.status.code(), Some(0));
+
+    let contract_payload: Value =
+        serde_json::from_slice(&contract_output.stdout).expect("contract doctor json");
+    let contract_fields: Vec<String> = contract_payload["output_fields"]
+        .as_array()
+        .expect("output_fields")
+        .iter()
+        .map(|field| field.as_str().expect("field string").to_owned())
+        .collect();
+
+    assert_eq!(contract_fields, guaranteed_root_fields);
+}
+
+fn write_exec_script(path: &Path, body: &str) {
+    fs::write(path, body).expect("write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
 }
