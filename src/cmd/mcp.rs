@@ -27,7 +27,7 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 14] = [
+const TOOL_ORDER: [&str; 15] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
@@ -42,6 +42,7 @@ const TOOL_ORDER: [&str; 14] = [
     "dataq.contract",
     "dataq.emit.plan",
     "dataq.recipe.run",
+    "dataq.recipe.lock",
 ];
 
 #[derive(Debug, Clone)]
@@ -245,6 +246,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.contract" => execute_contract(args),
         "dataq.emit.plan" => execute_emit_plan(args),
         "dataq.recipe.run" => execute_recipe_run(args),
+        "dataq.recipe.lock" => execute_recipe_lock(args),
         unknown => input_usage_error(format!("unknown tool `{unknown}`")),
     }
 }
@@ -1476,8 +1478,89 @@ fn execute_recipe_run(args: &Map<String, Value>) -> ToolExecution {
             "recipe",
             PipelineInput::new(vec![source]),
             steps,
-            recipe::deterministic_guards(),
+            recipe::deterministic_guards_run(),
         );
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_recipe_lock(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let file_path =
+        match parse_optional_path(args, &["file_path", "file", "recipe_path"], "file_path") {
+            Ok(Some(value)) => value,
+            Ok(None) => return input_usage_error("missing required `file_path`"),
+            Err(message) => return input_usage_error(message),
+        };
+    let out_path = match parse_optional_path(args, &["out_path", "out"], "out_path") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let (response, trace, serialized_lock) =
+        recipe::lock_with_trace(&recipe::RecipeLockCommandArgs {
+            file_path: file_path.clone(),
+        });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if execution.exit_code == 0 {
+        if let Some(out_path) = out_path {
+            if let Some(serialized_lock) = serialized_lock {
+                if let Err(error) = std::fs::write(&out_path, serialized_lock.as_slice()) {
+                    execution.exit_code = 3;
+                    execution.payload = json!({
+                        "error": "input_usage_error",
+                        "message": format!(
+                            "failed to write recipe lock file `{}`: {error}",
+                            out_path.display()
+                        ),
+                    });
+                }
+            } else {
+                execution.exit_code = 1;
+                execution.payload = json!({
+                    "error": "internal_error",
+                    "message": "recipe lock payload bytes were unavailable",
+                });
+            }
+        }
+    }
+
+    if emit_pipeline {
+        let steps = if trace.steps.is_empty() {
+            vec![
+                "recipe_lock_parse".to_string(),
+                "recipe_lock_probe_tools".to_string(),
+                "recipe_lock_fingerprint".to_string(),
+            ]
+        } else {
+            trace.steps
+        };
+        let mut report = PipelineReport::new(
+            "recipe",
+            PipelineInput::new(vec![PipelineInputSource::path(
+                "recipe",
+                file_path.display().to_string(),
+                io::resolve_input_format(None, Some(file_path.as_path()))
+                    .ok()
+                    .map(Format::as_str),
+            )]),
+            steps,
+            recipe::deterministic_guards_lock(),
+        );
+        for tool_name in trace.tool_versions.keys() {
+            report = report.mark_external_tool_used(tool_name);
+        }
         execution.pipeline = pipeline_as_value(report).ok();
     }
 
@@ -2065,7 +2148,8 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         "profile" => Ok(contract::ContractCommand::Profile),
         "merge" => Ok(contract::ContractCommand::Merge),
         "doctor" => Ok(contract::ContractCommand::Doctor),
-        "recipe" => Ok(contract::ContractCommand::Recipe),
+        "recipe" | "recipe-run" => Ok(contract::ContractCommand::RecipeRun),
+        "recipe-lock" => Ok(contract::ContractCommand::RecipeLock),
         _ => Err(format!("unsupported contract command `{value}`")),
     }
 }

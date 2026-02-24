@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 14] = [
+const TOOL_ORDER: [&str; 15] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
@@ -20,6 +20,7 @@ const TOOL_ORDER: [&str; 14] = [
     "dataq.contract",
     "dataq.emit.plan",
     "dataq.recipe.run",
+    "dataq.recipe.lock",
 ];
 
 #[test]
@@ -123,6 +124,8 @@ fn tools_call_minimal_success_for_all_tools() {
     .expect("write gate rules");
     fs::write(&diff_input_path, r#"[{"id":1,"v":"same"}]"#).expect("write diff fixture");
     let diff_input = diff_input_path.display().to_string();
+    let recipe_path = dir.path().join("recipe-lock.json");
+    fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
     let requests = vec![
         (
             "dataq.canon",
@@ -223,6 +226,12 @@ fn tools_call_minimal_success_for_all_tools() {
                     "version": "dataq.recipe.v1",
                     "steps": []
                 }
+            }),
+        ),
+        (
+            "dataq.recipe.lock",
+            json!({
+                "file_path": recipe_path
             }),
         ),
     ];
@@ -539,6 +548,213 @@ fn recipe_supports_file_path_and_inline_recipe() {
     assert_eq!(
         inline_response["result"]["structuredContent"]["exit_code"],
         Value::from(0)
+    );
+}
+
+#[test]
+fn recipe_lock_supports_file_path() {
+    let toolchain = FakeToolchain::new();
+    let dir = tempdir().expect("tempdir");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
+
+    let request = tool_call_request(
+        3,
+        "dataq.recipe.lock",
+        json!({
+            "file_path": recipe_path
+        }),
+    );
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["version"],
+        Value::from("dataq.recipe.lock.v1")
+    );
+    assert!(response["result"]["structuredContent"]["payload"]["tool_versions"].is_object());
+}
+
+#[test]
+fn contract_supports_recipe_lock_command() {
+    let request = tool_call_request(
+        11,
+        "dataq.contract",
+        json!({
+            "command": "recipe-lock"
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["command"],
+        Value::from("recipe-lock")
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["schema"],
+        Value::from("dataq.recipe.lock.output.v1")
+    );
+}
+
+#[test]
+fn recipe_lock_invalid_step_args_return_exit_three() {
+    let toolchain = FakeToolchain::new();
+    let dir = tempdir().expect("tempdir");
+    let input_path = dir.path().join("input.json");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&input_path, r#"[{"id":"1"}]"#).expect("write input");
+    fs::write(
+        &recipe_path,
+        json!({
+            "version":"dataq.recipe.v1",
+            "steps":[
+                {
+                    "kind":"canon",
+                    "args":{
+                        "input": input_path,
+                        "from":"json"
+                    }
+                },
+                {
+                    "kind":"assert",
+                    "args":{
+                        "rules":{"required_keys":[],"forbid_keys":[],"fields":{}},
+                        "schema":{"type":"object"}
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write recipe");
+
+    let request = tool_call_request(
+        12,
+        "dataq.recipe.lock",
+        json!({
+            "file_path": recipe_path
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["error"],
+        Value::from("input_usage_error")
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["message"],
+        Value::from("assert step cannot combine rules and schema sources")
+    );
+}
+
+#[test]
+fn recipe_lock_invalid_step_order_returns_exit_three() {
+    let toolchain = FakeToolchain::new();
+    let dir = tempdir().expect("tempdir");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(
+        &recipe_path,
+        r#"{
+            "version":"dataq.recipe.v1",
+            "steps":[
+                {
+                    "kind":"assert",
+                    "args":{
+                        "rules":{"required_keys":[],"forbid_keys":[],"fields":{}}
+                    }
+                }
+            ]
+        }"#,
+    )
+    .expect("write recipe");
+
+    let request = tool_call_request(
+        13,
+        "dataq.recipe.lock",
+        json!({
+            "file_path": recipe_path
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["error"],
+        Value::from("input_usage_error")
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["message"],
+        Value::from(
+            "assert step requires prior in-memory values (for example a preceding canon step)"
+        )
+    );
+}
+
+#[test]
+fn recipe_lock_emit_pipeline_survives_out_path_write_failure() {
+    let toolchain = FakeToolchain::new();
+    let dir = tempdir().expect("tempdir");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
+
+    let request = tool_call_request(
+        14,
+        "dataq.recipe.lock",
+        json!({
+            "file_path": recipe_path,
+            "out_path": dir.path(),
+            "emit_pipeline": true
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["error"],
+        Value::from("input_usage_error")
+    );
+    assert!(response["result"]["structuredContent"]["pipeline"].is_object());
+    assert_eq!(
+        response["result"]["structuredContent"]["pipeline"]["steps"],
+        Value::from(vec![
+            "recipe_lock_parse",
+            "recipe_lock_probe_tools",
+            "recipe_lock_fingerprint",
+        ])
     );
 }
 

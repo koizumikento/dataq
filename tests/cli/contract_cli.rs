@@ -59,7 +59,8 @@ fn contract_all_returns_deterministic_order() {
             "profile",
             "merge",
             "doctor",
-            "recipe"
+            "recipe-run",
+            "recipe-lock",
         ]
     );
     for entry in contracts {
@@ -135,5 +136,41 @@ fn contract_doctor_command_exit_three_describes_profile_aware_semantics() {
         json!(
             "without `--profile`: missing/non-executable `jq|yq|mlr`; with `--profile`: selected profile requirements are unsatisfied"
         )
+    );
+}
+
+#[test]
+fn contract_recipe_lock_command_reports_lock_output_shape() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "recipe-lock"])
+        .output()
+        .expect("run contract recipe-lock");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], json!("recipe-lock"));
+    assert_eq!(payload["schema"], json!("dataq.recipe.lock.output.v1"));
+    assert_eq!(
+        payload["output_fields"],
+        json!([
+            "version",
+            "command_graph_hash",
+            "args_hash",
+            "tool_versions",
+            "dataq_version"
+        ])
+    );
+    assert!(payload["exit_codes"]["0"].is_string());
+    assert!(payload["exit_codes"]["2"].is_string());
+    assert!(payload["exit_codes"]["3"].is_string());
+    assert!(payload["exit_codes"]["1"].is_string());
+    assert_eq!(
+        payload["notes"],
+        json!([
+            "`tool_versions` keys are deterministically sorted by tool name (`jq`, `mlr`, `yq`).",
+            "Lock output is canonicalized before write/emit."
+        ])
     );
 }

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -24,6 +25,19 @@ pub struct RecipeCommandResponse {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecipePipelineTrace {
     pub steps: Vec<String>,
+}
+
+/// Input arguments for recipe lock command execution API.
+#[derive(Debug, Clone)]
+pub struct RecipeLockCommandArgs {
+    pub file_path: PathBuf,
+}
+
+/// Trace details used by `--emit-pipeline` for recipe lock stages.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecipeLockPipelineTrace {
+    pub steps: Vec<String>,
+    pub tool_versions: BTreeMap<String, String>,
 }
 
 pub fn run_with_trace(args: &RecipeCommandArgs) -> (RecipeCommandResponse, RecipePipelineTrace) {
@@ -113,12 +127,96 @@ pub fn run_with_trace(args: &RecipeCommandArgs) -> (RecipeCommandResponse, Recip
     }
 }
 
+pub fn lock_with_trace(
+    args: &RecipeLockCommandArgs,
+) -> (
+    RecipeCommandResponse,
+    RecipeLockPipelineTrace,
+    Option<Vec<u8>>,
+) {
+    match recipe::lock(args.file_path.as_path()) {
+        Ok(execution) => {
+            let payload = match serde_json::from_slice::<Value>(&execution.serialized) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return (
+                        RecipeCommandResponse {
+                            exit_code: 1,
+                            payload: json!({
+                                "error": "internal_error",
+                                "message": format!("failed to decode recipe lock payload: {error}"),
+                            }),
+                        },
+                        RecipeLockPipelineTrace {
+                            steps: execution.pipeline_steps,
+                            tool_versions: execution.tool_versions,
+                        },
+                        None,
+                    );
+                }
+            };
+
+            (
+                RecipeCommandResponse {
+                    exit_code: 0,
+                    payload,
+                },
+                RecipeLockPipelineTrace {
+                    steps: execution.pipeline_steps,
+                    tool_versions: execution.tool_versions,
+                },
+                Some(execution.serialized),
+            )
+        }
+        Err(error) => {
+            let response = match error.kind {
+                RecipeExecutionErrorKind::InputUsage(message) => RecipeCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": message,
+                    }),
+                },
+                RecipeExecutionErrorKind::Internal(message) => RecipeCommandResponse {
+                    exit_code: 1,
+                    payload: json!({
+                        "error": "internal_error",
+                        "message": message,
+                    }),
+                },
+            };
+            (
+                response,
+                RecipeLockPipelineTrace {
+                    steps: error.pipeline_steps,
+                    tool_versions: BTreeMap::new(),
+                },
+                None,
+            )
+        }
+    }
+}
+
 /// Determinism guards planned for the `recipe run` command.
-pub fn deterministic_guards() -> Vec<String> {
+pub fn deterministic_guards_run() -> Vec<String> {
     vec![
         "rust_native_execution".to_string(),
         "no_shell_interpolation_for_user_input".to_string(),
         "recipe_step_order_from_definition".to_string(),
         "recipe_step_handoff_in_memory".to_string(),
     ]
+}
+
+/// Determinism guards planned for the `recipe lock` command.
+pub fn deterministic_guards_lock() -> Vec<String> {
+    vec![
+        "rust_native_execution".to_string(),
+        "fixed_recipe_lock_tool_probe_order".to_string(),
+        "canonical_recipe_lock_serialization".to_string(),
+    ]
+}
+
+/// Backward-compatible alias for recipe run guards.
+pub fn deterministic_guards() -> Vec<String> {
+    deterministic_guards_run()
 }

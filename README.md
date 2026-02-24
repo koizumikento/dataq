@@ -74,6 +74,7 @@ dataq [--emit-pipeline] <command> [options]
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
 | `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
+| `recipe lock` | レシピ再現実行用のロック情報を生成 | `--file <path>` |
 | `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
 | `emit plan` | サブコマンドの静的実行計画（stage/dependency/tool）を出力 | `--command <name>` |
 | `mcp` | 1リクエスト単位の MCP(JSON-RPC 2.0) サーバーモード | stdin で JSON-RPC リクエストを1件入力 |
@@ -465,19 +466,37 @@ steps:
             type: integer
 ```
 
-### 11. `contract`
+### 11. `recipe lock`
+
+レシピファイル（YAML/JSON）から、再現実行のためのロック情報を生成します。
+
+- 実行コマンド: `dataq recipe lock --file <path> [--out <lock-path>]`
+- 出力:
+  - `--out` なし: stdout に lock JSON
+  - `--out` あり: lock JSON を指定ファイルへ書き出し（stdout は空）
+- lock JSON:
+  - `version`: `dataq.recipe.lock.v1`
+  - `command_graph_hash`
+  - `args_hash`
+  - `tool_versions`（使用ツールのみ。キーはツール名の辞書順: `jq`/`mlr`/`yq`）
+  - `dataq_version`
+- 異常時契約:
+  - レシピ不正 / step引数不正 / ツール解決失敗は exit `3`
+- `--emit-pipeline` 有効時は `recipe_lock_parse`, `recipe_lock_probe_tools`, `recipe_lock_fingerprint` を stderr JSON へ出力
+
+### 12. `contract`
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe>`
+- `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-- 順序: `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe`
+- 順序: `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
-### 12. `emit plan`
+### 13. `emit plan`
 
 サブコマンドの静的実行計画を、実行せずに機械可読JSONで取得します（read-only）。
 
@@ -497,7 +516,7 @@ steps:
   - `emit plan`: 実行前の静的計画（外部ツール実行なし）
   - `--emit-pipeline`: 実行時に観測した診断（stderr）
 
-### 13. `mcp`
+### 14. `mcp`
 
 MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理します。
 
@@ -524,6 +543,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.contract`
   - `dataq.emit.plan`
   - `dataq.recipe.run`
+  - `dataq.recipe.lock`
 - `tools/call` レスポンス:
   - `structuredContent.exit_code`
   - `structuredContent.payload`

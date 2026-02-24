@@ -22,6 +22,7 @@ dataq [--emit-pipeline] <command> [options]
 - `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
 - `doctor`: 依存ツール診断（`--profile` 指定でワークフロー別要件評価）
 - `recipe run`: 宣言的レシピを定義順に実行
+- `recipe lock`: 再現実行のための lock JSON を生成
 - `contract`: サブコマンド出力契約を機械可読JSONで取得
 - `emit plan`: サブコマンドの静的実行計画（stage/dependency/tool）を取得
 - `mcp`: MCP(JSON-RPC 2.0) 単発リクエストを処理
@@ -29,11 +30,11 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe>`
+  - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|diff-source|profile|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe`
+  - `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -101,6 +102,7 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.contract`
   - `dataq.emit.plan`
   - `dataq.recipe.run`
+  - `dataq.recipe.lock`
 - `tools/call` 結果契約:
   - `result.structuredContent.exit_code: i32`
   - `result.structuredContent.payload: JSON`
@@ -336,6 +338,7 @@ pipeline JSON schema:
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
 - `recipe run` では `steps` に `load_recipe_file`, `validate_recipe_schema`, `execute_step_<index>_<kind>` が入る
 - `emit plan` では `steps` が `emit_plan_parse`, `emit_plan_resolve` になる
+- `recipe lock` では `steps` に `recipe_lock_parse`, `recipe_lock_probe_tools`, `recipe_lock_fingerprint` が入る
 
 ```bash
 cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.json
@@ -359,6 +362,25 @@ cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.jso
 - 異常時契約:
   - スキーマ不正 / 未知step / 引数不正は exit `3`
   - `assert` / `sdiff` の不一致は exit `2`
+
+## `recipe lock` MVP スキーマ
+
+- 実行形式: `dataq recipe lock --file <recipe-path> [--out <lock-path>]`
+- `--out` 未指定時は stdout に lock JSON を出力
+- `--out` 指定時は lock JSON を指定パスへ書き込み、stdout は空
+- lock JSON:
+  - `version`: `dataq.recipe.lock.v1`
+  - `command_graph_hash`
+  - `args_hash`
+  - `tool_versions`（使用ツールのみ。キーはツール名の辞書順: `jq` / `mlr` / `yq`）
+  - `dataq_version`
+- pipeline ステップ:
+  - `recipe_lock_parse`
+  - `recipe_lock_probe_tools`
+  - `recipe_lock_fingerprint`
+- 異常時契約:
+  - レシピファイル不正 / step引数不正は exit `3`
+  - ツール解決失敗（未存在/非実行可能/版数取得失敗）は exit `3`
 
 ## 関連ドキュメント
 
