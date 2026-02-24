@@ -86,6 +86,14 @@ jobs:
             .iter()
             .any(|entry| entry["name"] == json!("mlr") && entry["used"] == json!(true))
     );
+    assert_eq!(
+        pipeline["fingerprint"]["tool_versions"]["yq"],
+        json!("fake-yq 9.9.9")
+    );
+    assert_eq!(
+        pipeline["fingerprint"]["tool_versions"]["mlr"],
+        json!("fake-mlr 8.8.8")
+    );
 
     drop(tool_dir);
 }
@@ -121,6 +129,10 @@ fn create_normalize_tool_shims() -> Option<(tempfile::TempDir, String, String)> 
     write_exec_script(
         &yq_path,
         r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'fake-yq 9.9.9\n'
+  exit 0
+fi
 if [ "$1" = "eval" ]; then shift; fi
 if [ "$1" = "-o=json" ]; then shift; fi
 if [ "$1" = "-I=0" ]; then shift; fi
@@ -131,6 +143,10 @@ exec jq -c "$filter"
     write_exec_script(
         &mlr_path,
         r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'fake-mlr 8.8.8\n'
+  exit 0
+fi
 key="job_id"
 while [ $# -gt 0 ]; do
   if [ "$1" = "-f" ]; then

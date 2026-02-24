@@ -2434,7 +2434,7 @@ fn detect_tool_version(tool_name: &str, command_name: &str) -> String {
 }
 
 fn resolve_tool_executable(tool_name: &str, command_name: &str) -> String {
-    if !matches!(command_name, "assert" | "gate.schema") {
+    if !matches!(command_name, "assert" | "gate.schema" | "diff.source") {
         return tool_name.to_string();
     }
 
