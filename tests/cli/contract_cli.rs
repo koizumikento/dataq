@@ -166,5 +166,11 @@ fn contract_recipe_lock_command_reports_lock_output_shape() {
     assert!(payload["exit_codes"]["2"].is_string());
     assert!(payload["exit_codes"]["3"].is_string());
     assert!(payload["exit_codes"]["1"].is_string());
-    assert!(payload["notes"].is_array());
+    assert_eq!(
+        payload["notes"],
+        json!([
+            "`tool_versions` keys are deterministically sorted by tool name (`jq`, `mlr`, `yq`).",
+            "Lock output is canonicalized before write/emit."
+        ])
+    );
 }

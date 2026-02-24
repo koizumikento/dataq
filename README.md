@@ -478,7 +478,7 @@ steps:
   - `version`: `dataq.recipe.lock.v1`
   - `command_graph_hash`
   - `args_hash`
-  - `tool_versions`（`jq`/`yq`/`mlr`）
+  - `tool_versions`（使用ツールのみ。キーはツール名の辞書順: `jq`/`mlr`/`yq`）
   - `dataq_version`
 - 異常時契約:
   - レシピ不正 / step引数不正 / ツール解決失敗は exit `3`

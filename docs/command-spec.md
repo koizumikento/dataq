@@ -372,7 +372,7 @@ cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.jso
   - `version`: `dataq.recipe.lock.v1`
   - `command_graph_hash`
   - `args_hash`
-  - `tool_versions`（`jq` / `yq` / `mlr`）
+  - `tool_versions`（使用ツールのみ。キーはツール名の辞書順: `jq` / `mlr` / `yq`）
   - `dataq_version`
 - pipeline ステップ:
   - `recipe_lock_parse`

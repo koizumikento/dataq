@@ -343,6 +343,12 @@ fn recipe_lock_regenerates_byte_identically() {
     assert!(lock_json["args_hash"].is_string());
     assert!(lock_json["tool_versions"].is_object());
     assert!(lock_json["dataq_version"].is_string());
+    let stdout_text = String::from_utf8(first_stdout.stdout.clone()).expect("stdout utf8");
+    let jq_pos = stdout_text.find("\"jq\":").expect("jq key");
+    let mlr_pos = stdout_text.find("\"mlr\":").expect("mlr key");
+    let yq_pos = stdout_text.find("\"yq\":").expect("yq key");
+    assert!(jq_pos < mlr_pos);
+    assert!(mlr_pos < yq_pos);
 
     let lock_path = dir.path().join("recipe.lock.json");
     let first_file = assert_cmd::cargo::cargo_bin_cmd!("dataq")
@@ -439,6 +445,264 @@ fn recipe_lock_invalid_step_args_returns_exit_three() {
     assert_eq!(
         stderr_json["message"],
         Value::from("assert step cannot combine rules and schema sources")
+    );
+}
+
+#[test]
+fn recipe_lock_validates_implicit_canon_input_format_like_recipe_run() {
+    let dir = tempdir().expect("temp dir");
+    let invalid_input = dir.path().join("input.unsupported");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(
+        &recipe_path,
+        format!(
+            r#"{{
+  "version": "dataq.recipe.v1",
+  "steps": [
+    {{
+      "kind": "canon",
+      "args": {{
+        "input": "{}"
+      }}
+    }}
+  ]
+}}"#,
+            invalid_input.display()
+        ),
+    )
+    .expect("write recipe");
+
+    let lock_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe lock");
+    let run_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "run",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe run");
+
+    assert_eq!(lock_output.status.code(), Some(3));
+    assert_eq!(run_output.status.code(), Some(3));
+    let lock_stderr = parse_last_stderr_json(&lock_output.stderr);
+    let run_stderr = parse_last_stderr_json(&run_output.stderr);
+    assert_eq!(lock_stderr["error"], Value::from("input_usage_error"));
+    assert_eq!(lock_stderr["message"], run_stderr["message"]);
+    assert!(
+        lock_stderr["message"]
+            .as_str()
+            .expect("message")
+            .contains("canon.args.input")
+    );
+}
+
+#[test]
+fn recipe_lock_validates_implicit_sdiff_right_format_like_recipe_run() {
+    let dir = tempdir().expect("temp dir");
+    let input_path = dir.path().join("input.json");
+    let invalid_right = dir.path().join("right.unsupported");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&input_path, r#"[{"id":"1"}]"#).expect("write input");
+    fs::write(
+        &recipe_path,
+        format!(
+            r#"{{
+  "version": "dataq.recipe.v1",
+  "steps": [
+    {{
+      "kind": "canon",
+      "args": {{
+        "input": "{}",
+        "from": "json"
+      }}
+    }},
+    {{
+      "kind": "sdiff",
+      "args": {{
+        "right": "{}"
+      }}
+    }}
+  ]
+}}"#,
+            input_path.display(),
+            invalid_right.display()
+        ),
+    )
+    .expect("write recipe");
+
+    let lock_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe lock");
+    let run_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "run",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe run");
+
+    assert_eq!(lock_output.status.code(), Some(3));
+    assert_eq!(run_output.status.code(), Some(3));
+    let lock_stderr = parse_last_stderr_json(&lock_output.stderr);
+    let run_stderr = parse_last_stderr_json(&run_output.stderr);
+    assert_eq!(lock_stderr["error"], Value::from("input_usage_error"));
+    assert_eq!(lock_stderr["message"], run_stderr["message"]);
+    assert!(
+        lock_stderr["message"]
+            .as_str()
+            .expect("message")
+            .contains("sdiff.args.right")
+    );
+}
+
+#[test]
+fn recipe_lock_validates_implicit_assert_rules_file_format_like_recipe_run() {
+    let dir = tempdir().expect("temp dir");
+    let input_path = dir.path().join("input.json");
+    let invalid_rules = dir.path().join("rules.unsupported");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&input_path, r#"[{"id":"1"}]"#).expect("write input");
+    fs::write(
+        &recipe_path,
+        format!(
+            r#"{{
+  "version": "dataq.recipe.v1",
+  "steps": [
+    {{
+      "kind": "canon",
+      "args": {{
+        "input": "{}",
+        "from": "json"
+      }}
+    }},
+    {{
+      "kind": "assert",
+      "args": {{
+        "rules_file": "{}"
+      }}
+    }}
+  ]
+}}"#,
+            input_path.display(),
+            invalid_rules.display()
+        ),
+    )
+    .expect("write recipe");
+
+    let lock_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe lock");
+    let run_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "run",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe run");
+
+    assert_eq!(lock_output.status.code(), Some(3));
+    assert_eq!(run_output.status.code(), Some(3));
+    let lock_stderr = parse_last_stderr_json(&lock_output.stderr);
+    let run_stderr = parse_last_stderr_json(&run_output.stderr);
+    assert_eq!(lock_stderr["error"], Value::from("input_usage_error"));
+    assert_eq!(lock_stderr["message"], run_stderr["message"]);
+    assert!(
+        lock_stderr["message"]
+            .as_str()
+            .expect("message")
+            .contains("assert.rules_file")
+    );
+}
+
+#[test]
+fn recipe_lock_validates_implicit_assert_schema_file_format_like_recipe_run() {
+    let dir = tempdir().expect("temp dir");
+    let input_path = dir.path().join("input.json");
+    let invalid_schema = dir.path().join("schema.unsupported");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(&input_path, r#"[{"id":"1"}]"#).expect("write input");
+    fs::write(
+        &recipe_path,
+        format!(
+            r#"{{
+  "version": "dataq.recipe.v1",
+  "steps": [
+    {{
+      "kind": "canon",
+      "args": {{
+        "input": "{}",
+        "from": "json"
+      }}
+    }},
+    {{
+      "kind": "assert",
+      "args": {{
+        "schema_file": "{}"
+      }}
+    }}
+  ]
+}}"#,
+            input_path.display(),
+            invalid_schema.display()
+        ),
+    )
+    .expect("write recipe");
+
+    let lock_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe lock");
+    let run_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "run",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe run");
+
+    assert_eq!(lock_output.status.code(), Some(3));
+    assert_eq!(run_output.status.code(), Some(3));
+    let lock_stderr = parse_last_stderr_json(&lock_output.stderr);
+    let run_stderr = parse_last_stderr_json(&run_output.stderr);
+    assert_eq!(lock_stderr["error"], Value::from("input_usage_error"));
+    assert_eq!(lock_stderr["message"], run_stderr["message"]);
+    assert!(
+        lock_stderr["message"]
+            .as_str()
+            .expect("message")
+            .contains("assert.schema_file")
     );
 }
 

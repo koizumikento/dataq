@@ -119,7 +119,7 @@ const RECIPE_RUN_NOTES: &[&str] = &[
     "Step-level unmatched results map to exit code 2.",
 ];
 const RECIPE_LOCK_NOTES: &[&str] = &[
-    "`tool_versions` keys are fixed in `jq`, `yq`, `mlr` order.",
+    "`tool_versions` keys are deterministically sorted by tool name (`jq`, `mlr`, `yq`).",
     "Lock output is canonicalized before write/emit.",
 ];
 

@@ -646,6 +646,8 @@ fn validate_canon_step_args_for_lock(args: &CanonStepArgs) -> Result<(), RecipeE
                     "invalid format `{raw}` for `canon.args.input`: {error}"
                 ))
             })?;
+        } else if let Some(path) = args.input.as_deref() {
+            validate_file_backed_arg_format_for_lock(path, "canon.args.input")?;
         }
     }
     Ok(())
@@ -689,6 +691,12 @@ fn validate_assert_step_args_for_lock(
             ))
         })?;
     }
+    if let Some(path) = args.rules_file.as_deref() {
+        validate_file_backed_arg_format_for_lock(path, "assert.rules_file")?;
+    }
+    if let Some(path) = args.schema_file.as_deref() {
+        validate_file_backed_arg_format_for_lock(path, "assert.schema_file")?;
+    }
 
     Ok(())
 }
@@ -700,6 +708,8 @@ fn validate_sdiff_step_args_for_lock(args: &SdiffStepArgs) -> Result<(), RecipeE
                 "invalid format `{raw_format}` for `sdiff.args.right`: {error}"
             ))
         })?;
+    } else {
+        validate_file_backed_arg_format_for_lock(args.right.as_path(), "sdiff.args.right")?;
     }
 
     if let Some(key_path) = args.key.as_deref() {
@@ -852,6 +862,20 @@ fn resolve_step_input_format(
             path.display()
         ))
     })
+}
+
+fn validate_file_backed_arg_format_for_lock(
+    path: &Path,
+    field_label: &str,
+) -> Result<(), RecipeExecutionErrorKind> {
+    io::resolve_input_format(None, Some(path))
+        .map(|_| ())
+        .map_err(|error| {
+            RecipeExecutionErrorKind::InputUsage(format!(
+                "failed to resolve format for `{field_label}` from `{}`: {error}",
+                path.display()
+            ))
+        })
 }
 
 fn read_values_from_path(
