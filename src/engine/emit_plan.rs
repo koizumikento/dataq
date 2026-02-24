@@ -110,6 +110,9 @@ fn resolve_steps(command: &str, args: &[String]) -> Result<Vec<String>, EmitPlan
 }
 
 fn resolve_assert_steps(args: &[String]) -> Result<Vec<String>, EmitPlanError> {
+    reject_assigned_assert_help_value(args, "--rules-help")?;
+    reject_assigned_assert_help_value(args, "--schema-help")?;
+
     let rules_help = has_flag(args, "--rules-help");
     let schema_help = has_flag(args, "--schema-help");
     if rules_help && schema_help {
@@ -196,6 +199,16 @@ fn parse_assert_normalize_mode(
 
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
+}
+
+fn reject_assigned_assert_help_value(args: &[String], flag: &str) -> Result<(), EmitPlanError> {
+    let prefix = format!("{flag}=");
+    if let Some(received) = args.iter().find(|arg| arg.starts_with(prefix.as_str())) {
+        return Err(EmitPlanError::InvalidArguments(format!(
+            "`{flag}` does not take a value (received `{received}`)"
+        )));
+    }
+    Ok(())
 }
 
 fn build_stages(command: &str, steps: &[String]) -> Vec<EmitPlanStage> {
@@ -294,5 +307,32 @@ mod tests {
         .expect_err("unknown must fail");
 
         assert_eq!(error, EmitPlanError::UnknownCommand("unknown".to_string()));
+    }
+
+    #[test]
+    fn rejects_assigned_assert_help_flag_values() {
+        let rules_help_error = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec!["--rules-help=true".to_string()],
+        })
+        .expect_err("assigned rules help value must fail");
+        assert_eq!(
+            rules_help_error,
+            EmitPlanError::InvalidArguments(
+                "`--rules-help` does not take a value (received `--rules-help=true`)".to_string()
+            )
+        );
+
+        let schema_help_error = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec!["--schema-help=true".to_string()],
+        })
+        .expect_err("assigned schema help value must fail");
+        assert_eq!(
+            schema_help_error,
+            EmitPlanError::InvalidArguments(
+                "`--schema-help` does not take a value (received `--schema-help=true`)".to_string()
+            )
+        );
     }
 }

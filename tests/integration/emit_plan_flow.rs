@@ -79,6 +79,41 @@ fn emit_plan_rejects_invalid_args_schema() {
     );
 }
 
+#[test]
+fn emit_plan_rejects_assigned_assert_help_values() {
+    for invalid_arg in ["--rules-help=true", "--schema-help=true"] {
+        let args_json = format!(r#"["{invalid_arg}"]"#);
+        let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+            .args([
+                "emit",
+                "plan",
+                "--command",
+                "assert",
+                "--args",
+                args_json.as_str(),
+            ])
+            .output()
+            .expect("run emit plan");
+
+        assert_eq!(output.status.code(), Some(3));
+        assert!(output.stdout.is_empty());
+        let stderr_json = parse_last_stderr_json(&output.stderr);
+        assert_eq!(stderr_json["error"], Value::from("input_usage_error"));
+        assert!(
+            stderr_json["message"]
+                .as_str()
+                .expect("message")
+                .contains("does not take a value")
+        );
+        assert!(
+            stderr_json["message"]
+                .as_str()
+                .expect("message")
+                .contains(invalid_arg)
+        );
+    }
+}
+
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
     let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
     let line = text
