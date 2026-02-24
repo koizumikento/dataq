@@ -564,9 +564,10 @@ fn execute_gate_schema(args: &Map<String, Value>) -> ToolExecution {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
-    if let Err(message) = gate::resolve_preset(from.as_deref()) {
-        return input_usage_error(message);
-    }
+    let preset = match gate::resolve_preset(from.as_deref()) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
 
     let input = match parse_value_input(
         args,
@@ -581,6 +582,14 @@ fn execute_gate_schema(args: &Map<String, Value>) -> ToolExecution {
     };
     if from.is_some() && matches!(input, ValueInputSource::Inline(_)) {
         return input_usage_error("`from` presets require path/stdin input");
+    }
+    if matches!(
+        &input,
+        ValueInputSource::Path(path) if gate::is_stdin_path(path.as_path())
+    ) {
+        return input_usage_error(
+            "`dataq.gate.schema` does not accept stdin sentinel paths (`-` or `/dev/stdin`) for `input_path`; pass inline `input` instead",
+        );
     }
 
     let schema_source = match parse_document_input(
@@ -602,14 +611,16 @@ fn execute_gate_schema(args: &Map<String, Value>) -> ToolExecution {
         }
     };
 
-    let stdin_format = match gate::resolve_preset(from.as_deref()) {
-        Ok(Some(_)) => Some(Format::Yaml),
-        Ok(None) => Some(Format::Json),
-        Err(_) => None,
+    let stdin_format = if preset.is_some() {
+        Some(Format::Yaml)
+    } else {
+        Some(Format::Json)
     };
     let (input_path, stdin_payload, input_format) = match &input {
         ValueInputSource::Path(path) => {
-            let format = if gate::is_stdin_path(path.as_path()) {
+            let format = if preset.is_some() {
+                Some(Format::Yaml)
+            } else if gate::is_stdin_path(path.as_path()) {
                 stdin_format
             } else {
                 io::resolve_input_format(None, Some(path.as_path())).ok()

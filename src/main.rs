@@ -817,17 +817,20 @@ fn run_gate(args: GateArgs, emit_pipeline: bool) -> i32 {
 
 fn run_gate_schema(args: GateSchemaArgs, emit_pipeline: bool) -> i32 {
     let schema_format = dataq_io::resolve_input_format(None, Some(args.schema.as_path())).ok();
+    let preset = gate::resolve_preset(args.from.as_deref()).ok().flatten();
     let input_is_stdin = args
         .input
         .as_deref()
         .map(gate::is_stdin_path)
         .unwrap_or(true);
     let input_format = if input_is_stdin {
-        match gate::resolve_preset(args.from.as_deref()) {
-            Ok(Some(_)) => Some(Format::Yaml),
-            Ok(None) => Some(Format::Json),
-            Err(_) => None,
+        if preset.is_some() {
+            Some(Format::Yaml)
+        } else {
+            Some(Format::Json)
         }
+    } else if preset.is_some() {
+        Some(Format::Yaml)
     } else {
         args.input
             .as_deref()

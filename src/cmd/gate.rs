@@ -117,7 +117,7 @@ pub fn run_schema_with_stdin_and_trace<R: Read>(
 
     let assert_args = AssertCommandArgs {
         input: input.clone(),
-        from: if input.is_some() {
+        from: if input.is_some() && preset.is_none() {
             None
         } else {
             Some(stdin_format)
@@ -131,7 +131,7 @@ pub fn run_schema_with_stdin_and_trace<R: Read>(
 
 /// Treat `-` as stdin for command-level input resolution.
 pub fn is_stdin_path(path: &Path) -> bool {
-    path == Path::new("-")
+    path == Path::new("-") || path == Path::new("/dev/stdin")
 }
 
 fn normalize_input_path(path: Option<&Path>) -> Option<PathBuf> {
@@ -171,6 +171,7 @@ mod tests {
     #[test]
     fn treats_dash_as_stdin_path() {
         assert!(is_stdin_path(std::path::Path::new("-")));
+        assert!(is_stdin_path(std::path::Path::new("/dev/stdin")));
         assert!(!is_stdin_path(std::path::Path::new("./input.json")));
     }
 }

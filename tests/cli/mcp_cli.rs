@@ -277,6 +277,43 @@ fn inline_path_conflict_returns_exit_three() {
 }
 
 #[test]
+fn gate_schema_rejects_input_path_stdin_sentinels() {
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    fs::write(&schema_path, r#"{"type":"object"}"#).expect("write schema");
+
+    for sentinel in ["-", "/dev/stdin"] {
+        let request = tool_call_request(
+            22,
+            "dataq.gate.schema",
+            json!({
+                "input_path": sentinel,
+                "schema_path": schema_path,
+            }),
+        );
+
+        let output = run_mcp(&request, None);
+        assert_eq!(output.status.code(), Some(0));
+
+        let response = parse_stdout_json(&output.stdout);
+        assert_eq!(response["result"]["isError"], Value::Bool(true));
+        assert_eq!(
+            response["result"]["structuredContent"]["exit_code"],
+            Value::from(3)
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["payload"]["error"],
+            Value::from("input_usage_error")
+        );
+        let message = response["result"]["structuredContent"]["payload"]["message"]
+            .as_str()
+            .expect("error message");
+        assert!(message.contains("stdin sentinel paths"));
+        assert!(message.contains("inline `input`"));
+    }
+}
+
+#[test]
 fn unknown_tool_name_returns_exit_three() {
     let request = tool_call_request(2, "dataq.unknown", json!({}));
 
