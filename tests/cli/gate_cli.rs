@@ -212,6 +212,151 @@ printf '%s\n' '[{"job_id":"build","runs_on":"ubuntu-latest","steps_count":1,"use
         .stdout(predicate::str::contains("\"matched\":true"));
 }
 
+#[test]
+fn gate_policy_passes_with_zero_violations() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": ["id"],
+            "forbid_keys": [],
+            "fields": {
+                "id": {"type": "integer"}
+            },
+            "count": {"min": 1, "max": 1}
+        }"#,
+    )
+    .expect("write rules");
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "gate",
+            "policy",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+        ])
+        .write_stdin(r#"[{"id":1}]"#)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"matched\":true"))
+        .stdout(predicate::str::contains("\"violations\":0"));
+}
+
+#[test]
+fn gate_policy_failure_reports_sorted_details() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": ["id", "score"],
+            "forbid_keys": ["meta.blocked"],
+            "fields": {
+                "id": {"type": "integer"},
+                "score": {"type": "number", "range": {"min": 0, "max": 10}}
+            },
+            "count": {"min": 1, "max": 1}
+        }"#,
+    )
+    .expect("write rules");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "gate",
+            "policy",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+        ])
+        .write_stdin(r#"[{"score":20,"id":"x","meta":{"blocked":true}}]"#)
+        .output()
+        .expect("run gate policy");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stdout: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(stdout["matched"], Value::Bool(false));
+    assert_eq!(stdout["violations"], Value::from(3));
+
+    let details = stdout["details"].as_array().expect("details array");
+    assert_eq!(details[0]["path"], Value::from("$[0].id"));
+    assert_eq!(details[1]["path"], Value::from("$[0].meta.blocked"));
+    assert_eq!(details[2]["path"], Value::from("$[0].score"));
+}
+
+#[test]
+fn gate_policy_unknown_source_returns_exit_three() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": [],
+            "forbid_keys": [],
+            "fields": {},
+            "count": {}
+        }"#,
+    )
+    .expect("write rules");
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "gate",
+            "policy",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+            "--source",
+            "unknown",
+        ])
+        .write_stdin("[]")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""))
+        .stderr(predicate::str::contains("scan-text"));
+}
+
+#[test]
+fn gate_policy_emit_pipeline_includes_required_steps() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": ["id"],
+            "forbid_keys": [],
+            "fields": {
+                "id": {"type": "integer"}
+            },
+            "count": {"min": 1, "max": 1}
+        }"#,
+    )
+    .expect("write rules");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "gate",
+            "policy",
+            "--emit-pipeline",
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+            "--source",
+            "scan-text",
+        ])
+        .write_stdin(r#"[{"id":1}]"#)
+        .output()
+        .expect("run gate policy");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], Value::from("gate.policy"));
+    assert_eq!(
+        stderr_json["steps"],
+        Value::Array(vec![
+            Value::from("gate_policy_source"),
+            Value::from("gate_policy_assert_rules"),
+        ])
+    );
+}
+
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
     let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
     let line = text

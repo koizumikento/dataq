@@ -27,10 +27,11 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 12] = [
+const TOOL_ORDER: [&str; 13] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
+    "dataq.gate.policy",
     "dataq.sdiff",
     "dataq.profile",
     "dataq.join",
@@ -232,6 +233,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
         "dataq.canon" => execute_canon(args),
         "dataq.assert" => execute_assert(args),
         "dataq.gate.schema" => execute_gate_schema(args),
+        "dataq.gate.policy" => execute_gate_policy(args),
         "dataq.sdiff" => execute_sdiff(args),
         "dataq.profile" => execute_profile(args),
         "dataq.join" => execute_join(args),
@@ -672,14 +674,112 @@ fn execute_gate_schema(args: &Map<String, Value>) -> ToolExecution {
             PipelineInputSource::path("schema", schema_path.display().to_string(), schema_format),
             input_source,
         ]),
-        gate::pipeline_steps(),
-        gate::deterministic_guards(),
+        gate::schema_pipeline_steps(),
+        gate::schema_deterministic_guards(),
     );
     for used_tool in &trace.used_tools {
         report = report.mark_external_tool_used(used_tool);
     }
     report = report.with_stage_diagnostics(trace.stage_diagnostics);
     execution.pipeline = pipeline_as_value(report).ok();
+    execution
+}
+
+fn execute_gate_policy(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let source = match parse_optional_string(args, &["source"], "source") {
+        Ok(Some(raw)) => match gate::GatePolicySourcePreset::parse_cli_name(raw.as_str()) {
+            Ok(source) => Some(source),
+            Err(message) => return input_usage_error(message),
+        },
+        Ok(None) => None,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let rules_path =
+        match parse_optional_path(args, &["rules_path", "rules_file", "rules"], "rules") {
+            Ok(Some(path)) => path,
+            Ok(None) => return input_usage_error("missing required `rules`"),
+            Err(message) => return input_usage_error(message),
+        };
+
+    let input = match parse_value_input(
+        args,
+        &["input_path", "input_file"],
+        &["input", "input_inline", "input_value"],
+        "input",
+        true,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `input`"),
+        Err(message) => return input_usage_error(message),
+    };
+
+    let input_format = match &input {
+        ValueInputSource::Path(path) if gate::is_stdin_path(path.as_path()) => Some(Format::Json),
+        ValueInputSource::Path(path) => io::resolve_input_format(None, Some(path.as_path())).ok(),
+        ValueInputSource::Inline(_) => Some(Format::Json),
+    };
+
+    let (input_path, stdin_payload) = match &input {
+        ValueInputSource::Path(path) => (Some(path.clone()), Vec::new()),
+        ValueInputSource::Inline(values) => (None, serialize_values_as_json_input(values)),
+    };
+
+    let command_args = gate::GatePolicyCommandArgs {
+        rules: rules_path.clone(),
+        input: input_path.clone(),
+        source,
+    };
+    let response = gate::run_policy_with_stdin(&command_args, Cursor::new(stdin_payload));
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut sources = Vec::with_capacity(2);
+        sources.push(PipelineInputSource::path(
+            "rules",
+            rules_path.display().to_string(),
+            io::resolve_input_format(None, Some(rules_path.as_path()))
+                .ok()
+                .map(Format::as_str),
+        ));
+        match &input {
+            ValueInputSource::Path(path) if gate::is_stdin_path(path.as_path()) => {
+                sources.push(PipelineInputSource::stdin(
+                    "input",
+                    input_format.map(Format::as_str),
+                ));
+            }
+            ValueInputSource::Path(path) => {
+                sources.push(PipelineInputSource::path(
+                    "input",
+                    path.display().to_string(),
+                    input_format.map(Format::as_str),
+                ));
+            }
+            ValueInputSource::Inline(_) => {
+                sources.push(inline_source("input", input_format));
+            }
+        }
+
+        let report = PipelineReport::new(
+            "gate.policy",
+            PipelineInput::new(sources),
+            gate::policy_pipeline_steps(),
+            gate::policy_deterministic_guards(source),
+        );
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
     execution
 }
 
@@ -1884,6 +1984,7 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         "canon" => Ok(contract::ContractCommand::Canon),
         "assert" => Ok(contract::ContractCommand::Assert),
         "gate-schema" => Ok(contract::ContractCommand::GateSchema),
+        "gate" | "gate-policy" => Ok(contract::ContractCommand::Gate),
         "sdiff" => Ok(contract::ContractCommand::Sdiff),
         "profile" => Ok(contract::ContractCommand::Profile),
         "merge" => Ok(contract::ContractCommand::Merge),

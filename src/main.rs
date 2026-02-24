@@ -126,6 +126,8 @@ struct GateArgs {
 enum GateSubcommand {
     /// Validate input rows against a JSON Schema gate.
     Schema(GateSchemaArgs),
+    /// Apply policy rules and report deterministic violations.
+    Policy(GatePolicyArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -139,6 +141,18 @@ struct GateSchemaArgs {
     /// Optional ingest preset before schema validation.
     #[arg(long)]
     from: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct GatePolicyArgs {
+    #[arg(long)]
+    rules: PathBuf,
+
+    #[arg(long)]
+    input: Option<PathBuf>,
+
+    #[arg(long, value_enum)]
+    source: Option<CliGatePolicySource>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -320,6 +334,15 @@ enum CliAssertNormalizeMode {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliGatePolicySource {
+    ScanText,
+    IngestDoc,
+    IngestApi,
+    IngestNotes,
+    IngestBook,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliDoctorProfile {
     Core,
     CiJobs,
@@ -335,6 +358,7 @@ enum CliContractCommand {
     Canon,
     Assert,
     GateSchema,
+    Gate,
     Sdiff,
     Profile,
     Merge,
@@ -400,12 +424,25 @@ impl From<CliAssertNormalizeMode> for r#assert::AssertInputNormalizeMode {
     }
 }
 
+impl From<CliGatePolicySource> for gate::GatePolicySourcePreset {
+    fn from(value: CliGatePolicySource) -> Self {
+        match value {
+            CliGatePolicySource::ScanText => Self::ScanText,
+            CliGatePolicySource::IngestDoc => Self::IngestDoc,
+            CliGatePolicySource::IngestApi => Self::IngestApi,
+            CliGatePolicySource::IngestNotes => Self::IngestNotes,
+            CliGatePolicySource::IngestBook => Self::IngestBook,
+        }
+    }
+}
+
 impl From<CliContractCommand> for contract::ContractCommand {
     fn from(value: CliContractCommand) -> Self {
         match value {
             CliContractCommand::Canon => Self::Canon,
             CliContractCommand::Assert => Self::Assert,
             CliContractCommand::GateSchema => Self::GateSchema,
+            CliContractCommand::Gate => Self::Gate,
             CliContractCommand::Sdiff => Self::Sdiff,
             CliContractCommand::Profile => Self::Profile,
             CliContractCommand::Merge => Self::Merge,
@@ -812,6 +849,7 @@ fn emit_assert_schema_help() -> i32 {
 fn run_gate(args: GateArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         GateSubcommand::Schema(schema_args) => run_gate_schema(schema_args, emit_pipeline),
+        GateSubcommand::Policy(policy_args) => run_gate_policy(policy_args, emit_pipeline),
     }
 }
 
@@ -891,6 +929,83 @@ fn run_gate_schema(args: GateSchemaArgs, emit_pipeline: bool) -> i32 {
             input_format,
             schema_format,
             &trace,
+        );
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
+}
+
+fn run_gate_policy(args: GatePolicyArgs, emit_pipeline: bool) -> i32 {
+    let rules_format = dataq_io::resolve_input_format(None, Some(args.rules.as_path())).ok();
+    let input_is_stdin = args
+        .input
+        .as_deref()
+        .map(gate::is_stdin_path)
+        .unwrap_or(true);
+    let input_format = if input_is_stdin {
+        Some(Format::Json)
+    } else {
+        args.input
+            .as_deref()
+            .and_then(|path| dataq_io::resolve_input_format(None, Some(path)).ok())
+    };
+
+    let source = args.source.map(Into::into);
+    let command_args = gate::GatePolicyCommandArgs {
+        rules: args.rules.clone(),
+        input: args.input.clone(),
+        source,
+    };
+
+    let stdin = io::stdin();
+    let response = gate::run_policy_with_stdin(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 | 2 => {
+            if emit_json_stdout(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize gate policy response".to_string(),
+                    json!({"command": "gate.policy"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize gate policy error".to_string(),
+                    json!({"command": "gate.policy"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected gate policy exit code: {other}"),
+                json!({"command": "gate.policy"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_gate_policy_pipeline_report(
+            &args,
+            input_is_stdin,
+            input_format,
+            rules_format,
+            source,
         );
         emit_pipeline_report(&pipeline_report);
     }
@@ -1836,13 +1951,48 @@ fn build_gate_schema_pipeline_report(
     let mut report = PipelineReport::new(
         "gate.schema",
         PipelineInput::new(sources),
-        gate::pipeline_steps(),
-        gate::deterministic_guards(),
+        gate::schema_pipeline_steps(),
+        gate::schema_deterministic_guards(),
     );
     for used_tool in &trace.used_tools {
         report = report.mark_external_tool_used(used_tool);
     }
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
+fn build_gate_policy_pipeline_report(
+    args: &GatePolicyArgs,
+    input_is_stdin: bool,
+    input_format: Option<Format>,
+    rules_format: Option<Format>,
+    source: Option<gate::GatePolicySourcePreset>,
+) -> PipelineReport {
+    let mut sources = Vec::with_capacity(2);
+    sources.push(PipelineInputSource::path(
+        "rules",
+        args.rules.display().to_string(),
+        format_label(rules_format),
+    ));
+
+    if input_is_stdin {
+        sources.push(PipelineInputSource::stdin(
+            "input",
+            format_label(input_format),
+        ));
+    } else if let Some(path) = args.input.as_deref() {
+        sources.push(PipelineInputSource::path(
+            "input",
+            path.display().to_string(),
+            format_label(input_format),
+        ));
+    }
+
+    PipelineReport::new(
+        "gate.policy",
+        PipelineInput::new(sources),
+        gate::policy_pipeline_steps(),
+        gate::policy_deterministic_guards(source),
+    )
 }
 
 fn build_sdiff_pipeline_report(

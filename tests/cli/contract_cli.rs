@@ -53,6 +53,7 @@ fn contract_all_returns_deterministic_order() {
             "canon",
             "assert",
             "gate-schema",
+            "gate",
             "sdiff",
             "profile",
             "merge",
@@ -67,6 +68,25 @@ fn contract_all_returns_deterministic_order() {
         assert!(entry["exit_codes"].is_object());
         assert!(entry["notes"].is_array());
     }
+}
+
+#[test]
+fn contract_gate_command_reports_policy_contract_fields() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "gate"])
+        .output()
+        .expect("run contract gate");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], json!("gate"));
+    assert_eq!(payload["schema"], json!("dataq.gate.policy.output.v1"));
+    assert_eq!(
+        payload["output_fields"],
+        json!(["matched", "violations", "details"])
+    );
 }
 
 #[test]

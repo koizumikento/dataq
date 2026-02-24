@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 12] = [
+const TOOL_ORDER: [&str; 13] = [
     "dataq.canon",
     "dataq.assert",
     "dataq.gate.schema",
+    "dataq.gate.policy",
     "dataq.sdiff",
     "dataq.profile",
     "dataq.join",
@@ -94,6 +95,7 @@ fn tools_call_minimal_success_for_all_tools() {
     let toolchain = FakeToolchain::new();
     let dir = tempdir().expect("tempdir");
     let schema_path = dir.path().join("gate-schema.json");
+    let gate_rules_path = dir.path().join("gate-rules.json");
     fs::write(
         &schema_path,
         r#"{
@@ -105,6 +107,18 @@ fn tools_call_minimal_success_for_all_tools() {
         }"#,
     )
     .expect("write schema");
+    fs::write(
+        &gate_rules_path,
+        r#"{
+            "required_keys": ["id"],
+            "forbid_keys": [],
+            "fields": {
+                "id": {"type": "integer"}
+            },
+            "count": {"min": 1, "max": 1}
+        }"#,
+    )
+    .expect("write gate rules");
 
     let requests = vec![
         (
@@ -132,6 +146,13 @@ fn tools_call_minimal_success_for_all_tools() {
             json!({
                 "input": [{"id": 1}],
                 "schema_path": schema_path,
+            }),
+        ),
+        (
+            "dataq.gate.policy",
+            json!({
+                "input": [{"id": 1}],
+                "rules_path": gate_rules_path
             }),
         ),
         (
@@ -311,6 +332,50 @@ fn gate_schema_rejects_input_path_stdin_sentinels() {
         assert!(message.contains("stdin sentinel paths"));
         assert!(message.contains("inline `input`"));
     }
+}
+
+#[test]
+fn gate_policy_unknown_source_returns_exit_three() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    fs::write(
+        &rules_path,
+        r#"{
+            "required_keys": ["id"],
+            "forbid_keys": [],
+            "fields": {
+                "id": {"type": "integer"}
+            },
+            "count": {"min": 1, "max": 1}
+        }"#,
+    )
+    .expect("write rules");
+
+    let request = tool_call_request(
+        12,
+        "dataq.gate.policy",
+        json!({
+            "input": [{"id": 1}],
+            "rules_path": rules_path,
+            "source": "unknown-source"
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["message"],
+        Value::from(
+            "unknown source `unknown-source`: expected one of `scan-text`, `ingest-doc`, `ingest-api`, `ingest-notes`, `ingest-book`"
+        )
+    );
 }
 
 #[test]
