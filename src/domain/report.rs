@@ -51,6 +51,32 @@ pub struct RecipeRunReport {
     pub steps: Vec<RecipeStepReport>,
 }
 
+/// Deterministic report for `recipe replay` command output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeReplayReport {
+    pub matched: bool,
+    pub exit_code: i32,
+    pub lock_check: RecipeReplayLockCheckReport,
+    pub steps: Vec<RecipeStepReport>,
+}
+
+/// Deterministic lock verification summary for `recipe replay`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeReplayLockCheckReport {
+    pub strict: bool,
+    pub matched: bool,
+    pub mismatch_count: usize,
+    pub mismatches: Vec<RecipeReplayLockMismatchReport>,
+}
+
+/// One lock verification mismatch emitted in deterministic check order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeReplayLockMismatchReport {
+    pub constraint: String,
+    pub expected: String,
+    pub actual: String,
+}
+
 /// Per-step result summary in recipe execution order.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RecipeStepReport {

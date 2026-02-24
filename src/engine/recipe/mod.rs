@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,7 +8,10 @@ use std::str::FromStr;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::domain::report::{RecipeLockReport, RecipeRunReport, RecipeStepReport};
+use crate::domain::report::{
+    RecipeLockReport, RecipeReplayLockCheckReport, RecipeReplayLockMismatchReport,
+    RecipeReplayReport, RecipeRunReport, RecipeStepReport,
+};
 use crate::domain::rules::AssertRules;
 use crate::domain::value_path::ValuePath;
 use crate::engine::r#assert::{self, AssertValidationError};
@@ -20,6 +24,7 @@ use crate::util::hash::DeterministicHasher;
 pub const RECIPE_VERSION: &str = "dataq.recipe.v1";
 const RECIPE_LOCK_VERSION: &str = "dataq.recipe.lock.v1";
 const RECIPE_LOCK_TOOLS: [&str; 3] = ["jq", "yq", "mlr"];
+const RECIPE_LOCK_TOOL_ORDER: [&str; 3] = ["jq", "mlr", "yq"];
 const CANON_REQUIRES_INPUT_OR_PRIOR_VALUES: &str =
     "canon step requires `args.input` or prior in-memory values";
 const ASSERT_REQUIRES_PRIOR_VALUES: &str =
@@ -44,6 +49,12 @@ pub struct RecipeLockExecution {
 }
 
 #[derive(Debug, Clone)]
+pub struct RecipeReplayExecution {
+    pub report: RecipeReplayReport,
+    pub pipeline_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RecipeExecutionError {
     pub kind: RecipeExecutionErrorKind,
     pub pipeline_steps: Vec<String>,
@@ -60,6 +71,16 @@ pub enum RecipeExecutionErrorKind {
 struct RecipeFile {
     version: String,
     steps: Vec<RecipeStep>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipeLockFile {
+    version: String,
+    command_graph_hash: String,
+    args_hash: String,
+    tool_versions: BTreeMap<String, String>,
+    dataq_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,7 +189,7 @@ pub fn lock(recipe_path: &Path) -> Result<RecipeLockExecution, RecipeExecutionEr
             });
         }
     };
-    let recipe = match parse_recipe(loaded) {
+    let recipe = match parse_loaded_recipe(loaded) {
         Ok(recipe) => recipe,
         Err(kind) => {
             return Err(RecipeExecutionError {
@@ -230,12 +251,86 @@ pub fn lock(recipe_path: &Path) -> Result<RecipeLockExecution, RecipeExecutionEr
     })
 }
 
+pub fn replay(
+    recipe_path: &Path,
+    lock_path: &Path,
+    strict: bool,
+) -> Result<RecipeReplayExecution, RecipeExecutionError> {
+    let mut pipeline_steps = vec!["recipe_replay_parse".to_string()];
+    let recipe_base_dir = recipe_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let recipe = match load_and_parse_recipe(recipe_path) {
+        Ok(recipe) => recipe,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+    let lock = match load_and_parse_lock(lock_path) {
+        Ok(lock) => lock,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+
+    pipeline_steps.push("recipe_replay_verify_lock".to_string());
+    let lock_check = match verify_lock_constraints(&recipe, &lock, strict) {
+        Ok(report) => report,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+
+    if strict && !lock_check.matched {
+        return Ok(RecipeReplayExecution {
+            report: RecipeReplayReport {
+                matched: false,
+                exit_code: 3,
+                lock_check,
+                steps: Vec::new(),
+            },
+            pipeline_steps,
+        });
+    }
+
+    pipeline_steps.push("recipe_replay_execute".to_string());
+    let run_report = match execute_recipe_steps(recipe, recipe_base_dir.as_path(), None) {
+        Ok(report) => report,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+
+    Ok(RecipeReplayExecution {
+        report: RecipeReplayReport {
+            matched: run_report.matched,
+            exit_code: run_report.exit_code,
+            lock_check,
+            steps: run_report.steps,
+        },
+        pipeline_steps,
+    })
+}
 fn execute_loaded_recipe(
     loaded: Value,
     recipe_base_dir: &Path,
     pipeline_steps: &mut Vec<String>,
 ) -> Result<RecipeExecution, RecipeExecutionError> {
-    let recipe = match parse_recipe(loaded) {
+    let recipe = match parse_loaded_recipe(loaded) {
         Ok(recipe) => recipe,
         Err(kind) => {
             return Err(RecipeExecutionError {
@@ -253,22 +348,37 @@ fn execute_recipe(
     recipe_base_dir: &Path,
     pipeline_steps: &mut Vec<String>,
 ) -> Result<RecipeExecution, RecipeExecutionError> {
+    let report = match execute_recipe_steps(recipe, recipe_base_dir, Some(pipeline_steps)) {
+        Ok(report) => report,
+        Err(kind) => {
+            return Err(RecipeExecutionError {
+                kind,
+                pipeline_steps: pipeline_steps.clone(),
+            });
+        }
+    };
+
+    Ok(RecipeExecution {
+        report,
+        pipeline_steps: pipeline_steps.clone(),
+    })
+}
+
+fn execute_recipe_steps(
+    recipe: RecipeFile,
+    recipe_base_dir: &Path,
+    mut pipeline_steps: Option<&mut Vec<String>>,
+) -> Result<RecipeRunReport, RecipeExecutionErrorKind> {
     let mut current_values: Option<Vec<Value>> = None;
     let mut step_reports = Vec::with_capacity(recipe.steps.len());
 
     for (index, step) in recipe.steps.into_iter().enumerate() {
-        pipeline_steps.push(format!("execute_step_{index}_{}", step.kind));
+        if let Some(steps) = pipeline_steps.as_deref_mut() {
+            steps.push(format!("execute_step_{index}_{}", step.kind));
+        }
 
         let kind = step.kind.clone();
-        let outcome = match execute_step(step, current_values.as_deref(), recipe_base_dir) {
-            Ok(outcome) => outcome,
-            Err(kind) => {
-                return Err(RecipeExecutionError {
-                    kind,
-                    pipeline_steps: pipeline_steps.clone(),
-                });
-            }
-        };
+        let outcome = execute_step(step, current_values.as_deref(), recipe_base_dir)?;
 
         if let Some(next_values) = outcome.next_values {
             current_values = Some(next_values);
@@ -283,24 +393,18 @@ fn execute_recipe(
         });
 
         if !outcome.matched {
-            return Ok(RecipeExecution {
-                report: RecipeRunReport {
-                    matched: false,
-                    exit_code: 2,
-                    steps: step_reports,
-                },
-                pipeline_steps: pipeline_steps.clone(),
+            return Ok(RecipeRunReport {
+                matched: false,
+                exit_code: 2,
+                steps: step_reports,
             });
         }
     }
 
-    Ok(RecipeExecution {
-        report: RecipeRunReport {
-            matched: true,
-            exit_code: 0,
-            steps: step_reports,
-        },
-        pipeline_steps: pipeline_steps.clone(),
+    Ok(RecipeRunReport {
+        matched: true,
+        exit_code: 0,
+        steps: step_reports,
     })
 }
 
@@ -547,6 +651,11 @@ enum AssertSource {
     Schema(Value),
 }
 
+fn load_and_parse_recipe(recipe_path: &Path) -> Result<RecipeFile, RecipeExecutionErrorKind> {
+    let loaded = load_recipe_value(recipe_path)?;
+    parse_loaded_recipe(loaded)
+}
+
 fn load_recipe_value(recipe_path: &Path) -> Result<Value, RecipeExecutionErrorKind> {
     let format = io::resolve_input_format(None, Some(recipe_path)).map_err(|error| {
         RecipeExecutionErrorKind::InputUsage(format!(
@@ -563,6 +672,11 @@ fn load_recipe_value(recipe_path: &Path) -> Result<Value, RecipeExecutionErrorKi
     }
 
     read_single_value_from_path(recipe_path, "recipe.file")
+}
+
+fn load_and_parse_lock(lock_path: &Path) -> Result<RecipeLockFile, RecipeExecutionErrorKind> {
+    let value = read_single_value_from_path(lock_path, "recipe.lock")?;
+    parse_lock(value)
 }
 
 fn read_single_value_from_path(
@@ -585,7 +699,7 @@ fn read_single_value_from_path(
     Ok(values.remove(0))
 }
 
-fn parse_recipe(value: Value) -> Result<RecipeFile, RecipeExecutionErrorKind> {
+fn parse_loaded_recipe(value: Value) -> Result<RecipeFile, RecipeExecutionErrorKind> {
     let recipe: RecipeFile = serde_json::from_value(value).map_err(|error| {
         RecipeExecutionErrorKind::InputUsage(format!("invalid recipe schema: {error}"))
     })?;
@@ -597,6 +711,154 @@ fn parse_recipe(value: Value) -> Result<RecipeFile, RecipeExecutionErrorKind> {
     }
 
     Ok(recipe)
+}
+
+fn parse_lock(value: Value) -> Result<RecipeLockFile, RecipeExecutionErrorKind> {
+    let lock: RecipeLockFile = serde_json::from_value(value).map_err(|error| {
+        RecipeExecutionErrorKind::InputUsage(format!("invalid recipe lock schema: {error}"))
+    })?;
+    Ok(lock)
+}
+
+fn verify_lock_constraints(
+    recipe: &RecipeFile,
+    lock: &RecipeLockFile,
+    strict: bool,
+) -> Result<RecipeReplayLockCheckReport, RecipeExecutionErrorKind> {
+    let expected_command_graph_hash = hash_recipe_command_graph(recipe);
+    let expected_args_hash = hash_recipe_args(recipe)?;
+    let expected_dataq_version = env!("CARGO_PKG_VERSION").to_string();
+    let actual_tool_versions = collect_actual_tool_versions(lock);
+
+    let mut mismatches = Vec::new();
+    if lock.version != RECIPE_LOCK_VERSION {
+        mismatches.push(RecipeReplayLockMismatchReport {
+            constraint: "lock.version".to_string(),
+            expected: RECIPE_LOCK_VERSION.to_string(),
+            actual: lock.version.clone(),
+        });
+    }
+    if lock.command_graph_hash != expected_command_graph_hash {
+        mismatches.push(RecipeReplayLockMismatchReport {
+            constraint: "lock.command_graph_hash".to_string(),
+            expected: expected_command_graph_hash,
+            actual: lock.command_graph_hash.clone(),
+        });
+    }
+    if lock.args_hash != expected_args_hash {
+        mismatches.push(RecipeReplayLockMismatchReport {
+            constraint: "lock.args_hash".to_string(),
+            expected: expected_args_hash,
+            actual: lock.args_hash.clone(),
+        });
+    }
+    if lock.dataq_version != expected_dataq_version {
+        mismatches.push(RecipeReplayLockMismatchReport {
+            constraint: "lock.dataq_version".to_string(),
+            expected: expected_dataq_version,
+            actual: lock.dataq_version.clone(),
+        });
+    }
+
+    for tool_name in ordered_lock_tool_names(lock) {
+        let expected = lock
+            .tool_versions
+            .get(tool_name.as_str())
+            .expect("ordered lock tools must exist in map");
+        let actual = actual_tool_versions
+            .get(tool_name.as_str())
+            .cloned()
+            .unwrap_or_else(|| format!("error: missing probed value for tool `{tool_name}`"));
+        if *expected != actual {
+            mismatches.push(RecipeReplayLockMismatchReport {
+                constraint: format!("lock.tool_versions.{tool_name}"),
+                expected: expected.clone(),
+                actual,
+            });
+        }
+    }
+
+    Ok(RecipeReplayLockCheckReport {
+        strict,
+        matched: mismatches.is_empty(),
+        mismatch_count: mismatches.len(),
+        mismatches,
+    })
+}
+
+fn ordered_lock_tool_names(lock: &RecipeLockFile) -> Vec<String> {
+    let mut names = Vec::new();
+    for tool in RECIPE_LOCK_TOOL_ORDER {
+        if lock.tool_versions.contains_key(tool) {
+            names.push(tool.to_string());
+        }
+    }
+    for tool in lock.tool_versions.keys() {
+        if !RECIPE_LOCK_TOOL_ORDER.contains(&tool.as_str()) {
+            names.push(tool.clone());
+        }
+    }
+    names
+}
+
+fn collect_actual_tool_versions(lock: &RecipeLockFile) -> BTreeMap<String, String> {
+    let mut versions = BTreeMap::new();
+    for tool_name in ordered_lock_tool_names(lock) {
+        versions.insert(
+            tool_name.clone(),
+            probe_recipe_lock_tool_version(tool_name.as_str()),
+        );
+    }
+    versions
+}
+
+fn probe_recipe_lock_tool_version(tool_name: &str) -> String {
+    if !RECIPE_LOCK_TOOL_ORDER.contains(&tool_name) {
+        return format!("error: unsupported tool `{tool_name}`");
+    }
+
+    let executable = resolve_recipe_lock_tool_executable(tool_name);
+    match Command::new(executable).arg("--version").output() {
+        Ok(output) => {
+            let captured = first_non_empty_line(&output.stdout)
+                .or_else(|| first_non_empty_line(&output.stderr))
+                .unwrap_or_else(|| "error: empty --version output".to_string());
+            if output.status.success() {
+                captured
+            } else {
+                format!(
+                    "error: `--version` exited with status {} ({captured})",
+                    status_label(output.status.code()),
+                )
+            }
+        }
+        Err(error) => match error.kind() {
+            std::io::ErrorKind::NotFound => "error: unavailable in PATH".to_string(),
+            std::io::ErrorKind::PermissionDenied => "error: not executable".to_string(),
+            _ => format!("error: failed to execute --version ({error})"),
+        },
+    }
+}
+
+fn resolve_recipe_lock_tool_executable(tool_name: &str) -> String {
+    match tool_name {
+        "jq" => env::var("DATAQ_JQ_BIN").unwrap_or_else(|_| "jq".to_string()),
+        "yq" => env::var("DATAQ_YQ_BIN").unwrap_or_else(|_| "yq".to_string()),
+        "mlr" => env::var("DATAQ_MLR_BIN").unwrap_or_else(|_| "mlr".to_string()),
+        _ => tool_name.to_string(),
+    }
+}
+
+fn first_non_empty_line(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.lines()
+        .find(|line| !line.trim().is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn status_label(code: Option<i32>) -> String {
+    code.map(|value| value.to_string())
+        .unwrap_or_else(|| "terminated by signal".to_string())
 }
 
 fn parse_step_args<T: for<'de> Deserialize<'de>>(

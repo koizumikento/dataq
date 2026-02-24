@@ -21,6 +21,7 @@ const TOOL_ORDER: [&str; 15] = [
     "dataq.emit.plan",
     "dataq.recipe.run",
     "dataq.recipe.lock",
+    "dataq.recipe.replay",
 ];
 
 #[test]
@@ -126,6 +127,31 @@ fn tools_call_minimal_success_for_all_tools() {
     let diff_input = diff_input_path.display().to_string();
     let recipe_path = dir.path().join("recipe-lock.json");
     fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
+    let replay_recipe_path = dir.path().join("replay.recipe.json");
+    let replay_lock_path = dir.path().join("replay.lock.json");
+    fs::write(
+        &replay_recipe_path,
+        r#"{"version":"dataq.recipe.v1","steps":[]}"#,
+    )
+    .expect("write replay recipe");
+    fs::write(
+        &replay_lock_path,
+        format!(
+            r#"{{
+  "version": "dataq.recipe.lock.v1",
+  "command_graph_hash": "placeholder",
+  "args_hash": "placeholder",
+  "tool_versions": {{
+    "jq": "jq-1.7",
+    "mlr": "mlr 6.13.0",
+    "yq": "yq 4.35.2"
+  }},
+  "dataq_version": "{}"
+}}"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("write replay lock");
     let requests = vec![
         (
             "dataq.canon",
@@ -232,6 +258,14 @@ fn tools_call_minimal_success_for_all_tools() {
             "dataq.recipe.lock",
             json!({
                 "file_path": recipe_path
+            }),
+        ),
+        (
+            "dataq.recipe.replay",
+            json!({
+                "file_path": replay_recipe_path,
+                "lock_path": replay_lock_path,
+                "strict": false
             }),
         ),
     ];

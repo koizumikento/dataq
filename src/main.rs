@@ -268,6 +268,8 @@ enum RecipeSubcommand {
     Run(RecipeRunArgs),
     /// Generate deterministic lock metadata for a recipe file.
     Lock(RecipeLockArgs),
+    /// Replay a recipe under lock constraints.
+    Replay(RecipeReplayArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -283,6 +285,18 @@ struct RecipeLockArgs {
 
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct RecipeReplayArgs {
+    #[arg(long)]
+    file: PathBuf,
+
+    #[arg(long)]
+    lock: PathBuf,
+
+    #[arg(long, default_value_t = false)]
+    strict: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1597,6 +1611,7 @@ fn run_recipe(args: RecipeArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         RecipeSubcommand::Run(run_args) => run_recipe_run(run_args, emit_pipeline),
         RecipeSubcommand::Lock(lock_args) => run_recipe_lock(lock_args, emit_pipeline),
+        RecipeSubcommand::Replay(replay_args) => run_recipe_replay(replay_args, emit_pipeline),
     }
 }
 
@@ -1737,6 +1752,62 @@ fn run_recipe_lock(args: RecipeLockArgs, emit_pipeline: bool) -> i32 {
             &trace.tool_versions,
         );
         emit_pipeline_report_with_context(&pipeline_report, &fingerprint_context);
+    }
+    exit_code
+}
+
+fn run_recipe_replay(args: RecipeReplayArgs, emit_pipeline: bool) -> i32 {
+    let recipe_format = dataq_io::resolve_input_format(None, Some(args.file.as_path())).ok();
+    let lock_format = dataq_io::resolve_input_format(None, Some(args.lock.as_path())).ok();
+    let command_args = recipe::RecipeReplayCommandArgs {
+        file_path: args.file.clone(),
+        lock_path: args.lock.clone(),
+        strict: args.strict,
+    };
+    let (response, trace) = recipe::replay_with_trace(&command_args);
+
+    let exit_code = match response.exit_code {
+        0 | 2 => {
+            if emit_json_stdout(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize recipe replay response".to_string(),
+                    json!({"command": "recipe", "subcommand": "replay"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize recipe replay error".to_string(),
+                    json!({"command": "recipe", "subcommand": "replay"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected recipe replay exit code: {other}"),
+                json!({"command": "recipe", "subcommand": "replay"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report =
+            build_recipe_replay_pipeline_report(&args, recipe_format, lock_format, trace.steps);
+        emit_pipeline_report(&pipeline_report);
     }
     exit_code
 }
@@ -2473,6 +2544,41 @@ fn build_recipe_lock_pipeline_report(
         report = report.mark_external_tool_used(tool_name);
     }
     report
+}
+
+fn build_recipe_replay_pipeline_report(
+    args: &RecipeReplayArgs,
+    recipe_format: Option<Format>,
+    lock_format: Option<Format>,
+    steps: Vec<String>,
+) -> PipelineReport {
+    let step_names = if steps.is_empty() {
+        vec![
+            "recipe_replay_parse".to_string(),
+            "recipe_replay_verify_lock".to_string(),
+            "recipe_replay_execute".to_string(),
+        ]
+    } else {
+        steps
+    };
+
+    PipelineReport::new(
+        "recipe",
+        PipelineInput::new(vec![
+            PipelineInputSource::path(
+                "recipe",
+                args.file.display().to_string(),
+                format_label(recipe_format),
+            ),
+            PipelineInputSource::path(
+                "lock",
+                args.lock.display().to_string(),
+                format_label(lock_format),
+            ),
+        ]),
+        step_names,
+        recipe::deterministic_guards_replay(),
+    )
 }
 
 fn format_label(format: Option<Format>) -> Option<&'static str> {
