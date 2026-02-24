@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
-    canon, contract, doctor, emit, join, merge, profile, recipe, sdiff,
+    canon, contract, doctor, emit, gate, join, merge, profile, recipe, sdiff,
 };
 use crate::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
 use crate::domain::rules::AssertRules;
@@ -27,9 +27,10 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 11] = [
+const TOOL_ORDER: [&str; 12] = [
     "dataq.canon",
     "dataq.assert",
+    "dataq.gate.schema",
     "dataq.sdiff",
     "dataq.profile",
     "dataq.join",
@@ -230,6 +231,7 @@ fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecuti
     match tool_name {
         "dataq.canon" => execute_canon(args),
         "dataq.assert" => execute_assert(args),
+        "dataq.gate.schema" => execute_gate_schema(args),
         "dataq.sdiff" => execute_sdiff(args),
         "dataq.profile" => execute_profile(args),
         "dataq.join" => execute_join(args),
@@ -550,6 +552,134 @@ fn execute_assert_with_command_api(
         execution.pipeline = pipeline_as_value(report).ok();
     }
 
+    execution
+}
+
+fn execute_gate_schema(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let from = match parse_optional_string(args, &["from"], "from") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let preset = match gate::resolve_preset(from.as_deref()) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let input = match parse_value_input(
+        args,
+        &["input_path", "input_file"],
+        &["input", "input_inline", "input_value"],
+        "input",
+        true,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `input`"),
+        Err(message) => return input_usage_error(message),
+    };
+    if from.is_some() && matches!(input, ValueInputSource::Inline(_)) {
+        return input_usage_error("`from` presets require path/stdin input");
+    }
+    if matches!(
+        &input,
+        ValueInputSource::Path(path) if gate::is_stdin_path(path.as_path())
+    ) {
+        return input_usage_error(
+            "`dataq.gate.schema` does not accept stdin sentinel paths (`-` or `/dev/stdin`) for `input_path`; pass inline `input` instead",
+        );
+    }
+
+    let schema_source = match parse_document_input(
+        args,
+        &["schema_path", "schema_file"],
+        &["schema", "schema_inline"],
+        "schema",
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `schema`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let schema_path = match schema_source {
+        DocumentInputSource::Path(path) => path,
+        DocumentInputSource::Inline(_) => {
+            return input_usage_error(
+                "inline `schema` is not supported for `dataq.gate.schema`; use `schema_path`",
+            );
+        }
+    };
+
+    let stdin_format = if preset.is_some() {
+        Some(Format::Yaml)
+    } else {
+        Some(Format::Json)
+    };
+    let (input_path, stdin_payload, input_format) = match &input {
+        ValueInputSource::Path(path) => {
+            let format = if preset.is_some() {
+                Some(Format::Yaml)
+            } else if gate::is_stdin_path(path.as_path()) {
+                stdin_format
+            } else {
+                io::resolve_input_format(None, Some(path.as_path())).ok()
+            };
+            (Some(path.clone()), Vec::new(), format)
+        }
+        ValueInputSource::Inline(values) => (
+            None,
+            serialize_values_as_json_input(values),
+            Some(Format::Json),
+        ),
+    };
+
+    let command_args = gate::GateSchemaCommandArgs {
+        schema: schema_path.clone(),
+        input: input_path.clone(),
+        from: from.clone(),
+    };
+    let (response, trace) =
+        gate::run_schema_with_stdin_and_trace(&command_args, Cursor::new(stdin_payload));
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+    if !emit_pipeline {
+        return execution;
+    }
+
+    let schema_format = io::resolve_input_format(None, Some(schema_path.as_path()))
+        .ok()
+        .map(Format::as_str);
+    let input_source = match &input {
+        ValueInputSource::Path(path) if gate::is_stdin_path(path.as_path()) => {
+            PipelineInputSource::stdin("input", input_format.map(Format::as_str))
+        }
+        ValueInputSource::Path(path) => PipelineInputSource::path(
+            "input",
+            path.display().to_string(),
+            input_format.map(Format::as_str),
+        ),
+        ValueInputSource::Inline(_) => inline_source("input", input_format),
+    };
+
+    let mut report = PipelineReport::new(
+        "gate.schema",
+        PipelineInput::new(vec![
+            PipelineInputSource::path("schema", schema_path.display().to_string(), schema_format),
+            input_source,
+        ]),
+        gate::pipeline_steps(),
+        gate::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report = report.with_stage_diagnostics(trace.stage_diagnostics);
+    execution.pipeline = pipeline_as_value(report).ok();
     execution
 }
 
@@ -1753,6 +1883,7 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
     match value {
         "canon" => Ok(contract::ContractCommand::Canon),
         "assert" => Ok(contract::ContractCommand::Assert),
+        "gate-schema" => Ok(contract::ContractCommand::GateSchema),
         "sdiff" => Ok(contract::ContractCommand::Sdiff),
         "profile" => Ok(contract::ContractCommand::Profile),
         "merge" => Ok(contract::ContractCommand::Merge),

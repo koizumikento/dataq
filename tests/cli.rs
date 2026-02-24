@@ -8,6 +8,8 @@ mod doctor_cli;
 mod emit_cli;
 #[path = "cli/entry_cli.rs"]
 mod entry_cli;
+#[path = "cli/gate_cli.rs"]
+mod gate_cli;
 #[path = "cli/join_cli.rs"]
 mod join_cli;
 #[path = "cli/mcp_cli.rs"]

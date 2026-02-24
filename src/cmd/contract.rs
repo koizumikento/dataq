@@ -2,9 +2,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 7] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 8] = [
     ContractCommand::Canon,
     ContractCommand::Assert,
+    ContractCommand::GateSchema,
     ContractCommand::Sdiff,
     ContractCommand::Profile,
     ContractCommand::Merge,
@@ -17,6 +18,7 @@ pub const ORDERED_COMMANDS: [ContractCommand; 7] = [
 pub enum ContractCommand {
     Canon,
     Assert,
+    GateSchema,
     Sdiff,
     Profile,
     Merge,
@@ -66,6 +68,10 @@ const CANON_NOTES: &[&str] = &[
 const ASSERT_NOTES: &[&str] = &[
     "Validation mismatch details are emitted in `mismatches`.",
     "`--rules-help` and `--schema-help` have dedicated schema IDs.",
+];
+const GATE_SCHEMA_NOTES: &[&str] = &[
+    "JSON output shape is aligned with `assert --schema`.",
+    "`--from` resolves ingest presets with explicit validation errors.",
 ];
 const SDIFF_NOTES: &[&str] = &[
     "`values.total` is the full diff count before truncation.",
@@ -134,6 +140,13 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: ASSERT_FIELDS,
             exit_codes: exit_codes("validation mismatch against rules or JSON Schema"),
             notes: ASSERT_NOTES,
+        },
+        ContractCommand::GateSchema => CommandContract {
+            command: "gate-schema",
+            schema: "dataq.gate.schema.output.v1",
+            output_fields: ASSERT_FIELDS,
+            exit_codes: exit_codes("validation mismatch against JSON Schema"),
+            notes: GATE_SCHEMA_NOTES,
         },
         ContractCommand::Sdiff => CommandContract {
             command: "sdiff",

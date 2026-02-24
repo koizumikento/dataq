@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
-const TOOL_ORDER: [&str; 11] = [
+const TOOL_ORDER: [&str; 12] = [
     "dataq.canon",
     "dataq.assert",
+    "dataq.gate.schema",
     "dataq.sdiff",
     "dataq.profile",
     "dataq.join",
@@ -91,6 +92,20 @@ fn tools_list_is_deterministic_and_in_fixed_order() {
 #[test]
 fn tools_call_minimal_success_for_all_tools() {
     let toolchain = FakeToolchain::new();
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("gate-schema.json");
+    fs::write(
+        &schema_path,
+        r#"{
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer"}
+            }
+        }"#,
+    )
+    .expect("write schema");
+
     let requests = vec![
         (
             "dataq.canon",
@@ -110,6 +125,13 @@ fn tools_call_minimal_success_for_all_tools() {
                     },
                     "count": {"min": 1, "max": 1}
                 }
+            }),
+        ),
+        (
+            "dataq.gate.schema",
+            json!({
+                "input": [{"id": 1}],
+                "schema_path": schema_path,
             }),
         ),
         (
@@ -252,6 +274,43 @@ fn inline_path_conflict_returns_exit_three() {
         response["result"]["structuredContent"]["payload"]["error"],
         Value::from("input_usage_error")
     );
+}
+
+#[test]
+fn gate_schema_rejects_input_path_stdin_sentinels() {
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    fs::write(&schema_path, r#"{"type":"object"}"#).expect("write schema");
+
+    for sentinel in ["-", "/dev/stdin"] {
+        let request = tool_call_request(
+            22,
+            "dataq.gate.schema",
+            json!({
+                "input_path": sentinel,
+                "schema_path": schema_path,
+            }),
+        );
+
+        let output = run_mcp(&request, None);
+        assert_eq!(output.status.code(), Some(0));
+
+        let response = parse_stdout_json(&output.stdout);
+        assert_eq!(response["result"]["isError"], Value::Bool(true));
+        assert_eq!(
+            response["result"]["structuredContent"]["exit_code"],
+            Value::from(3)
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["payload"]["error"],
+            Value::from("input_usage_error")
+        );
+        let message = response["result"]["structuredContent"]["payload"]["message"]
+            .as_str()
+            .expect("error message");
+        assert!(message.contains("stdin sentinel paths"));
+        assert!(message.contains("inline `input`"));
+    }
 }
 
 #[test]

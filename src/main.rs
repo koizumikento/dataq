@@ -7,7 +7,8 @@ use std::process::{self, Command};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
-    aggregate, r#assert, canon, contract, doctor, emit, join, mcp, merge, profile, recipe, sdiff,
+    aggregate, r#assert, canon, contract, doctor, emit, gate, join, mcp, merge, profile, recipe,
+    sdiff,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::report::{
@@ -43,6 +44,8 @@ enum Commands {
     Canon(CanonArgs),
     /// Validate input values against rule definitions.
     Assert(AssertArgs),
+    /// Run deterministic quality gates.
+    Gate(GateArgs),
     /// Compare structural differences across two datasets.
     Sdiff(SdiffArgs),
     /// Generate deterministic field profile statistics.
@@ -111,6 +114,31 @@ struct AssertArgs {
     /// Print machine-readable JSON Schema help for `--schema` and exit.
     #[arg(long, default_value_t = false)]
     schema_help: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct GateArgs {
+    #[command(subcommand)]
+    command: GateSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum GateSubcommand {
+    /// Validate input rows against a JSON Schema gate.
+    Schema(GateSchemaArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct GateSchemaArgs {
+    #[arg(long)]
+    schema: PathBuf,
+
+    #[arg(long)]
+    input: Option<PathBuf>,
+
+    /// Optional ingest preset before schema validation.
+    #[arg(long)]
+    from: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -306,6 +334,7 @@ enum CliDoctorProfile {
 enum CliContractCommand {
     Canon,
     Assert,
+    GateSchema,
     Sdiff,
     Profile,
     Merge,
@@ -376,6 +405,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
         match value {
             CliContractCommand::Canon => Self::Canon,
             CliContractCommand::Assert => Self::Assert,
+            CliContractCommand::GateSchema => Self::GateSchema,
             CliContractCommand::Sdiff => Self::Sdiff,
             CliContractCommand::Profile => Self::Profile,
             CliContractCommand::Merge => Self::Merge,
@@ -421,6 +451,7 @@ fn run() -> i32 {
     match cli.command {
         Commands::Canon(args) => run_canon(args, emit_pipeline),
         Commands::Assert(args) => run_assert(args, emit_pipeline),
+        Commands::Gate(args) => run_gate(args, emit_pipeline),
         Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
         Commands::Profile(args) => run_profile(args, emit_pipeline),
         Commands::Join(args) => run_join(args, emit_pipeline),
@@ -776,6 +807,95 @@ fn emit_assert_schema_help() -> i32 {
         );
         1
     }
+}
+
+fn run_gate(args: GateArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        GateSubcommand::Schema(schema_args) => run_gate_schema(schema_args, emit_pipeline),
+    }
+}
+
+fn run_gate_schema(args: GateSchemaArgs, emit_pipeline: bool) -> i32 {
+    let schema_format = dataq_io::resolve_input_format(None, Some(args.schema.as_path())).ok();
+    let preset = gate::resolve_preset(args.from.as_deref()).ok().flatten();
+    let input_is_stdin = args
+        .input
+        .as_deref()
+        .map(gate::is_stdin_path)
+        .unwrap_or(true);
+    let input_format = if input_is_stdin {
+        if preset.is_some() {
+            Some(Format::Yaml)
+        } else {
+            Some(Format::Json)
+        }
+    } else if preset.is_some() {
+        Some(Format::Yaml)
+    } else {
+        args.input
+            .as_deref()
+            .and_then(|path| dataq_io::resolve_input_format(None, Some(path)).ok())
+    };
+
+    let command_args = gate::GateSchemaCommandArgs {
+        schema: args.schema.clone(),
+        input: args.input.clone(),
+        from: args.from.clone(),
+    };
+
+    let stdin = io::stdin();
+    let (response, trace) = gate::run_schema_with_stdin_and_trace(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 | 2 => {
+            if emit_json_stdout(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize gate schema response".to_string(),
+                    json!({"command": "gate.schema"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize gate schema error".to_string(),
+                    json!({"command": "gate.schema"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected gate schema exit code: {other}"),
+                json!({"command": "gate.schema"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_gate_schema_pipeline_report(
+            &args,
+            input_is_stdin,
+            input_format,
+            schema_format,
+            &trace,
+        );
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
 }
 
 fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
@@ -1687,6 +1807,44 @@ fn build_assert_pipeline_report(
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
+fn build_gate_schema_pipeline_report(
+    args: &GateSchemaArgs,
+    input_is_stdin: bool,
+    input_format: Option<Format>,
+    schema_format: Option<Format>,
+    trace: &r#assert::AssertPipelineTrace,
+) -> PipelineReport {
+    let mut sources = Vec::with_capacity(2);
+    sources.push(PipelineInputSource::path(
+        "schema",
+        args.schema.display().to_string(),
+        format_label(schema_format),
+    ));
+    if input_is_stdin {
+        sources.push(PipelineInputSource::stdin(
+            "input",
+            format_label(input_format),
+        ));
+    } else if let Some(path) = &args.input {
+        sources.push(PipelineInputSource::path(
+            "input",
+            path.display().to_string(),
+            format_label(input_format),
+        ));
+    }
+
+    let mut report = PipelineReport::new(
+        "gate.schema",
+        PipelineInput::new(sources),
+        gate::pipeline_steps(),
+        gate::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
 fn build_sdiff_pipeline_report(
     args: &SdiffArgs,
     left_format: Option<Format>,
@@ -1962,7 +2120,7 @@ fn detect_tool_version(tool_name: &str, command_name: &str) -> String {
 }
 
 fn resolve_tool_executable(tool_name: &str, command_name: &str) -> String {
-    if command_name != "assert" {
+    if !matches!(command_name, "assert" | "gate.schema") {
         return tool_name.to_string();
     }
 

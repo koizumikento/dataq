@@ -8,6 +8,8 @@ mod canon_sdiff_flow;
 mod doctor_capabilities_flow;
 #[path = "integration/emit_plan_flow.rs"]
 mod emit_plan_flow;
+#[path = "integration/gate_schema_flow.rs"]
+mod gate_schema_flow;
 #[path = "integration/io_format_resolution.rs"]
 mod io_format_resolution;
 #[path = "integration/io_roundtrip.rs"]
