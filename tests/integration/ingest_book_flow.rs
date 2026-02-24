@@ -95,6 +95,36 @@ fn ingest_book_missing_chapter_file_returns_exit_three() {
     );
 }
 
+#[test]
+fn ingest_book_malformed_summary_entry_returns_exit_three() {
+    let dir = tempdir().expect("tempdir");
+    let book_root = dir.path().join("book");
+    let src_dir = book_root.join("src");
+    fs::create_dir_all(&src_dir).expect("create src");
+    fs::write(book_root.join("book.toml"), "[book]\nsrc = \"src\"\n").expect("write book.toml");
+    fs::write(src_dir.join("SUMMARY.md"), "- [Broken](broken.md\n").expect("write summary");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "ingest",
+            "book",
+            "--root",
+            book_root.to_str().expect("utf8 root"),
+        ])
+        .output()
+        .expect("run ingest");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["error"], Value::from("input_usage_error"));
+    assert!(
+        stderr_json["message"]
+            .as_str()
+            .expect("message")
+            .contains("invalid SUMMARY.md line 1")
+    );
+}
+
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
     let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
     let line = text

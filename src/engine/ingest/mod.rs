@@ -630,8 +630,14 @@ fn parse_summary(
     for (line_number, line) in content.lines().enumerate() {
         let line_no = line_number + 1;
         let parsed = match parse_summary_line(line) {
-            Some(parsed) => parsed,
-            None => continue,
+            SummaryLineKind::Entry(parsed) => parsed,
+            SummaryLineKind::NonEntry => continue,
+            SummaryLineKind::Invalid(message) => {
+                return Err(IngestBookError::SummaryParse {
+                    line: line_no,
+                    message,
+                });
+            }
         };
 
         while let Some((indent, _)) = indent_stack.last() {
@@ -676,22 +682,32 @@ fn parse_summary(
     Ok(chapters)
 }
 
+#[derive(Debug)]
 struct ParsedSummaryLine {
     indent: usize,
     title: String,
     target: String,
 }
 
-fn parse_summary_line(line: &str) -> Option<ParsedSummaryLine> {
+#[derive(Debug)]
+enum SummaryLineKind {
+    NonEntry,
+    Invalid(String),
+    Entry(ParsedSummaryLine),
+}
+
+fn parse_summary_line(line: &str) -> SummaryLineKind {
     let indent = leading_indent_width(line);
     let trimmed = line.trim_start_matches([' ', '\t']);
-    if trimmed.starts_with('#') || trimmed.is_empty() {
-        return None;
+    if trimmed.starts_with("#") || trimmed.is_empty() {
+        return SummaryLineKind::NonEntry;
     }
 
-    let bullet = trimmed.chars().next()?;
+    let Some(bullet) = trimmed.chars().next() else {
+        return SummaryLineKind::NonEntry;
+    };
     if !matches!(bullet, '-' | '*' | '+') {
-        return None;
+        return SummaryLineKind::NonEntry;
     }
     if !trimmed
         .chars()
@@ -699,29 +715,35 @@ fn parse_summary_line(line: &str) -> Option<ParsedSummaryLine> {
         .map(char::is_whitespace)
         .unwrap_or(false)
     {
-        return None;
+        return SummaryLineKind::NonEntry;
     }
 
     let body = trimmed[1..].trim_start();
     if !body.starts_with('[') {
-        return None;
+        return SummaryLineKind::NonEntry;
     }
-    let close_bracket = body.find("](")?;
+    let Some(close_bracket) = body.find("](") else {
+        return SummaryLineKind::Invalid(
+            "entry title must be followed by chapter link `](...)`".to_string(),
+        );
+    };
     if close_bracket <= 1 {
-        return None;
+        return SummaryLineKind::Invalid("entry title is empty".to_string());
     }
     let title = body[1..close_bracket].trim();
     if title.is_empty() {
-        return None;
+        return SummaryLineKind::Invalid("entry title is empty".to_string());
     }
     let tail = &body[(close_bracket + 2)..];
-    let close_paren = find_link_closing_paren(tail)?;
+    let Some(close_paren) = find_link_closing_paren(tail) else {
+        return SummaryLineKind::Invalid("entry chapter link is missing closing `)`".to_string());
+    };
     let target = tail[..close_paren].trim();
     if target.is_empty() {
-        return None;
+        return SummaryLineKind::Invalid("entry chapter link target is empty".to_string());
     }
 
-    Some(ParsedSummaryLine {
+    SummaryLineKind::Entry(ParsedSummaryLine {
         indent,
         title: title.to_string(),
         target: target.to_string(),
@@ -1063,7 +1085,9 @@ mod ingest_book_tests {
 
     use tempfile::tempdir;
 
-    use super::{IngestBookError, IngestBookOptions, ingest_book};
+    use super::{
+        IngestBookError, IngestBookOptions, SummaryLineKind, ingest_book, parse_summary_line,
+    };
 
     #[test]
     fn parses_nested_summary_in_deterministic_order() {
@@ -1185,6 +1209,20 @@ src = "src"
             "src/chapters and guides/intro page.md"
         );
         assert_eq!(report.summary.order[1].path, "src/guides/quick start.md");
+    }
+
+    #[test]
+    fn parser_distinguishes_non_entry_and_invalid_entry_lines() {
+        assert!(matches!(
+            parse_summary_line("# Summary"),
+            SummaryLineKind::NonEntry
+        ));
+        match parse_summary_line("- [Broken](broken.md") {
+            SummaryLineKind::Invalid(message) => {
+                assert!(message.contains("missing closing `)`"));
+            }
+            other => panic!("expected invalid summary entry, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
