@@ -439,19 +439,19 @@ fn ingest_doc_emit_pipeline_marks_pandoc_and_jq_used() {
         .expect("external_tools array");
     let jq_entry = tools
         .iter()
-        .find(|entry| entry["name"] == Value::from("jq"))
+        .find(|entry| entry["name"].as_str() == Some("jq"))
         .expect("jq entry");
     assert_eq!(jq_entry["used"], Value::Bool(true));
 
     let pandoc_entry = tools
         .iter()
-        .find(|entry| entry["name"] == Value::from("pandoc"))
+        .find(|entry| entry["name"].as_str() == Some("pandoc"))
         .expect("pandoc entry");
     assert_eq!(pandoc_entry["used"], Value::Bool(true));
 }
 
 #[test]
-fn ingest_doc_input_path_dash_is_treated_as_stdin() {
+fn ingest_doc_input_path_dash_returns_input_usage_error() {
     let toolchain = FakeToolchain::new();
     let request = tool_call_request(
         12,
@@ -467,16 +467,21 @@ fn ingest_doc_input_path_dash_is_treated_as_stdin() {
     assert_eq!(output.status.code(), Some(0));
 
     let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
     assert_eq!(
         response["result"]["structuredContent"]["exit_code"],
-        Value::from(0)
+        Value::from(3)
     );
-
-    let source = &response["result"]["structuredContent"]["pipeline"]["input"]["sources"][0];
-    assert_eq!(source["label"], Value::from("input"));
-    assert_eq!(source["source"], Value::from("stdin"));
-    assert_eq!(source["path"], Value::Null);
-    assert_eq!(source["format"], Value::from("md"));
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["error"],
+        Value::from("input_usage_error")
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["message"],
+        Value::from(
+            "`input` path `-` is not supported for `dataq.ingest.doc`; pass file path or inline `input`",
+        )
+    );
 }
 
 #[test]

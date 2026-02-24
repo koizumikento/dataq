@@ -1223,16 +1223,14 @@ fn execute_ingest_doc(args: &Map<String, Value>) -> ToolExecution {
     if input_path.is_none() && input_text.is_none() {
         return input_usage_error("missing required `input`");
     }
-
-    let input_path_is_stdin = input_path.as_deref() == Some(Path::new("-"));
-    let command_input_path = if input_path_is_stdin {
-        None
-    } else {
-        input_path.clone()
-    };
+    if input_path.as_deref() == Some(Path::new("-")) {
+        return input_usage_error(
+            "`input` path `-` is not supported for `dataq.ingest.doc`; pass file path or inline `input`",
+        );
+    }
 
     let command_args = ingest::IngestDocCommandArgs {
-        input: command_input_path.clone(),
+        input: input_path.clone(),
         from,
     };
     let stdin_payload = input_text.unwrap_or_default().into_bytes();
@@ -1245,9 +1243,7 @@ fn execute_ingest_doc(args: &Map<String, Value>) -> ToolExecution {
     };
 
     if emit_pipeline {
-        let source = if input_path_is_stdin {
-            PipelineInputSource::stdin("input", Some(from.as_str()))
-        } else if let Some(path) = command_input_path {
+        let source = if let Some(path) = input_path {
             PipelineInputSource::path("input", path.display().to_string(), Some(from.as_str()))
         } else {
             PipelineInputSource {

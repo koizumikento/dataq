@@ -58,12 +58,12 @@ fn ingest_doc_extracts_expected_json_and_pipeline_steps() {
         .expect("external_tools array");
     let jq_entry = tools
         .iter()
-        .find(|entry| entry["name"] == Value::from("jq"))
+        .find(|entry| entry["name"].as_str() == Some("jq"))
         .expect("jq entry");
     assert_eq!(jq_entry["used"], Value::Bool(true));
     let pandoc_entry = tools
         .iter()
-        .find(|entry| entry["name"] == Value::from("pandoc"))
+        .find(|entry| entry["name"].as_str() == Some("pandoc"))
         .expect("pandoc entry");
     assert_eq!(pandoc_entry["used"], Value::Bool(true));
     assert_eq!(
