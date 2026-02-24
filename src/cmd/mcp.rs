@@ -9,10 +9,10 @@ use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
     canon, contract, diff, doctor, emit, gate, ingest, ingest_api, ingest_yaml_jobs, join, merge,
-    profile, recipe, sdiff,
+    profile, recipe, scan, sdiff,
 };
 use crate::domain::ingest::IngestYamlJobsMode;
-use crate::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
+use crate::domain::report::{ExternalToolUsage, PipelineInput, PipelineInputSource, PipelineReport};
 use crate::domain::rules::AssertRules;
 use crate::engine::aggregate::AggregateMetric;
 use crate::engine::r#assert as assert_engine;
@@ -1538,6 +1538,79 @@ fn execute_aggregate(args: &Map<String, Value>) -> ToolExecution {
     execution
 }
 
+fn execute_scan_text(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let pattern = match parse_required_string(args, &["pattern"], "pattern") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let path = match parse_optional_path(args, &["path"], "path") {
+        Ok(path) => path.unwrap_or_else(|| PathBuf::from(".")),
+        Err(message) => return input_usage_error(message),
+    };
+    let glob = match parse_string_list(args, &["glob", "globs"], "glob") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let max_matches = match parse_optional_usize(args, &["max_matches"], "max_matches") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let policy_mode = match parse_bool(args, &["policy_mode"], false, "policy_mode") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let jq_project = match parse_bool(args, &["jq_project"], false, "jq_project") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let command_args = scan::ScanTextCommandArgs {
+        pattern,
+        path: path.clone(),
+        glob,
+        max_matches,
+        policy_mode,
+        jq_project,
+    };
+    let (response, trace) = scan::run_with_trace(&command_args);
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "scan",
+            PipelineInput::new(vec![PipelineInputSource::path(
+                "path",
+                path.display().to_string(),
+                None,
+            )]),
+            scan::pipeline_steps(),
+            scan::deterministic_guards(),
+        );
+        if !report.external_tools.iter().any(|tool| tool.name == "rg") {
+            report.external_tools.push(ExternalToolUsage {
+                name: "rg".to_string(),
+                used: false,
+            });
+        }
+        for tool in &trace.used_tools {
+            report = report.mark_external_tool_used(tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
 fn execute_merge(args: &Map<String, Value>) -> ToolExecution {
     let emit_pipeline = match parse_emit_pipeline(args) {
         Ok(value) => value,
@@ -2140,6 +2213,23 @@ fn parse_usize(
         Some(Value::Number(number)) => number
             .as_u64()
             .map(|value| value as usize)
+            .ok_or_else(|| format!("`{label}` must be a non-negative integer")),
+        Some(_) => Err(format!("`{label}` must be a non-negative integer")),
+    }
+}
+
+fn parse_optional_usize(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<usize>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(|value| value as usize)
+            .map(Some)
             .ok_or_else(|| format!("`{label}` must be a non-negative integer")),
         Some(_) => Err(format!("`{label}` must be a non-negative integer")),
     }
