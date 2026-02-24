@@ -20,6 +20,14 @@ use crate::util::hash::DeterministicHasher;
 pub const RECIPE_VERSION: &str = "dataq.recipe.v1";
 const RECIPE_LOCK_VERSION: &str = "dataq.recipe.lock.v1";
 const RECIPE_LOCK_TOOLS: [&str; 3] = ["jq", "yq", "mlr"];
+const CANON_REQUIRES_INPUT_OR_PRIOR_VALUES: &str =
+    "canon step requires `args.input` or prior in-memory values";
+const ASSERT_REQUIRES_PRIOR_VALUES: &str =
+    "assert step requires prior in-memory values (for example a preceding canon step)";
+const PROFILE_REQUIRES_PRIOR_VALUES: &str =
+    "profile step requires prior in-memory values (for example a preceding canon step)";
+const SDIFF_REQUIRES_PRIOR_VALUES: &str =
+    "sdiff step requires prior in-memory values (for example a preceding canon step)";
 
 #[derive(Debug, Clone)]
 pub struct RecipeExecution {
@@ -331,7 +339,7 @@ fn execute_canon_step(
         values.to_vec()
     } else {
         return Err(RecipeExecutionErrorKind::InputUsage(
-            "canon step requires `args.input` or prior in-memory values".to_string(),
+            CANON_REQUIRES_INPUT_OR_PRIOR_VALUES.to_string(),
         ));
     };
 
@@ -362,10 +370,7 @@ fn execute_assert_step(
 ) -> Result<StepOutcome, RecipeExecutionErrorKind> {
     let args: AssertStepArgs = parse_step_args("assert", args)?;
     let values = current_values.ok_or_else(|| {
-        RecipeExecutionErrorKind::InputUsage(
-            "assert step requires prior in-memory values (for example a preceding canon step)"
-                .to_string(),
-        )
+        RecipeExecutionErrorKind::InputUsage(ASSERT_REQUIRES_PRIOR_VALUES.to_string())
     })?;
 
     let report = match resolve_assert_source(args, recipe_base_dir)? {
@@ -396,10 +401,7 @@ fn execute_profile_step(
 ) -> Result<StepOutcome, RecipeExecutionErrorKind> {
     let _: ProfileStepArgs = parse_step_args("profile", args)?;
     let values = current_values.ok_or_else(|| {
-        RecipeExecutionErrorKind::InputUsage(
-            "profile step requires prior in-memory values (for example a preceding canon step)"
-                .to_string(),
-        )
+        RecipeExecutionErrorKind::InputUsage(PROFILE_REQUIRES_PRIOR_VALUES.to_string())
     })?;
 
     let report = profile::profile_values(values);
@@ -422,10 +424,7 @@ fn execute_sdiff_step(
 ) -> Result<StepOutcome, RecipeExecutionErrorKind> {
     let args: SdiffStepArgs = parse_step_args("sdiff", args)?;
     let left_values = current_values.ok_or_else(|| {
-        RecipeExecutionErrorKind::InputUsage(
-            "sdiff step requires prior in-memory values (for example a preceding canon step)"
-                .to_string(),
-        )
+        RecipeExecutionErrorKind::InputUsage(SDIFF_REQUIRES_PRIOR_VALUES.to_string())
     })?;
 
     let right_path = resolve_recipe_path(recipe_base_dir, args.right.as_path());
@@ -610,21 +609,44 @@ fn parse_step_args<T: for<'de> Deserialize<'de>>(
 }
 
 fn validate_recipe_lock_steps(recipe: &RecipeFile) -> Result<(), RecipeExecutionErrorKind> {
+    let mut has_in_memory_values = false;
+
     for step in &recipe.steps {
         match step.kind.as_str() {
             "canon" => {
                 let args: CanonStepArgs = parse_step_args("canon", step.args.clone())?;
                 validate_canon_step_args_for_lock(&args)?;
+                if args.input.is_none() && !has_in_memory_values {
+                    return Err(RecipeExecutionErrorKind::InputUsage(
+                        CANON_REQUIRES_INPUT_OR_PRIOR_VALUES.to_string(),
+                    ));
+                }
+                has_in_memory_values = true;
             }
             "assert" => {
                 let args: AssertStepArgs = parse_step_args("assert", step.args.clone())?;
+                if !has_in_memory_values {
+                    return Err(RecipeExecutionErrorKind::InputUsage(
+                        ASSERT_REQUIRES_PRIOR_VALUES.to_string(),
+                    ));
+                }
                 validate_assert_step_args_for_lock(&args)?;
             }
             "profile" => {
                 let _: ProfileStepArgs = parse_step_args("profile", step.args.clone())?;
+                if !has_in_memory_values {
+                    return Err(RecipeExecutionErrorKind::InputUsage(
+                        PROFILE_REQUIRES_PRIOR_VALUES.to_string(),
+                    ));
+                }
             }
             "sdiff" => {
                 let args: SdiffStepArgs = parse_step_args("sdiff", step.args.clone())?;
+                if !has_in_memory_values {
+                    return Err(RecipeExecutionErrorKind::InputUsage(
+                        SDIFF_REQUIRES_PRIOR_VALUES.to_string(),
+                    ));
+                }
                 validate_sdiff_step_args_for_lock(&args)?;
             }
             _ => {

@@ -612,12 +612,21 @@ fn contract_supports_recipe_lock_command() {
 fn recipe_lock_invalid_step_args_return_exit_three() {
     let toolchain = FakeToolchain::new();
     let dir = tempdir().expect("tempdir");
+    let input_path = dir.path().join("input.json");
     let recipe_path = dir.path().join("recipe.json");
+    fs::write(&input_path, r#"[{"id":"1"}]"#).expect("write input");
     fs::write(
         &recipe_path,
-        r#"{
+        json!({
             "version":"dataq.recipe.v1",
             "steps":[
+                {
+                    "kind":"canon",
+                    "args":{
+                        "input": input_path,
+                        "from":"json"
+                    }
+                },
                 {
                     "kind":"assert",
                     "args":{
@@ -626,7 +635,8 @@ fn recipe_lock_invalid_step_args_return_exit_three() {
                     }
                 }
             ]
-        }"#,
+        })
+        .to_string(),
     )
     .expect("write recipe");
 
@@ -658,6 +668,56 @@ fn recipe_lock_invalid_step_args_return_exit_three() {
 }
 
 #[test]
+fn recipe_lock_invalid_step_order_returns_exit_three() {
+    let toolchain = FakeToolchain::new();
+    let dir = tempdir().expect("tempdir");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(
+        &recipe_path,
+        r#"{
+            "version":"dataq.recipe.v1",
+            "steps":[
+                {
+                    "kind":"assert",
+                    "args":{
+                        "rules":{"required_keys":[],"forbid_keys":[],"fields":{}}
+                    }
+                }
+            ]
+        }"#,
+    )
+    .expect("write recipe");
+
+    let request = tool_call_request(
+        13,
+        "dataq.recipe.lock",
+        json!({
+            "file_path": recipe_path
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["error"],
+        Value::from("input_usage_error")
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["message"],
+        Value::from(
+            "assert step requires prior in-memory values (for example a preceding canon step)"
+        )
+    );
+}
+
+#[test]
 fn recipe_lock_emit_pipeline_survives_out_path_write_failure() {
     let toolchain = FakeToolchain::new();
     let dir = tempdir().expect("tempdir");
@@ -665,7 +725,7 @@ fn recipe_lock_emit_pipeline_survives_out_path_write_failure() {
     fs::write(&recipe_path, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
 
     let request = tool_call_request(
-        13,
+        14,
         "dataq.recipe.lock",
         json!({
             "file_path": recipe_path,

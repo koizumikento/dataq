@@ -411,12 +411,21 @@ fn recipe_lock_invalid_recipe_returns_exit_three() {
 #[test]
 fn recipe_lock_invalid_step_args_returns_exit_three() {
     let dir = tempdir().expect("temp dir");
+    let input_path = dir.path().join("input.json");
     let recipe_path = dir.path().join("recipe.json");
+    fs::write(&input_path, r#"[{"id":"1"}]"#).expect("write input");
     fs::write(
         &recipe_path,
-        r#"{
+        serde_json::json!({
             "version":"dataq.recipe.v1",
             "steps":[
+                {
+                    "kind":"canon",
+                    "args":{
+                        "input": input_path,
+                        "from":"json"
+                    }
+                },
                 {
                     "kind":"assert",
                     "args":{
@@ -425,7 +434,8 @@ fn recipe_lock_invalid_step_args_returns_exit_three() {
                     }
                 }
             ]
-        }"#,
+        })
+        .to_string(),
     )
     .expect("write recipe");
 
@@ -445,6 +455,55 @@ fn recipe_lock_invalid_step_args_returns_exit_three() {
     assert_eq!(
         stderr_json["message"],
         Value::from("assert step cannot combine rules and schema sources")
+    );
+}
+
+#[test]
+fn recipe_lock_validates_missing_canon_input_without_prior_values_like_recipe_run() {
+    let dir = tempdir().expect("temp dir");
+    let recipe_path = dir.path().join("recipe.json");
+    fs::write(
+        &recipe_path,
+        r#"{
+            "version":"dataq.recipe.v1",
+            "steps":[
+                {
+                    "kind":"canon",
+                    "args":{}
+                }
+            ]
+        }"#,
+    )
+    .expect("write recipe");
+
+    let lock_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "lock",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe lock");
+    let run_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "recipe",
+            "run",
+            "--file",
+            recipe_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run recipe run");
+
+    assert_eq!(lock_output.status.code(), Some(3));
+    assert_eq!(run_output.status.code(), Some(3));
+    let lock_stderr = parse_last_stderr_json(&lock_output.stderr);
+    let run_stderr = parse_last_stderr_json(&run_output.stderr);
+    assert_eq!(lock_stderr["error"], Value::from("input_usage_error"));
+    assert_eq!(lock_stderr["message"], run_stderr["message"]);
+    assert_eq!(
+        lock_stderr["message"],
+        Value::from("canon step requires `args.input` or prior in-memory values")
     );
 }
 
