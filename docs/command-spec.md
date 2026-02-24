@@ -125,7 +125,7 @@ dataq [--emit-pipeline] <command> [options]
   - 入力不正または結合実行失敗は exit `3`
 - 実行方式:
   - `mlr` を明示的引数配列で実行（シェル展開なし）
-  - `--emit-pipeline` で `stage_diagnostics` に `join_mlr_execute` を出力
+  - `--emit-pipeline` で `stage_diagnostics` に `join_mlr_execute` を出力（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）
 
 ## `aggregate` コマンド契約（MVP）
 
@@ -144,7 +144,7 @@ dataq [--emit-pipeline] <command> [options]
   - 入力不正または集計実行失敗は exit `3`
 - 実行方式:
   - `mlr` を明示的引数配列で実行（シェル展開なし）
-  - `--emit-pipeline` で `stage_diagnostics` に `aggregate_mlr_execute` を出力
+  - `--emit-pipeline` で `stage_diagnostics` に `aggregate_mlr_execute` を出力（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）
 
 ## `profile` 出力契約
 
@@ -279,6 +279,8 @@ pipeline JSON schema:
 - `steps`: 実行ステップ配列
 - `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
+  - 追加メトリクス: `input_bytes`, `output_bytes`, `duration_ms`（決定性保持のため固定 `0`）
+  - 後方互換: 既存フィールド（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）は不変
 - `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ), `dataq_version`）
 - `deterministic_guards`: 適用した決定性ガード
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる

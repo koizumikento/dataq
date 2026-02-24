@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::cmd::stage_trace;
 use crate::domain::report::PipelineStageDiagnostic;
 use crate::engine::join::{self, JoinError, JoinHow};
 use crate::io;
@@ -83,19 +84,17 @@ pub fn run_with_trace(args: &JoinCommandArgs) -> (JoinCommandResponse, JoinPipel
         }
     };
 
-    let input_records = left.len() + right.len();
-    match join::join_values(&left, &right, &args.on, args.how) {
+    let (join_result, diagnostic) = stage_trace::run_value_stage(
+        1,
+        "join_mlr_execute",
+        "mlr",
+        &[left.as_slice(), right.as_slice()],
+        || join::join_values(&left, &right, &args.on, args.how),
+    );
+    match join_result {
         Ok(rows) => {
             trace.mark_tool_used("mlr");
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::success(
-                    1,
-                    "join_mlr_execute",
-                    "mlr",
-                    input_records,
-                    rows.len(),
-                ));
+            trace.stage_diagnostics.push(diagnostic);
             (
                 JoinCommandResponse {
                     exit_code: 0,
@@ -106,14 +105,7 @@ pub fn run_with_trace(args: &JoinCommandArgs) -> (JoinCommandResponse, JoinPipel
         }
         Err(JoinError::Mlr(error)) => {
             trace.mark_tool_used("mlr");
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::failure(
-                    1,
-                    "join_mlr_execute",
-                    "mlr",
-                    input_records,
-                ));
+            trace.stage_diagnostics.push(diagnostic);
             (
                 JoinCommandResponse {
                     exit_code: 3,

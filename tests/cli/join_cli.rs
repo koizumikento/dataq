@@ -181,6 +181,92 @@ fn aggregate_command_count_sum_avg_are_deterministic() {
 }
 
 #[test]
+fn aggregate_emit_pipeline_reports_stage_diagnostics_with_metrics() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"a","price":5.0},{"team":"b","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--emit-pipeline",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "count",
+            "--target",
+            "price",
+        ])
+        .output()
+        .expect("run aggregate command");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], Value::from("aggregate"));
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["step"],
+        Value::from("aggregate_mlr_execute")
+    );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["tool"],
+        Value::from("mlr")
+    );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["status"],
+        Value::from("ok")
+    );
+    assert_stage_metrics_shape(&stderr_json["stage_diagnostics"][0]);
+}
+
+#[test]
+fn aggregate_emit_pipeline_is_deterministic_for_identical_input() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"a","price":5.0},{"team":"b","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let run_once = || {
+        let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+            .env("DATAQ_MLR_BIN", &mlr_bin)
+            .args([
+                "aggregate",
+                "--emit-pipeline",
+                "--input",
+                input.to_str().expect("utf8 input path"),
+                "--group-by",
+                "team",
+                "--metric",
+                "count",
+                "--target",
+                "price",
+            ])
+            .output()
+            .expect("run aggregate command");
+        assert_eq!(output.status.code(), Some(0));
+        parse_last_stderr_json(&output.stderr)
+    };
+
+    let first = run_once();
+    let second = run_once();
+    assert_eq!(first, second);
+    assert_eq!(first["stage_diagnostics"][0]["duration_ms"], Value::from(0));
+}
+
+#[test]
 fn join_missing_key_returns_exit_three() {
     let dir = tempdir().expect("tempdir");
     let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
@@ -300,6 +386,7 @@ fn join_emit_pipeline_reports_stage_diagnostics() {
         stderr_json["stage_diagnostics"][0]["status"],
         Value::from("ok")
     );
+    assert_stage_metrics_shape(&stderr_json["stage_diagnostics"][0]);
 
     let tools = stderr_json["external_tools"]
         .as_array()
@@ -309,6 +396,12 @@ fn join_emit_pipeline_reports_stage_diagnostics() {
         .find(|entry| entry["name"].as_str() == Some("mlr"))
         .expect("mlr entry");
     assert_eq!(mlr_entry["used"], Value::Bool(true));
+}
+
+fn assert_stage_metrics_shape(stage: &Value) {
+    assert!(stage["input_bytes"].is_u64());
+    assert!(stage["output_bytes"].is_u64());
+    assert!(stage["duration_ms"].is_u64());
 }
 
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {

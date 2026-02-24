@@ -42,13 +42,13 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - `dataq`:
   同等の処理意図をサブコマンド化し、I/O形式・失敗JSON・終了コードを固定できる
 - 監査性:
-  `--emit-pipeline` で、内部処理ステップ・外部ツール使用有無・`stage_diagnostics`（段ごとの順序/件数/状態）に加えて、`fingerprint`（`args_hash` / `input_hash`(optional) / 使用ツール版数 / `dataq_version`）を機械可読で残せる
+  `--emit-pipeline` で、内部処理ステップ・外部ツール使用有無・`stage_diagnostics`（段ごとの順序/件数/バイト数/`duration_ms`(決定性保持のため常に`0`)/状態）に加えて、`fingerprint`（`args_hash` / `input_hash`(optional) / 使用ツール版数 / `dataq_version`）を機械可読で残せる
 
 ## 外部ツール多段連携の方針
 
 - `dataq` の一部コマンドは、内部的に複数ツールを段階実行することで価値を成立させます
 - これは「3ツールの代替」ではなく「3ツールの合わせ技を再利用可能な契約として固定する」ための設計です
-- 多段連携コマンドでは、`--emit-pipeline` で各段の利用ツール・ステップ順・件数変化・失敗段を追跡可能にします
+- 多段連携コマンドでは、`--emit-pipeline` で各段の利用ツール・ステップ順・件数/バイト数変化・`duration_ms`(決定性保持のため常に`0`)・失敗段を追跡可能にします
 
 ## コマンド一覧
 
@@ -322,7 +322,7 @@ dataq assert \
 - `--how <inner|left>`: 結合方式
 - 入力レコードは object であること、および `--on` キーが全レコードに存在することが必須
 - 出力は JSON 配列固定（決定的順序）
-- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断を出力
+- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
 ### 6. `aggregate`
 
@@ -335,7 +335,7 @@ dataq assert \
 - `sum` / `avg` は `--target` が数値であることを要求
 - 入力レコードは object であること、および `group-by`/`target` キーが全レコードに存在することが必須
 - 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
-- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断を出力
+- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
 ### 7. `merge`
 

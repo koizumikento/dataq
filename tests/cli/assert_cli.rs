@@ -53,6 +53,12 @@ fn parse_stderr_json_lines(stderr: &[u8]) -> Vec<Value> {
         .collect()
 }
 
+fn assert_stage_metrics_shape(stage: &Value) {
+    assert!(stage["input_bytes"].is_u64());
+    assert!(stage["output_bytes"].is_u64());
+    assert!(stage["duration_ms"].is_u64());
+}
+
 fn create_normalize_tool_shims() -> Option<(tempfile::TempDir, String, String)> {
     if Command::new("jq").arg("--version").output().is_err() {
         return None;
@@ -194,6 +200,9 @@ jobs:
         pipeline_json["stage_diagnostics"][2]["status"],
         Value::from("ok")
     );
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][0]);
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][1]);
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][2]);
 
     let tools = pipeline_json["external_tools"]
         .as_array()
@@ -205,6 +214,62 @@ jobs:
     assert_eq!(tools[1]["used"], Value::Bool(true));
     assert_eq!(tools[2]["name"], Value::from("mlr"));
     assert_eq!(tools[2]["used"], Value::Bool(true));
+    drop(tool_dir);
+}
+
+#[test]
+fn assert_normalize_emit_pipeline_is_deterministic_for_identical_input() {
+    let Some((tool_dir, yq_bin, mlr_bin)) = create_normalize_tool_shims() else {
+        return;
+    };
+    let dir = tempdir().expect("tempdir");
+    let workflow_path = dir.path().join("workflow.yml");
+    std::fs::write(
+        &workflow_path,
+        r#"
+name: CI
+on:
+  push: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"#,
+    )
+    .expect("write workflow");
+    let rules_path = sample_rules_path("examples/assert-rules/github-actions/jobs.rules.yaml");
+
+    let run_once = || {
+        let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+            .env("DATAQ_YQ_BIN", &yq_bin)
+            .env("DATAQ_MLR_BIN", &mlr_bin)
+            .args([
+                "assert",
+                "--emit-pipeline",
+                "--input",
+                workflow_path.to_str().expect("utf8 path"),
+                "--normalize",
+                "github-actions-jobs",
+                "--rules",
+                rules_path.to_str().expect("utf8 path"),
+            ])
+            .output()
+            .expect("run command");
+        assert_eq!(output.status.code(), Some(0));
+        parse_stderr_json_lines(&output.stderr)
+            .into_iter()
+            .last()
+            .expect("pipeline json line")
+    };
+
+    let first = run_once();
+    let second = run_once();
+    assert_eq!(first, second);
+    assert_eq!(first["stage_diagnostics"][0]["duration_ms"], Value::from(0));
+    assert_eq!(first["stage_diagnostics"][1]["duration_ms"], Value::from(0));
+    assert_eq!(first["stage_diagnostics"][2]["duration_ms"], Value::from(0));
+
     drop(tool_dir);
 }
 
@@ -267,6 +332,7 @@ jobs:
         pipeline_json["stage_diagnostics"][0]["status"],
         Value::from("error")
     );
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][0]);
     let tools = pipeline_json["external_tools"]
         .as_array()
         .expect("external_tools array");
@@ -345,6 +411,9 @@ jobs:
         pipeline_json["stage_diagnostics"][2]["status"],
         Value::from("error")
     );
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][0]);
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][1]);
+    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][2]);
     let tools = pipeline_json["external_tools"]
         .as_array()
         .expect("external_tools array");

@@ -213,7 +213,27 @@ pub struct PipelineStageDiagnostic {
     pub tool: String,
     pub input_records: usize,
     pub output_records: usize,
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub duration_ms: u64,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineStageMetrics {
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub duration_ms: u64,
+}
+
+impl PipelineStageMetrics {
+    pub const fn zero() -> Self {
+        Self {
+            input_bytes: 0,
+            output_bytes: 0,
+            duration_ms: 0,
+        }
+    }
 }
 
 impl PipelineStageDiagnostic {
@@ -224,12 +244,33 @@ impl PipelineStageDiagnostic {
         input_records: usize,
         output_records: usize,
     ) -> Self {
+        Self::success_with_metrics(
+            order,
+            stage,
+            tool,
+            input_records,
+            output_records,
+            PipelineStageMetrics::zero(),
+        )
+    }
+
+    pub fn success_with_metrics(
+        order: usize,
+        stage: impl Into<String>,
+        tool: impl Into<String>,
+        input_records: usize,
+        output_records: usize,
+        metrics: PipelineStageMetrics,
+    ) -> Self {
         Self {
             order,
             step: stage.into(),
             tool: tool.into(),
             input_records,
             output_records,
+            input_bytes: metrics.input_bytes,
+            output_bytes: metrics.output_bytes,
+            duration_ms: metrics.duration_ms,
             status: "ok".to_string(),
         }
     }
@@ -240,12 +281,31 @@ impl PipelineStageDiagnostic {
         tool: impl Into<String>,
         input_records: usize,
     ) -> Self {
+        Self::failure_with_metrics(
+            order,
+            stage,
+            tool,
+            input_records,
+            PipelineStageMetrics::zero(),
+        )
+    }
+
+    pub fn failure_with_metrics(
+        order: usize,
+        stage: impl Into<String>,
+        tool: impl Into<String>,
+        input_records: usize,
+        metrics: PipelineStageMetrics,
+    ) -> Self {
         Self {
             order,
             step: stage.into(),
             tool: tool.into(),
             input_records,
             output_records: 0,
+            input_bytes: metrics.input_bytes,
+            output_bytes: 0,
+            duration_ms: metrics.duration_ms,
             status: "error".to_string(),
         }
     }
