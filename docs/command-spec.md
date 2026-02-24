@@ -13,6 +13,7 @@ dataq [--emit-pipeline] <command> [options]
 - `canon`: 入力を決定的に正規化し、JSON/JSONLへ変換
 - `assert`: ルールまたはJSON Schemaで検証
 - `gate schema`: JSON Schemaで品質ゲートを実行（`assert --schema` ラッパー）
+- `gate policy`: ルールベース品質ゲートを実行（`matched/violations/details`）
 - `sdiff`: 2データセットの構造差分を出力
 - `profile`: フィールド統計を決定的JSONで出力
 - `join`: 2入力をキー結合してJSON配列を出力
@@ -27,11 +28,11 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|assert|gate-schema|sdiff|profile|merge|doctor|recipe>`
+  - `dataq contract --command <canon|assert|gate-schema|gate|sdiff|profile|merge|doctor|recipe>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `assert`, `gate-schema`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+  - `canon`, `assert`, `gate-schema`, `gate`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -88,6 +89,7 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.canon`
   - `dataq.assert`
   - `dataq.gate.schema`
+  - `dataq.gate.policy`
   - `dataq.sdiff`
   - `dataq.profile`
   - `dataq.join`
@@ -190,6 +192,19 @@ dataq [--emit-pipeline] <command> [options]
   - 未対応 preset は明示的エラーで exit `3`
 - `--emit-pipeline`:
   - `steps`: `gate_schema_ingest`, `gate_schema_validate`
+
+## `gate policy` 契約（MVP）
+
+- コマンド:
+  - `dataq gate policy --rules <path> [--input <path|->] [--source <preset>]`
+- 目的:
+  - ルール検証結果を policy gate 用の固定形で返す
+  - 出力JSONは `matched`, `violations`, `details`
+- `--source`:
+  - 対応 preset: `scan-text`, `ingest-doc`, `ingest-api`, `ingest-notes`, `ingest-book`
+  - 未対応 preset は明示的エラーで exit `3`
+- `--emit-pipeline`:
+  - `steps`: `gate_policy_source`, `gate_policy_assert_rules`
 
 ## `merge` パス別ポリシー（MVP）
 

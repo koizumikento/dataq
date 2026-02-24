@@ -277,6 +277,13 @@ fn resolve_validation_source(args: &AssertCommandArgs) -> Result<ValidationSourc
     }
 }
 
+/// Loads and validates `assert --rules` files, including `extends` resolution.
+pub fn load_rules_from_path(path: &Path) -> Result<AssertRules, String> {
+    load_rules(path).map_err(|error| match error.kind {
+        CommandErrorKind::InputUsage(message) | CommandErrorKind::Internal(message) => message,
+    })
+}
+
 fn load_rules(path: &Path) -> Result<AssertRules, CommandError> {
     let mut stack = Vec::new();
     let resolved = load_rules_recursive(path, &mut stack)?;

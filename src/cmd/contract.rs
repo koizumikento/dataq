@@ -2,10 +2,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 8] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 9] = [
     ContractCommand::Canon,
     ContractCommand::Assert,
     ContractCommand::GateSchema,
+    ContractCommand::Gate,
     ContractCommand::Sdiff,
     ContractCommand::Profile,
     ContractCommand::Merge,
@@ -19,6 +20,7 @@ pub enum ContractCommand {
     Canon,
     Assert,
     GateSchema,
+    Gate,
     Sdiff,
     Profile,
     Merge,
@@ -56,6 +58,7 @@ struct ExitCodeContract<'a> {
 
 const NO_FIXED_ROOT_FIELDS: &[&str] = &[];
 const ASSERT_FIELDS: &[&str] = &["matched", "mismatch_count", "mismatches"];
+const GATE_FIELDS: &[&str] = &["matched", "violations", "details"];
 const SDIFF_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values"];
 const PROFILE_FIELDS: &[&str] = &["record_count", "field_count", "fields"];
 const DOCTOR_FIELDS: &[&str] = &["tools"];
@@ -72,6 +75,10 @@ const ASSERT_NOTES: &[&str] = &[
 const GATE_SCHEMA_NOTES: &[&str] = &[
     "JSON output shape is aligned with `assert --schema`.",
     "`--from` resolves ingest presets with explicit validation errors.",
+];
+const GATE_NOTES: &[&str] = &[
+    "Policy violation details are emitted in `details`.",
+    "`details` are sorted by `path` then `rule_id` for deterministic output.",
 ];
 const SDIFF_NOTES: &[&str] = &[
     "`values.total` is the full diff count before truncation.",
@@ -147,6 +154,13 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: ASSERT_FIELDS,
             exit_codes: exit_codes("validation mismatch against JSON Schema"),
             notes: GATE_SCHEMA_NOTES,
+        },
+        ContractCommand::Gate => CommandContract {
+            command: "gate",
+            schema: "dataq.gate.policy.output.v1",
+            output_fields: GATE_FIELDS,
+            exit_codes: exit_codes("policy violations detected"),
+            notes: GATE_NOTES,
         },
         ContractCommand::Sdiff => CommandContract {
             command: "sdiff",
