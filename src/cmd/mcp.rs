@@ -1209,11 +1209,14 @@ fn execute_ingest_doc(args: &Map<String, Value>) -> ToolExecution {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
-    let input_text =
-        match parse_optional_string(args, &["input", "input_text", "input_inline"], "input") {
-            Ok(value) => value,
-            Err(message) => return input_usage_error(message),
-        };
+    let input_text = match parse_optional_string_allow_empty(
+        args,
+        &["input", "input_text", "input_inline"],
+        "input",
+    ) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
     if input_path.is_some() && input_text.is_some() {
         return input_usage_error("`input` path and inline forms are mutually exclusive");
     }
@@ -1251,6 +1254,7 @@ fn execute_ingest_doc(args: &Map<String, Value>) -> ToolExecution {
             ingest::pipeline_steps(),
             ingest::deterministic_guards(),
         )
+        .mark_external_tool_used("pandoc")
         .mark_external_tool_used("jq");
         execution.pipeline = pipeline_as_value(report).ok();
     }
@@ -2052,6 +2056,19 @@ fn parse_optional_string(
         Some(Value::String(text)) if text.trim().is_empty() => {
             Err(format!("`{label}` cannot be empty"))
         }
+        Some(Value::String(text)) => Ok(Some(text.to_string())),
+        Some(_) => Err(format!("`{label}` must be a string")),
+    }
+}
+
+fn parse_optional_string_allow_empty(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<String>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
         Some(Value::String(text)) => Ok(Some(text.to_string())),
         Some(_) => Err(format!("`{label}` must be a string")),
     }

@@ -413,6 +413,67 @@ fn emit_pipeline_true_includes_pipeline() {
 }
 
 #[test]
+fn ingest_doc_emit_pipeline_marks_pandoc_and_jq_used() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        11,
+        "dataq.ingest.doc",
+        json!({
+            "emit_pipeline": true,
+            "input": "# heading",
+            "from": "md"
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+
+    let tools = response["result"]["structuredContent"]["pipeline"]["external_tools"]
+        .as_array()
+        .expect("external_tools array");
+    let jq_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == Value::from("jq"))
+        .expect("jq entry");
+    assert_eq!(jq_entry["used"], Value::Bool(true));
+
+    let pandoc_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == Value::from("pandoc"))
+        .expect("pandoc entry");
+    assert_eq!(pandoc_entry["used"], Value::Bool(true));
+}
+
+#[test]
+fn ingest_doc_accepts_empty_inline_input() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        12,
+        "dataq.ingest.doc",
+        json!({
+            "input": "",
+            "from": "md"
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(false));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+}
+
+#[test]
 fn inline_path_conflict_returns_exit_three() {
     let dir = tempdir().expect("tempdir");
     let left_path = dir.path().join("left.json");
