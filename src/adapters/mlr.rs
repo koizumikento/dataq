@@ -391,7 +391,10 @@ mod tests {
     #[test]
     fn maps_invalid_json_output_to_parse_error() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let bin = write_test_script(dir.path().join("fake-mlr"), "printf 'not-json'");
+        let bin = write_test_script(
+            dir.path().join("fake-mlr"),
+            "cat >/dev/null\nprintf 'not-json'",
+        );
 
         let err = run_sort_with_bin(&[], "job_id", bin.to_str().expect("utf8 path"))
             .expect_err("invalid JSON should fail");
