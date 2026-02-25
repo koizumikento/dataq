@@ -104,7 +104,10 @@ mod tests {
     #[test]
     fn maps_invalid_json_output_to_parse_error() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let bin = write_test_script(dir.path().join("fake-yq"), "printf 'not-json'");
+        let bin = write_test_script(
+            dir.path().join("fake-yq"),
+            "cat >/dev/null\nprintf 'not-json'",
+        );
 
         let err = run_filter_with_bin(&[], "[]", bin.to_str().expect("utf8 path"))
             .expect_err("invalid JSON should fail");
@@ -116,7 +119,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let bin = write_test_script(
             dir.path().join("fake-yq"),
-            "echo 'yq failed in test' 1>&2\nexit 4",
+            "cat >/dev/null\necho 'yq failed in test' 1>&2\nexit 4",
         );
 
         let err = run_filter_with_bin(&[], "[]", bin.to_str().expect("utf8 path"))
