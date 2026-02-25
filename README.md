@@ -50,6 +50,24 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - これは「3ツールの代替」ではなく「3ツールの合わせ技を再利用可能な契約として固定する」ための設計です
 - 多段連携コマンドでは、`--emit-pipeline` で各段の利用ツール・ステップ順・件数/バイト数変化・`duration_ms`(決定性保持のため常に`0`)・失敗段を追跡可能にします
 
+## 最小依存と外部ツール一覧
+
+- 最小運用（`dataq doctor` の既定診断対象）は `jq` / `yq` / `mlr`
+- 追加機能はコマンド別に必要なツールだけ導入する運用を想定
+
+| 用途 | 必要ツール |
+| --- | --- |
+| コア（canon/assert/gate/sdiff/profile/join/aggregate など） | `jq`, `yq`, `mlr` |
+| `ingest api` | `xh`, `jq` |
+| `ingest doc` | `pandoc`, `jq` |
+| `ingest notes` | `nb`, `jq` |
+| `ingest book` | `jq`（`DATAQ_INGEST_BOOK_VERIFY_MDBOOK` 有効時は `mdbook` も必要） |
+| `scan text` | `rg`（`--jq-project` を使う場合は `jq` も必要） |
+| `transform rowset` | `jq`, `mlr` |
+
+補足:
+- `doctor --profile` でワークフロー別に必要ツールの充足を診断できます（`doc` / `api` / `notes` / `book` / `scan` など）。
+
 ## コマンド一覧
 
 共通形式:
