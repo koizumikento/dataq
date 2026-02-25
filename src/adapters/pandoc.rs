@@ -76,7 +76,11 @@ pub fn to_json_ast(input: &[u8], from: PandocInputFormat) -> Result<Value, Pando
     };
 
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(input).map_err(PandocError::Stdin)?;
+        if let Err(err) = stdin.write_all(input) {
+            if err.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(PandocError::Stdin(err));
+            }
+        }
     } else {
         return Err(PandocError::Execution(
             "pandoc stdin was not piped as expected".to_string(),
