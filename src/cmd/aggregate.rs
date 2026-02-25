@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::cmd::stage_trace;
 use crate::domain::report::PipelineStageDiagnostic;
 use crate::engine::aggregate::{self, AggregateError, AggregateMetric};
 use crate::io;
@@ -69,19 +70,17 @@ pub fn run_with_trace(
         }
     };
 
-    let input_records = values.len();
-    match aggregate::aggregate_values(&values, &args.group_by, args.metric, &args.target) {
+    let (aggregate_result, diagnostic) = stage_trace::run_value_stage(
+        1,
+        "aggregate_mlr_execute",
+        "mlr",
+        &[values.as_slice()],
+        || aggregate::aggregate_values(&values, &args.group_by, args.metric, &args.target),
+    );
+    match aggregate_result {
         Ok(rows) => {
             trace.mark_tool_used("mlr");
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::success(
-                    1,
-                    "aggregate_mlr_execute",
-                    "mlr",
-                    input_records,
-                    rows.len(),
-                ));
+            trace.stage_diagnostics.push(diagnostic);
             (
                 AggregateCommandResponse {
                     exit_code: 0,
@@ -92,14 +91,7 @@ pub fn run_with_trace(
         }
         Err(AggregateError::Mlr(error)) => {
             trace.mark_tool_used("mlr");
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::failure(
-                    1,
-                    "aggregate_mlr_execute",
-                    "mlr",
-                    input_records,
-                ));
+            trace.stage_diagnostics.push(diagnostic);
             (
                 AggregateCommandResponse {
                     exit_code: 3,

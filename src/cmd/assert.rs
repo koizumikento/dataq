@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::adapters::{jq, mlr, yq};
+use crate::cmd::stage_trace;
 use crate::domain::report::PipelineStageDiagnostic;
 use crate::domain::rules::{AssertReport, AssertRules};
 use crate::engine::r#assert::{self, AssertValidationError};
@@ -238,6 +239,19 @@ pub fn run_with_stdin_and_normalize_with_trace<R: Read>(
     }
 }
 
+/// Normalizes already-loaded values with a specific normalize mode.
+///
+/// This is shared by commands that need the same deterministic
+/// `yq -> jq -> mlr` normalization contract as `assert --normalize`.
+pub fn normalize_values_for_mode(
+    values: Vec<Value>,
+    mode: AssertInputNormalizeMode,
+) -> Result<(Vec<Value>, AssertPipelineTrace), String> {
+    normalize_with_pipeline(values, mode).map_err(|error| match error.kind {
+        CommandErrorKind::InputUsage(message) | CommandErrorKind::Internal(message) => message,
+    })
+}
+
 fn execute<R: Read>(
     args: &AssertCommandArgs,
     stdin: R,
@@ -274,6 +288,13 @@ fn resolve_validation_source(args: &AssertCommandArgs) -> Result<ValidationSourc
             load_schema(schema_path.as_path()).map(ValidationSource::Schema)
         }
     }
+}
+
+/// Loads and validates `assert --rules` files, including `extends` resolution.
+pub fn load_rules_from_path(path: &Path) -> Result<AssertRules, String> {
+    load_rules(path).map_err(|error| match error.kind {
+        CommandErrorKind::InputUsage(message) | CommandErrorKind::Internal(message) => message,
+    })
 }
 
 fn load_rules(path: &Path) -> Result<AssertRules, CommandError> {
@@ -542,34 +563,21 @@ fn normalize_with_pipeline(
     let mut trace = AssertPipelineTrace::default();
 
     trace.mark_tool_used("yq");
-    let yq_input_rows = values.len();
-    let yq_rows = match mode {
-        AssertInputNormalizeMode::GithubActionsJobs => yq::extract_github_actions_jobs(&values),
-        AssertInputNormalizeMode::GitlabCiJobs => yq::extract_gitlab_ci_jobs(&values),
-    };
-    let yq_rows = match yq_rows {
-        Ok(rows) => {
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::success(
-                    1,
-                    "normalize_yq_extract",
-                    "yq",
-                    yq_input_rows,
-                    rows.len(),
-                ));
-            rows
-        }
+    let (yq_result, yq_diagnostic) = stage_trace::run_value_stage(
+        1,
+        "normalize_yq_extract",
+        "yq",
+        &[values.as_slice()],
+        || match mode {
+            AssertInputNormalizeMode::GithubActionsJobs => yq::extract_github_actions_jobs(&values),
+            AssertInputNormalizeMode::GitlabCiJobs => yq::extract_gitlab_ci_jobs(&values),
+        },
+    );
+    trace.stage_diagnostics.push(yq_diagnostic);
+    let yq_rows = match yq_result {
+        Ok(rows) => rows,
         Err(yq::YqError::Unavailable) => {
             let message = format!("normalize mode `{}` requires `yq` in PATH", mode.as_str());
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::failure(
-                    1,
-                    "normalize_yq_extract",
-                    "yq",
-                    yq_input_rows,
-                ));
             return Err(CommandError::input_usage_with_trace(message, trace));
         }
         Err(error) => {
@@ -577,47 +585,28 @@ fn normalize_with_pipeline(
                 "failed to normalize assert input with yq (`{}`): {error}",
                 mode.as_str()
             );
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::failure(
-                    1,
-                    "normalize_yq_extract",
-                    "yq",
-                    yq_input_rows,
-                ));
             return Err(CommandError::input_usage_with_trace(message, trace));
         }
     };
 
     trace.mark_tool_used("jq");
-    let jq_input_rows = yq_rows.len();
-    let jq_rows = match mode {
-        AssertInputNormalizeMode::GithubActionsJobs => jq::normalize_github_actions_jobs(&yq_rows),
-        AssertInputNormalizeMode::GitlabCiJobs => jq::normalize_gitlab_ci_jobs(&yq_rows),
-    };
-    let jq_rows = match jq_rows {
-        Ok(rows) => {
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::success(
-                    2,
-                    "normalize_jq_project",
-                    "jq",
-                    jq_input_rows,
-                    rows.len(),
-                ));
-            rows
-        }
+    let (jq_result, jq_diagnostic) = stage_trace::run_value_stage(
+        2,
+        "normalize_jq_project",
+        "jq",
+        &[yq_rows.as_slice()],
+        || match mode {
+            AssertInputNormalizeMode::GithubActionsJobs => {
+                jq::normalize_github_actions_jobs(&yq_rows)
+            }
+            AssertInputNormalizeMode::GitlabCiJobs => jq::normalize_gitlab_ci_jobs(&yq_rows),
+        },
+    );
+    trace.stage_diagnostics.push(jq_diagnostic);
+    let jq_rows = match jq_result {
+        Ok(rows) => rows,
         Err(jq::JqError::Unavailable) => {
             let message = format!("normalize mode `{}` requires `jq` in PATH", mode.as_str());
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::failure(
-                    2,
-                    "normalize_jq_project",
-                    "jq",
-                    jq_input_rows,
-                ));
             return Err(CommandError::input_usage_with_trace(message, trace));
         }
         Err(error) => {
@@ -625,47 +614,26 @@ fn normalize_with_pipeline(
                 "failed to normalize assert input with jq (`{}`): {error}",
                 mode.as_str()
             );
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::failure(
-                    2,
-                    "normalize_jq_project",
-                    "jq",
-                    jq_input_rows,
-                ));
             return Err(CommandError::input_usage_with_trace(message, trace));
         }
     };
 
     trace.mark_tool_used("mlr");
-    let mlr_input_rows = jq_rows.len();
-    let mlr_rows = match mode {
-        AssertInputNormalizeMode::GithubActionsJobs => mlr::sort_github_actions_jobs(&jq_rows),
-        AssertInputNormalizeMode::GitlabCiJobs => mlr::sort_gitlab_ci_jobs(&jq_rows),
-    };
-    match mlr_rows {
-        Ok(rows) => {
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::success(
-                    3,
-                    "normalize_mlr_sort",
-                    "mlr",
-                    mlr_input_rows,
-                    rows.len(),
-                ));
-            Ok((rows, trace))
-        }
+    let (mlr_result, mlr_diagnostic) = stage_trace::run_value_stage(
+        3,
+        "normalize_mlr_sort",
+        "mlr",
+        &[jq_rows.as_slice()],
+        || match mode {
+            AssertInputNormalizeMode::GithubActionsJobs => mlr::sort_github_actions_jobs(&jq_rows),
+            AssertInputNormalizeMode::GitlabCiJobs => mlr::sort_gitlab_ci_jobs(&jq_rows),
+        },
+    );
+    trace.stage_diagnostics.push(mlr_diagnostic);
+    match mlr_result {
+        Ok(rows) => Ok((rows, trace)),
         Err(mlr::MlrError::Unavailable) => {
             let message = format!("normalize mode `{}` requires `mlr` in PATH", mode.as_str());
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::failure(
-                    3,
-                    "normalize_mlr_sort",
-                    "mlr",
-                    mlr_input_rows,
-                ));
             Err(CommandError::input_usage_with_trace(message, trace))
         }
         Err(error) => {
@@ -673,14 +641,6 @@ fn normalize_with_pipeline(
                 "failed to normalize assert input with mlr (`{}`): {error}",
                 mode.as_str()
             );
-            trace
-                .stage_diagnostics
-                .push(PipelineStageDiagnostic::failure(
-                    3,
-                    "normalize_mlr_sort",
-                    "mlr",
-                    mlr_input_rows,
-                ));
             Err(CommandError::input_usage_with_trace(message, trace))
         }
     }

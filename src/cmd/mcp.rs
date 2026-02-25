@@ -8,13 +8,19 @@ use serde_json::{Map, Value, json};
 use crate::cmd::{
     aggregate,
     r#assert::{self as assert_cmd, AssertInputNormalizeMode},
-    canon, contract, doctor, join, merge, profile, recipe, sdiff,
+    canon, contract, diff, doctor, emit, gate, ingest, ingest_api, ingest_yaml_jobs, join, merge,
+    profile, recipe, scan, sdiff, transform,
 };
-use crate::domain::report::{PipelineInput, PipelineInputSource, PipelineReport};
+use crate::domain::ingest::IngestYamlJobsMode;
+use crate::domain::report::{
+    ExternalToolUsage, PipelineInput, PipelineInputSource, PipelineReport,
+};
 use crate::domain::rules::AssertRules;
 use crate::engine::aggregate::AggregateMetric;
 use crate::engine::r#assert as assert_engine;
 use crate::engine::canon::{CanonOptions, canonicalize_values};
+use crate::engine::ingest as ingest_engine;
+use crate::engine::ingest::IngestDocInputFormat;
 use crate::engine::join::JoinHow;
 use crate::engine::merge::MergePolicy;
 use crate::io::{self, Format};
@@ -27,17 +33,30 @@ const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
-const TOOL_ORDER: [&str; 10] = [
+const TOOL_ORDER: [&str; 23] = [
     "dataq.canon",
+    "dataq.ingest.api",
+    "dataq.ingest.yaml_jobs",
     "dataq.assert",
+    "dataq.gate.schema",
+    "dataq.gate.policy",
     "dataq.sdiff",
+    "dataq.diff.source",
     "dataq.profile",
+    "dataq.ingest.doc",
+    "dataq.ingest.notes",
+    "dataq.ingest.book",
     "dataq.join",
     "dataq.aggregate",
+    "dataq.scan.text",
+    "dataq.transform.rowset",
     "dataq.merge",
     "dataq.doctor",
     "dataq.contract",
+    "dataq.emit.plan",
     "dataq.recipe.run",
+    "dataq.recipe.lock",
+    "dataq.recipe.replay",
 ];
 
 #[derive(Debug, Clone)]
@@ -228,15 +247,28 @@ fn handle_tools_call(id: Value, params: Map<String, Value>) -> Value {
 fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecution {
     match tool_name {
         "dataq.canon" => execute_canon(args),
+        "dataq.ingest.api" => execute_ingest_api(args),
+        "dataq.ingest.yaml_jobs" => execute_ingest_yaml_jobs(args),
         "dataq.assert" => execute_assert(args),
+        "dataq.gate.schema" => execute_gate_schema(args),
+        "dataq.gate.policy" => execute_gate_policy(args),
         "dataq.sdiff" => execute_sdiff(args),
+        "dataq.diff.source" => execute_diff_source(args),
         "dataq.profile" => execute_profile(args),
+        "dataq.ingest.doc" => execute_ingest_doc(args),
+        "dataq.ingest.notes" => execute_ingest_notes(args),
+        "dataq.ingest.book" => execute_ingest_book(args),
         "dataq.join" => execute_join(args),
         "dataq.aggregate" => execute_aggregate(args),
+        "dataq.scan.text" => execute_scan_text(args),
+        "dataq.transform.rowset" => execute_transform_rowset(args),
         "dataq.merge" => execute_merge(args),
         "dataq.doctor" => execute_doctor(args),
         "dataq.contract" => execute_contract(args),
+        "dataq.emit.plan" => execute_emit_plan(args),
         "dataq.recipe.run" => execute_recipe_run(args),
+        "dataq.recipe.lock" => execute_recipe_lock(args),
+        "dataq.recipe.replay" => execute_recipe_replay(args),
         unknown => input_usage_error(format!("unknown tool `{unknown}`")),
     }
 }
@@ -304,6 +336,144 @@ fn execute_canon(args: &Map<String, Value>) -> ToolExecution {
             }),
         );
         execution.pipeline = pipeline_as_value(pipeline).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_api(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let url = match parse_required_string(args, &["url"], "url") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let method = match parse_optional_string(args, &["method"], "method") {
+        Ok(Some(value)) => match value.to_ascii_uppercase().as_str() {
+            "GET" => ingest_api::IngestApiMethod::Get,
+            "POST" => ingest_api::IngestApiMethod::Post,
+            "PUT" => ingest_api::IngestApiMethod::Put,
+            "PATCH" => ingest_api::IngestApiMethod::Patch,
+            "DELETE" => ingest_api::IngestApiMethod::Delete,
+            _ => return input_usage_error("`method` must be GET|POST|PUT|PATCH|DELETE"),
+        },
+        Ok(None) => ingest_api::IngestApiMethod::Get,
+        Err(message) => return input_usage_error(message),
+    };
+    let headers = match parse_string_list(args, &["header", "headers"], "header") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let body = match parse_optional_json_body(args, &["body"], "body") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let expect_status =
+        match parse_optional_u16(args, &["expect_status", "expect-status"], "expect_status") {
+            Ok(value) => value,
+            Err(message) => return input_usage_error(message),
+        };
+
+    let (response, trace) = ingest_api::run_with_trace(&ingest_api::IngestApiCommandArgs {
+        url,
+        method,
+        headers,
+        body,
+        expect_status,
+    });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "ingest_api",
+            PipelineInput::new(vec![PipelineInputSource {
+                label: "url".to_string(),
+                source: "url".to_string(),
+                path: Some(
+                    args.get("url")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                format: Some("http".to_string()),
+            }]),
+            ingest_api::pipeline_steps(),
+            ingest_api::deterministic_guards(),
+        );
+        for tool in &trace.used_tools {
+            report = report.mark_external_tool_used(tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_yaml_jobs(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let mode = match parse_required_ingest_yaml_jobs_mode(args) {
+        Ok(mode) => mode,
+        Err(message) => return input_usage_error(message),
+    };
+    let input = match parse_value_input(
+        args,
+        &["input_path", "input_file"],
+        &["input", "input_inline", "input_value"],
+        "input",
+        true,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `input`"),
+        Err(message) => return input_usage_error(message),
+    };
+    if let ValueInputSource::Path(path) = &input {
+        if is_stdin_input_path_sentinel(path.as_path()) {
+            return input_usage_error(
+                "`input_path` does not accept stdin sentinels (`-`, `/dev/stdin`) for `dataq.ingest.yaml_jobs`; use inline `input`",
+            );
+        }
+    }
+
+    let input_format = match &input {
+        ValueInputSource::Path(_) => Some(Format::Yaml),
+        ValueInputSource::Inline(_) => Some(Format::Json),
+    };
+    let command_args = ingest_yaml_jobs::IngestYamlJobsCommandArgs {
+        input: to_ingest_yaml_jobs_input(input.clone()),
+        mode,
+    };
+    let (response, trace) =
+        ingest_yaml_jobs::run_with_stdin_and_trace(&command_args, Cursor::new(Vec::new()));
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "ingest_yaml_jobs",
+            PipelineInput::new(vec![pipeline_source("input", &input, input_format)]),
+            ingest_yaml_jobs::pipeline_steps(),
+            ingest_yaml_jobs::deterministic_guards(mode),
+        );
+        for used_tool in &trace.used_tools {
+            report = report.mark_external_tool_used(used_tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
     }
 
     execution
@@ -551,6 +721,232 @@ fn execute_assert_with_command_api(
     execution
 }
 
+fn execute_gate_schema(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let from = match parse_optional_string(args, &["from"], "from") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let preset = match gate::resolve_preset(from.as_deref()) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let input = match parse_value_input(
+        args,
+        &["input_path", "input_file"],
+        &["input", "input_inline", "input_value"],
+        "input",
+        true,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `input`"),
+        Err(message) => return input_usage_error(message),
+    };
+    if from.is_some() && matches!(input, ValueInputSource::Inline(_)) {
+        return input_usage_error("`from` presets require path/stdin input");
+    }
+    if matches!(
+        &input,
+        ValueInputSource::Path(path) if gate::is_stdin_path(path.as_path())
+    ) {
+        return input_usage_error(
+            "`dataq.gate.schema` does not accept stdin sentinel paths (`-` or `/dev/stdin`) for `input_path`; pass inline `input` instead",
+        );
+    }
+
+    let schema_source = match parse_document_input(
+        args,
+        &["schema_path", "schema_file"],
+        &["schema", "schema_inline"],
+        "schema",
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `schema`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let schema_path = match schema_source {
+        DocumentInputSource::Path(path) => path,
+        DocumentInputSource::Inline(_) => {
+            return input_usage_error(
+                "inline `schema` is not supported for `dataq.gate.schema`; use `schema_path`",
+            );
+        }
+    };
+
+    let stdin_format = if preset.is_some() {
+        Some(Format::Yaml)
+    } else {
+        Some(Format::Json)
+    };
+    let (input_path, stdin_payload, input_format) = match &input {
+        ValueInputSource::Path(path) => {
+            let format = if preset.is_some() {
+                Some(Format::Yaml)
+            } else if gate::is_stdin_path(path.as_path()) {
+                stdin_format
+            } else {
+                io::resolve_input_format(None, Some(path.as_path())).ok()
+            };
+            (Some(path.clone()), Vec::new(), format)
+        }
+        ValueInputSource::Inline(values) => (
+            None,
+            serialize_values_as_json_input(values),
+            Some(Format::Json),
+        ),
+    };
+
+    let command_args = gate::GateSchemaCommandArgs {
+        schema: schema_path.clone(),
+        input: input_path.clone(),
+        from: from.clone(),
+    };
+    let (response, trace) =
+        gate::run_schema_with_stdin_and_trace(&command_args, Cursor::new(stdin_payload));
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+    if !emit_pipeline {
+        return execution;
+    }
+
+    let schema_format = io::resolve_input_format(None, Some(schema_path.as_path()))
+        .ok()
+        .map(Format::as_str);
+    let input_source = match &input {
+        ValueInputSource::Path(path) if gate::is_stdin_path(path.as_path()) => {
+            PipelineInputSource::stdin("input", input_format.map(Format::as_str))
+        }
+        ValueInputSource::Path(path) => PipelineInputSource::path(
+            "input",
+            path.display().to_string(),
+            input_format.map(Format::as_str),
+        ),
+        ValueInputSource::Inline(_) => inline_source("input", input_format),
+    };
+
+    let mut report = PipelineReport::new(
+        "gate.schema",
+        PipelineInput::new(vec![
+            PipelineInputSource::path("schema", schema_path.display().to_string(), schema_format),
+            input_source,
+        ]),
+        gate::schema_pipeline_steps(),
+        gate::schema_deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report = report.with_stage_diagnostics(trace.stage_diagnostics);
+    execution.pipeline = pipeline_as_value(report).ok();
+    execution
+}
+
+fn execute_gate_policy(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let source = match parse_optional_string(args, &["source"], "source") {
+        Ok(Some(raw)) => match gate::GatePolicySourcePreset::parse_cli_name(raw.as_str()) {
+            Ok(source) => Some(source),
+            Err(message) => return input_usage_error(message),
+        },
+        Ok(None) => None,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let rules_path =
+        match parse_optional_path(args, &["rules_path", "rules_file", "rules"], "rules") {
+            Ok(Some(path)) => path,
+            Ok(None) => return input_usage_error("missing required `rules`"),
+            Err(message) => return input_usage_error(message),
+        };
+
+    let input = match parse_value_input(
+        args,
+        &["input_path", "input_file"],
+        &["input", "input_inline", "input_value"],
+        "input",
+        true,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `input`"),
+        Err(message) => return input_usage_error(message),
+    };
+    if let ValueInputSource::Path(path) = &input
+        && gate::is_stdin_path(path.as_path())
+    {
+        return input_usage_error(
+            "`dataq.gate.policy` does not accept stdin sentinel paths for `input_path` (`-`, `/dev/stdin`); provide a file path or inline `input`",
+        );
+    }
+
+    let input_format = match &input {
+        ValueInputSource::Path(path) => io::resolve_input_format(None, Some(path.as_path())).ok(),
+        ValueInputSource::Inline(_) => Some(Format::Json),
+    };
+
+    let (input_path, stdin_payload) = match &input {
+        ValueInputSource::Path(path) => (Some(path.clone()), Vec::new()),
+        ValueInputSource::Inline(values) => (None, serialize_values_as_json_input(values)),
+    };
+
+    let command_args = gate::GatePolicyCommandArgs {
+        rules: rules_path.clone(),
+        input: input_path.clone(),
+        source,
+    };
+    let response = gate::run_policy_with_stdin(&command_args, Cursor::new(stdin_payload));
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut sources = Vec::with_capacity(2);
+        sources.push(PipelineInputSource::path(
+            "rules",
+            rules_path.display().to_string(),
+            io::resolve_input_format(None, Some(rules_path.as_path()))
+                .ok()
+                .map(Format::as_str),
+        ));
+        match &input {
+            ValueInputSource::Path(path) => {
+                sources.push(PipelineInputSource::path(
+                    "input",
+                    path.display().to_string(),
+                    input_format.map(Format::as_str),
+                ));
+            }
+            ValueInputSource::Inline(_) => {
+                sources.push(inline_source("input", input_format));
+            }
+        }
+
+        let report = PipelineReport::new(
+            "gate.policy",
+            PipelineInput::new(sources),
+            gate::policy_pipeline_steps(),
+            gate::policy_deterministic_guards(source),
+        );
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
 fn execute_sdiff(args: &Map<String, Value>) -> ToolExecution {
     let emit_pipeline = match parse_emit_pipeline(args) {
         Ok(value) => value,
@@ -662,6 +1058,79 @@ fn execute_sdiff(args: &Map<String, Value>) -> ToolExecution {
     execution
 }
 
+fn execute_diff_source(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let left = match parse_required_string(args, &["left"], "left") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let right = match parse_required_string(args, &["right"], "right") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let fail_on_diff = match parse_bool(args, &["fail_on_diff"], false, "fail_on_diff") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let execution_result = match diff::execute(left.as_str(), right.as_str()) {
+        Ok(execution) => execution,
+        Err(error) => return input_usage_error(error.to_string()),
+    };
+    let exit_code = if fail_on_diff && execution_result.report.values.total > 0 {
+        2
+    } else {
+        0
+    };
+
+    let payload = match serde_json::to_value(diff::DiffSourceReport::new(
+        execution_result.report,
+        execution_result.sources,
+    )) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return internal_error(format!("failed to serialize diff source report: {error}"));
+        }
+    };
+
+    let mut execution = ToolExecution {
+        exit_code,
+        payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut pipeline = PipelineReport::new(
+            "diff.source",
+            PipelineInput::new(vec![
+                PipelineInputSource {
+                    label: "left".to_string(),
+                    source: execution_result.left.metadata.kind.clone(),
+                    path: Some(execution_result.left.metadata.path.clone()),
+                    format: Some(execution_result.left.metadata.format.clone()),
+                },
+                PipelineInputSource {
+                    label: "right".to_string(),
+                    source: execution_result.right.metadata.kind.clone(),
+                    path: Some(execution_result.right.metadata.path.clone()),
+                    format: Some(execution_result.right.metadata.format.clone()),
+                },
+            ]),
+            diff::pipeline_steps(),
+            diff::deterministic_guards(),
+        );
+        for tool in &execution_result.used_tools {
+            pipeline = pipeline.mark_external_tool_used(tool);
+        }
+        execution.pipeline = pipeline_as_value(pipeline).ok();
+    }
+
+    execution
+}
+
 fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
     let emit_pipeline = match parse_emit_pipeline(args) {
         Ok(value) => value,
@@ -730,6 +1199,198 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
             profile::deterministic_guards(),
         );
         execution.pipeline = pipeline_as_value(pipeline).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_doc(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let from = match parse_required_string(args, &["from"], "from") {
+        Ok(value) => match parse_ingest_doc_format(value.as_str()) {
+            Ok(format) => format,
+            Err(message) => return input_usage_error(message),
+        },
+        Err(message) => return input_usage_error(message),
+    };
+    let input_path = match parse_optional_path(args, &["input_path", "input_file"], "input") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let input_text = match parse_optional_string_allow_empty(
+        args,
+        &["input", "input_text", "input_inline"],
+        "input",
+    ) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    if input_path.is_some() && input_text.is_some() {
+        return input_usage_error("`input` path and inline forms are mutually exclusive");
+    }
+    if input_path.is_none() && input_text.is_none() {
+        return input_usage_error("missing required `input`");
+    }
+    if input_path.as_deref() == Some(Path::new("-")) {
+        return input_usage_error(
+            "`input` path `-` is not supported for `dataq.ingest.doc`; pass file path or inline `input`",
+        );
+    }
+
+    let command_args = ingest::IngestDocCommandArgs {
+        input: input_path.clone(),
+        from,
+    };
+    let stdin_payload = input_text.unwrap_or_default().into_bytes();
+    let response = ingest::run_with_stdin(&command_args, Cursor::new(stdin_payload));
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let source = if let Some(path) = input_path {
+            PipelineInputSource::path("input", path.display().to_string(), Some(from.as_str()))
+        } else {
+            PipelineInputSource {
+                label: "input".to_string(),
+                source: "inline".to_string(),
+                path: None,
+                format: Some(from.as_str().to_string()),
+            }
+        };
+        let report = PipelineReport::new(
+            "ingest.doc",
+            PipelineInput::new(vec![source]),
+            ingest::pipeline_steps(),
+            ingest::deterministic_guards(),
+        )
+        .mark_external_tool_used("pandoc")
+        .mark_external_tool_used("jq");
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_notes(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let tags = match parse_string_list(args, &["tag", "tags"], "tag") {
+        Ok(values) => values,
+        Err(message) => return input_usage_error(message),
+    };
+    let since = match parse_optional_string(args, &["since"], "since") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let until = match parse_optional_string(args, &["until"], "until") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let to = match parse_optional_string(args, &["to"], "to") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    if let Some(to) = to {
+        if !matches!(to.as_str(), "json" | "jsonl") {
+            return input_usage_error("`to` must be `json` or `jsonl`");
+        }
+    }
+
+    let time_range = match ingest_engine::resolve_time_range(since.as_deref(), until.as_deref()) {
+        Ok(range) => range,
+        Err(error) => return input_usage_error(error.to_string()),
+    };
+    let command_args = ingest::IngestNotesCommandArgs {
+        tags,
+        since: time_range.since,
+        until: time_range.until,
+    };
+    let (response, trace) = ingest::run_notes_with_trace(&command_args);
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "ingest.notes",
+            PipelineInput::new(Vec::new()),
+            ingest::notes_pipeline_steps(),
+            ingest::notes_deterministic_guards(),
+        );
+        for used_tool in &trace.used_tools {
+            report = report.mark_external_tool_used(used_tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_ingest_book(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let root = match parse_optional_path(args, &["root", "root_path", "book_root"], "root") {
+        Ok(Some(path)) => path,
+        Ok(None) => return input_usage_error("missing required `root`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let include_files = match parse_bool(args, &["include_files"], false, "include_files") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let verify_mdbook_meta = match parse_bool(
+        args,
+        &["verify_mdbook_meta"],
+        ingest::resolve_verify_mdbook_meta(),
+        "verify_mdbook_meta",
+    ) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let (response, trace) = ingest::run_book_with_trace(&ingest::IngestBookCommandArgs {
+        root: root.clone(),
+        include_files,
+        verify_mdbook_meta,
+    });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "ingest.book",
+            PipelineInput::new(vec![PipelineInputSource::path(
+                "root",
+                root.display().to_string(),
+                None,
+            )]),
+            ingest::pipeline_steps_book(),
+            ingest::deterministic_guards_book(),
+        );
+        for used_tool in &trace.used_tools {
+            report = report.mark_external_tool_used(used_tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
     }
 
     execution
@@ -881,6 +1542,136 @@ fn execute_aggregate(args: &Map<String, Value>) -> ToolExecution {
     execution
 }
 
+fn execute_scan_text(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let pattern = match parse_required_string(args, &["pattern"], "pattern") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let path = match parse_optional_path(args, &["path"], "path") {
+        Ok(path) => path.unwrap_or_else(|| PathBuf::from(".")),
+        Err(message) => return input_usage_error(message),
+    };
+    let glob = match parse_string_list(args, &["glob", "globs"], "glob") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let max_matches = match parse_optional_usize(args, &["max_matches"], "max_matches") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let policy_mode = match parse_bool(args, &["policy_mode"], false, "policy_mode") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let jq_project = match parse_bool(args, &["jq_project"], false, "jq_project") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let command_args = scan::ScanTextCommandArgs {
+        pattern,
+        path: path.clone(),
+        glob,
+        max_matches,
+        policy_mode,
+        jq_project,
+    };
+    let (response, trace) = scan::run_with_trace(&command_args);
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "scan",
+            PipelineInput::new(vec![PipelineInputSource::path(
+                "path",
+                path.display().to_string(),
+                None,
+            )]),
+            scan::pipeline_steps(),
+            scan::deterministic_guards(),
+        );
+        if !report.external_tools.iter().any(|tool| tool.name == "rg") {
+            report.external_tools.push(ExternalToolUsage {
+                name: "rg".to_string(),
+                used: false,
+            });
+        }
+        for tool in &trace.used_tools {
+            report = report.mark_external_tool_used(tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_transform_rowset(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let input = match parse_value_input(
+        args,
+        &["input_path", "input_file"],
+        &["input", "input_inline", "input_value"],
+        "input",
+        true,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => return input_usage_error("missing required `input`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let jq_filter = match parse_required_string(args, &["jq_filter", "jq-filter"], "jq_filter") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let mlr = match parse_string_list(args, &["mlr", "mlr_args"], "mlr") {
+        Ok(values) if values.is_empty() => return input_usage_error("missing required `mlr`"),
+        Ok(values) => values,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let input_format = source_format(&input);
+    let command_args = transform::TransformRowsetCommandArgs {
+        input: to_transform_rowset_input(input.clone()),
+        jq_filter,
+        mlr,
+    };
+    let (response, trace) = transform::run_rowset_with_trace(&command_args);
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut report = PipelineReport::new(
+            "transform.rowset",
+            PipelineInput::new(vec![pipeline_source("input", &input, input_format)]),
+            transform::pipeline_steps(),
+            transform::deterministic_guards(),
+        );
+        for tool in &trace.used_tools {
+            report = report.mark_external_tool_used(tool);
+        }
+        report = report.with_stage_diagnostics(trace.stage_diagnostics);
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
 fn execute_merge(args: &Map<String, Value>) -> ToolExecution {
     let emit_pipeline = match parse_emit_pipeline(args) {
         Ok(value) => value,
@@ -983,8 +1774,20 @@ fn execute_doctor(args: &Map<String, Value>) -> ToolExecution {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
+    let capabilities = match parse_bool(args, &["capabilities"], false, "capabilities") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let profile = match parse_optional_doctor_profile(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let command_input = doctor::DoctorCommandInput {
+        capabilities,
+        profile,
+    };
 
-    let (response, _) = doctor::run_with_trace();
+    let (response, _) = doctor::run_with_input_and_trace(command_input);
     let mut execution = ToolExecution {
         exit_code: response.exit_code,
         payload: response.payload,
@@ -995,11 +1798,11 @@ fn execute_doctor(args: &Map<String, Value>) -> ToolExecution {
         let mut report = PipelineReport::new(
             "doctor",
             PipelineInput::new(Vec::new()),
-            doctor::pipeline_steps(),
-            doctor::deterministic_guards(),
+            doctor::pipeline_steps(command_input.profile),
+            doctor::deterministic_guards(command_input.profile),
         );
-        for tool in ["jq", "yq", "mlr"] {
-            report = report.mark_external_tool_used(tool);
+        for tool in doctor::pipeline_external_tools(command_input.profile) {
+            report = report.mark_external_tool_used(&tool);
         }
         execution.pipeline = pipeline_as_value(report).ok();
     }
@@ -1045,6 +1848,49 @@ fn execute_contract(args: &Map<String, Value>) -> ToolExecution {
             PipelineInput::new(Vec::new()),
             contract::pipeline_steps(),
             contract::deterministic_guards(),
+        );
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_emit_plan(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let command = match parse_required_string(args, &["command"], "command") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let plan_args = match parse_optional_string_array(args, &["args"], "args") {
+        Ok(Some(values)) => values,
+        Ok(None) => Vec::new(),
+        Err(message) => return input_usage_error(message),
+    };
+
+    let response = emit::run_plan(&emit::EmitPlanCommandArgs {
+        command,
+        args: plan_args.clone(),
+    });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let mut sources = vec![inline_source("command", Some(Format::Json))];
+        if !plan_args.is_empty() {
+            sources.push(inline_source("args", Some(Format::Json)));
+        }
+        let report = PipelineReport::new(
+            "emit",
+            PipelineInput::new(sources),
+            emit::pipeline_steps(),
+            emit::deterministic_guards(),
         );
         execution.pipeline = pipeline_as_value(report).ok();
     }
@@ -1114,7 +1960,157 @@ fn execute_recipe_run(args: &Map<String, Value>) -> ToolExecution {
             "recipe",
             PipelineInput::new(vec![source]),
             steps,
-            recipe::deterministic_guards(),
+            recipe::deterministic_guards_run(),
+        );
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_recipe_lock(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let file_path =
+        match parse_optional_path(args, &["file_path", "file", "recipe_path"], "file_path") {
+            Ok(Some(value)) => value,
+            Ok(None) => return input_usage_error("missing required `file_path`"),
+            Err(message) => return input_usage_error(message),
+        };
+    let out_path = match parse_optional_path(args, &["out_path", "out"], "out_path") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let (response, trace, serialized_lock) =
+        recipe::lock_with_trace(&recipe::RecipeLockCommandArgs {
+            file_path: file_path.clone(),
+        });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if execution.exit_code == 0 {
+        if let Some(out_path) = out_path {
+            if let Some(serialized_lock) = serialized_lock {
+                if let Err(error) = std::fs::write(&out_path, serialized_lock.as_slice()) {
+                    execution.exit_code = 3;
+                    execution.payload = json!({
+                        "error": "input_usage_error",
+                        "message": format!(
+                            "failed to write recipe lock file `{}`: {error}",
+                            out_path.display()
+                        ),
+                    });
+                }
+            } else {
+                execution.exit_code = 1;
+                execution.payload = json!({
+                    "error": "internal_error",
+                    "message": "recipe lock payload bytes were unavailable",
+                });
+            }
+        }
+    }
+
+    if emit_pipeline {
+        let steps = if trace.steps.is_empty() {
+            vec![
+                "recipe_lock_parse".to_string(),
+                "recipe_lock_probe_tools".to_string(),
+                "recipe_lock_fingerprint".to_string(),
+            ]
+        } else {
+            trace.steps
+        };
+        let mut report = PipelineReport::new(
+            "recipe",
+            PipelineInput::new(vec![PipelineInputSource::path(
+                "recipe",
+                file_path.display().to_string(),
+                io::resolve_input_format(None, Some(file_path.as_path()))
+                    .ok()
+                    .map(Format::as_str),
+            )]),
+            steps,
+            recipe::deterministic_guards_lock(),
+        );
+        for tool_name in trace.tool_versions.keys() {
+            report = report.mark_external_tool_used(tool_name);
+        }
+        execution.pipeline = pipeline_as_value(report).ok();
+    }
+
+    execution
+}
+
+fn execute_recipe_replay(args: &Map<String, Value>) -> ToolExecution {
+    let emit_pipeline = match parse_emit_pipeline(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let file_path = match parse_optional_path(args, &["file_path", "file", "recipe_path"], "file") {
+        Ok(Some(path)) => path,
+        Ok(None) => return input_usage_error("missing required `file`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let lock_path = match parse_optional_path(args, &["lock_path", "lock"], "lock") {
+        Ok(Some(path)) => path,
+        Ok(None) => return input_usage_error("missing required `lock`"),
+        Err(message) => return input_usage_error(message),
+    };
+    let strict = match parse_bool(args, &["strict"], false, "strict") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+
+    let (response, trace) = recipe::replay_with_trace(&recipe::RecipeReplayCommandArgs {
+        file_path: file_path.clone(),
+        lock_path: lock_path.clone(),
+        strict,
+    });
+
+    let mut execution = ToolExecution {
+        exit_code: response.exit_code,
+        payload: response.payload,
+        pipeline: None,
+    };
+
+    if emit_pipeline {
+        let steps = if trace.steps.is_empty() {
+            vec![
+                "recipe_replay_parse".to_string(),
+                "recipe_replay_verify_lock".to_string(),
+                "recipe_replay_execute".to_string(),
+            ]
+        } else {
+            trace.steps
+        };
+        let report = PipelineReport::new(
+            "recipe",
+            PipelineInput::new(vec![
+                PipelineInputSource::path(
+                    "recipe",
+                    file_path.display().to_string(),
+                    io::resolve_input_format(None, Some(file_path.as_path()))
+                        .ok()
+                        .map(Format::as_str),
+                ),
+                PipelineInputSource::path(
+                    "lock",
+                    lock_path.display().to_string(),
+                    io::resolve_input_format(None, Some(lock_path.as_path()))
+                        .ok()
+                        .map(Format::as_str),
+                ),
+            ]),
+            steps,
+            recipe::deterministic_guards_replay(),
         );
         execution.pipeline = pipeline_as_value(report).ok();
     }
@@ -1146,19 +2142,31 @@ fn tools_list_result() -> Value {
 }
 
 fn tool_definition(tool_name: &str) -> Value {
+    let mut input_schema = json!({
+        "type": "object",
+        "properties": {
+            "emit_pipeline": {
+                "type": "boolean",
+                "default": false
+            }
+        },
+        "additionalProperties": true
+    });
+    if tool_name == "dataq.doctor" {
+        input_schema["properties"]["capabilities"] = json!({
+            "type": "boolean",
+            "default": false
+        });
+        input_schema["properties"]["profile"] = json!({
+            "type": "string",
+            "enum": ["core", "ci-jobs", "doc", "api", "notes", "book", "scan"]
+        });
+    }
+
     json!({
         "name": tool_name,
         "description": format!("dataq MCP tool `{tool_name}`"),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "emit_pipeline": {
-                    "type": "boolean",
-                    "default": false
-                }
-            },
-            "additionalProperties": true
-        }
+        "inputSchema": input_schema
     })
 }
 
@@ -1271,6 +2279,44 @@ fn parse_usize(
     }
 }
 
+fn parse_optional_usize(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<usize>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(|value| value as usize)
+            .map(Some)
+            .ok_or_else(|| format!("`{label}` must be a non-negative integer")),
+        Some(_) => Err(format!("`{label}` must be a non-negative integer")),
+    }
+}
+
+fn parse_optional_u16(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<u16>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| format!("`{label}` must be between 0 and 65535")),
+        Some(Value::String(text)) => text
+            .parse::<u16>()
+            .map(Some)
+            .map_err(|_| format!("`{label}` must be between 0 and 65535")),
+        Some(_) => Err(format!("`{label}` must be a number or numeric string")),
+    }
+}
+
 fn parse_required_string(
     args: &Map<String, Value>,
     aliases: &[&str],
@@ -1291,6 +2337,19 @@ fn parse_optional_string(
         Some(Value::String(text)) if text.trim().is_empty() => {
             Err(format!("`{label}` cannot be empty"))
         }
+        Some(Value::String(text)) => Ok(Some(text.to_string())),
+        Some(_) => Err(format!("`{label}` must be a string")),
+    }
+}
+
+fn parse_optional_string_allow_empty(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<String>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
         Some(Value::String(text)) => Ok(Some(text.to_string())),
         Some(_) => Err(format!("`{label}` must be a string")),
     }
@@ -1329,6 +2388,26 @@ fn parse_optional_normalize_mode(
     .transpose()
 }
 
+fn parse_required_ingest_yaml_jobs_mode(
+    args: &Map<String, Value>,
+) -> Result<IngestYamlJobsMode, String> {
+    let raw = parse_required_string(args, &["mode"], "mode")?;
+    match raw.as_str() {
+        "github-actions" => Ok(IngestYamlJobsMode::GithubActions),
+        "gitlab-ci" => Ok(IngestYamlJobsMode::GitlabCi),
+        "generic-map" => Ok(IngestYamlJobsMode::GenericMap),
+        _ => Err("`mode` must be `github-actions`, `gitlab-ci`, or `generic-map`".to_string()),
+    }
+}
+
+fn parse_optional_doctor_profile(
+    args: &Map<String, Value>,
+) -> Result<Option<doctor::DoctorProfile>, String> {
+    let raw = parse_optional_string(args, &["profile"], "profile")?;
+    raw.map(|value| doctor::DoctorProfile::from_str(value.as_str()))
+        .transpose()
+}
+
 fn parse_string_list(
     args: &Map<String, Value>,
     aliases: &[&str],
@@ -1347,6 +2426,27 @@ fn parse_string_list(
             })
             .collect(),
         Some(_) => Err(format!("`{label}` must be a string or array<string>")),
+    }
+}
+
+fn parse_optional_string_array(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| format!("`{label}` array must contain only strings"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err(format!("`{label}` must be an array<string>")),
     }
 }
 
@@ -1378,6 +2478,21 @@ fn parse_inline_value(
     label: &str,
 ) -> Result<Option<Value>, String> {
     Ok(find_alias(args, aliases, label)?.cloned())
+}
+
+fn parse_optional_json_body(
+    args: &Map<String, Value>,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<String>, String> {
+    let value = find_alias(args, aliases, label)?;
+    match value {
+        None => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.to_string())),
+        Some(other) => serde_json::to_string(other)
+            .map(Some)
+            .map_err(|error| format!("failed to serialize `{label}`: {error}")),
+    }
 }
 
 fn find_alias<'a>(
@@ -1534,10 +2649,31 @@ fn to_join_input(source: ValueInputSource) -> join::JoinCommandInput {
     }
 }
 
+fn to_ingest_yaml_jobs_input(source: ValueInputSource) -> ingest_yaml_jobs::IngestYamlJobsInput {
+    match source {
+        ValueInputSource::Path(path) if ingest_yaml_jobs::path_is_stdin(path.as_path()) => {
+            ingest_yaml_jobs::IngestYamlJobsInput::Stdin
+        }
+        ValueInputSource::Path(path) => ingest_yaml_jobs::IngestYamlJobsInput::Path(path),
+        ValueInputSource::Inline(values) => ingest_yaml_jobs::IngestYamlJobsInput::Inline(values),
+    }
+}
+
+fn is_stdin_input_path_sentinel(path: &Path) -> bool {
+    ingest_yaml_jobs::path_is_stdin(path) || path == Path::new("/dev/stdin")
+}
+
 fn to_aggregate_input(source: ValueInputSource) -> aggregate::AggregateCommandInput {
     match source {
         ValueInputSource::Path(path) => aggregate::AggregateCommandInput::Path(path),
         ValueInputSource::Inline(values) => aggregate::AggregateCommandInput::Inline(values),
+    }
+}
+
+fn to_transform_rowset_input(source: ValueInputSource) -> transform::TransformRowsetCommandInput {
+    match source {
+        ValueInputSource::Path(path) => transform::TransformRowsetCommandInput::Path(path),
+        ValueInputSource::Inline(values) => transform::TransformRowsetCommandInput::Inline(values),
     }
 }
 
@@ -1651,15 +2787,37 @@ fn pipeline_as_value(report: PipelineReport) -> Result<Value, String> {
         .map_err(|error| format!("failed to serialize pipeline report: {error}"))
 }
 
+fn parse_ingest_doc_format(value: &str) -> Result<IngestDocInputFormat, String> {
+    match value {
+        "md" => Ok(IngestDocInputFormat::Md),
+        "html" => Ok(IngestDocInputFormat::Html),
+        "docx" => Ok(IngestDocInputFormat::Docx),
+        "rst" => Ok(IngestDocInputFormat::Rst),
+        "latex" => Ok(IngestDocInputFormat::Latex),
+        _ => Err("`from` must be one of `md`, `html`, `docx`, `rst`, `latex`".to_string()),
+    }
+}
+
 fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, String> {
     match value {
         "canon" => Ok(contract::ContractCommand::Canon),
+        "ingest-api" => Ok(contract::ContractCommand::IngestApi),
+        "ingest" => Ok(contract::ContractCommand::Ingest),
         "assert" => Ok(contract::ContractCommand::Assert),
+        "gate-schema" => Ok(contract::ContractCommand::GateSchema),
+        "gate" | "gate-policy" => Ok(contract::ContractCommand::Gate),
         "sdiff" => Ok(contract::ContractCommand::Sdiff),
+        "diff-source" => Ok(contract::ContractCommand::DiffSource),
         "profile" => Ok(contract::ContractCommand::Profile),
+        "ingest-doc" => Ok(contract::ContractCommand::IngestDoc),
+        "ingest-notes" => Ok(contract::ContractCommand::IngestNotes),
+        "ingest-book" => Ok(contract::ContractCommand::IngestBook),
+        "scan" => Ok(contract::ContractCommand::Scan),
+        "transform-rowset" | "transform.rowset" => Ok(contract::ContractCommand::TransformRowset),
         "merge" => Ok(contract::ContractCommand::Merge),
         "doctor" => Ok(contract::ContractCommand::Doctor),
-        "recipe" => Ok(contract::ContractCommand::Recipe),
+        "recipe" | "recipe-run" => Ok(contract::ContractCommand::RecipeRun),
+        "recipe-lock" => Ok(contract::ContractCommand::RecipeLock),
         _ => Err(format!("unsupported contract command `{value}`")),
     }
 }

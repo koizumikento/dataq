@@ -43,12 +43,76 @@ pub struct ProfileTypeDistribution {
     pub object: usize,
 }
 
+/// Deterministic extraction report for `ingest doc` command output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IngestDocReport {
+    pub meta: Value,
+    pub headings: Vec<IngestDocHeading>,
+    pub links: Vec<IngestDocLink>,
+    pub tables: Vec<IngestDocTable>,
+    pub code_blocks: Vec<IngestDocCodeBlock>,
+}
+
+/// Heading entry extracted from a source document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestDocHeading {
+    pub level: i64,
+    pub text: String,
+}
+
+/// Link entry extracted from a source document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestDocLink {
+    pub url: String,
+    pub title: String,
+    pub text: String,
+}
+
+/// Table entry extracted from a source document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestDocTable {
+    pub caption: String,
+}
+
+/// Code-block entry extracted from a source document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestDocCodeBlock {
+    pub language: String,
+    pub code: String,
+}
+
 /// Deterministic report for `recipe run` command output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RecipeRunReport {
     pub matched: bool,
     pub exit_code: i32,
     pub steps: Vec<RecipeStepReport>,
+}
+
+/// Deterministic report for `recipe replay` command output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeReplayReport {
+    pub matched: bool,
+    pub exit_code: i32,
+    pub lock_check: RecipeReplayLockCheckReport,
+    pub steps: Vec<RecipeStepReport>,
+}
+
+/// Deterministic lock verification summary for `recipe replay`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeReplayLockCheckReport {
+    pub strict: bool,
+    pub matched: bool,
+    pub mismatch_count: usize,
+    pub mismatches: Vec<RecipeReplayLockMismatchReport>,
+}
+
+/// One lock verification mismatch emitted in deterministic check order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeReplayLockMismatchReport {
+    pub constraint: String,
+    pub expected: String,
+    pub actual: String,
 }
 
 /// Per-step result summary in recipe execution order.
@@ -59,6 +123,16 @@ pub struct RecipeStepReport {
     pub matched: bool,
     pub exit_code: i32,
     pub summary: Value,
+}
+
+/// Deterministic lock metadata for reproducible `recipe` execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecipeLockReport {
+    pub version: String,
+    pub command_graph_hash: String,
+    pub args_hash: String,
+    pub tool_versions: BTreeMap<String, String>,
+    pub dataq_version: String,
 }
 
 /// Diagnostics report emitted when `--emit-pipeline` is enabled.
@@ -100,6 +174,11 @@ impl PipelineReport {
             .find(|tool| tool.name == tool_name)
         {
             tool.used = true;
+        } else {
+            self.external_tools.push(ExternalToolUsage {
+                name: tool_name.to_string(),
+                used: true,
+            });
         }
         self
     }
@@ -208,7 +287,27 @@ pub struct PipelineStageDiagnostic {
     pub tool: String,
     pub input_records: usize,
     pub output_records: usize,
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub duration_ms: u64,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineStageMetrics {
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub duration_ms: u64,
+}
+
+impl PipelineStageMetrics {
+    pub const fn zero() -> Self {
+        Self {
+            input_bytes: 0,
+            output_bytes: 0,
+            duration_ms: 0,
+        }
+    }
 }
 
 impl PipelineStageDiagnostic {
@@ -219,12 +318,33 @@ impl PipelineStageDiagnostic {
         input_records: usize,
         output_records: usize,
     ) -> Self {
+        Self::success_with_metrics(
+            order,
+            stage,
+            tool,
+            input_records,
+            output_records,
+            PipelineStageMetrics::zero(),
+        )
+    }
+
+    pub fn success_with_metrics(
+        order: usize,
+        stage: impl Into<String>,
+        tool: impl Into<String>,
+        input_records: usize,
+        output_records: usize,
+        metrics: PipelineStageMetrics,
+    ) -> Self {
         Self {
             order,
             step: stage.into(),
             tool: tool.into(),
             input_records,
             output_records,
+            input_bytes: metrics.input_bytes,
+            output_bytes: metrics.output_bytes,
+            duration_ms: metrics.duration_ms,
             status: "ok".to_string(),
         }
     }
@@ -235,12 +355,31 @@ impl PipelineStageDiagnostic {
         tool: impl Into<String>,
         input_records: usize,
     ) -> Self {
+        Self::failure_with_metrics(
+            order,
+            stage,
+            tool,
+            input_records,
+            PipelineStageMetrics::zero(),
+        )
+    }
+
+    pub fn failure_with_metrics(
+        order: usize,
+        stage: impl Into<String>,
+        tool: impl Into<String>,
+        input_records: usize,
+        metrics: PipelineStageMetrics,
+    ) -> Self {
         Self {
             order,
             step: stage.into(),
             tool: tool.into(),
             input_records,
             output_records: 0,
+            input_bytes: metrics.input_bytes,
+            output_bytes: 0,
+            duration_ms: metrics.duration_ms,
             status: "error".to_string(),
         }
     }

@@ -11,25 +11,37 @@ dataq [--emit-pipeline] <command> [options]
 サブコマンド:
 
 - `canon`: 入力を決定的に正規化し、JSON/JSONLへ変換
+- `ingest api`: HTTP API 応答を `xh -> jq` で決定的JSONへ正規化
+- `ingest yaml-jobs`: YAMLのCIジョブ定義を正規化JSON配列へ変換
 - `assert`: ルールまたはJSON Schemaで検証
+- `gate schema`: JSON Schemaで品質ゲートを実行（`assert --schema` ラッパー）
+- `gate policy`: ルールベース品質ゲートを実行（`matched/violations/details`）
 - `sdiff`: 2データセットの構造差分を出力
+- `diff source`: 2ソース（preset/path）を解決して構造差分を出力
 - `profile`: フィールド統計を決定的JSONで出力
+- `ingest doc`: ドキュメント（md/html/docx/rst/latex）を共通JSONへ抽出
 - `join`: 2入力をキー結合してJSON配列を出力
 - `aggregate`: グループ集計をJSON配列で出力
+- `scan text`: 正規表現でテキストを走査して構造化マッチを出力
+- `transform rowset`: 固定2段 (`jq -> mlr`) でrowset変換してJSON配列を出力
 - `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
-- `doctor`: `jq` / `yq` / `mlr` の実行前診断
+- `doctor`: 依存ツール診断（`--profile` 指定でワークフロー別要件評価）
 - `recipe run`: 宣言的レシピを定義順に実行
+- `recipe lock`: 再現実行のための lock JSON を生成
+- `recipe replay`: lock 制約を検証してレシピを再実行
 - `contract`: サブコマンド出力契約を機械可読JSONで取得
+- `emit plan`: サブコマンドの静的実行計画（stage/dependency/tool）を取得
 - `mcp`: MCP(JSON-RPC 2.0) 単発リクエストを処理
 
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|assert|sdiff|profile|merge|doctor|recipe>`
+  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|scan|transform-rowset|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
+  - `--command recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `assert`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `transform-rowset`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -42,6 +54,28 @@ dataq [--emit-pipeline] <command> [options]
   - `1`: 予期しない内部エラー
 - 副作用:
   - `contract` は参照専用（read-only）で、入力データやファイル内容を変更しない
+
+## `emit plan` 出力契約（MVP）
+
+- コマンド:
+  - `dataq emit plan --command <subcommand> [--args <json-array>]`
+- `--args`:
+  - JSON配列文字列のみ受理（例: `'["--normalize","github-actions-jobs"]'`）
+  - 配列要素はすべて文字列
+- 出力キー:
+  - `command`: 対象サブコマンド名
+  - `args`: 計画解決に使った引数配列
+  - `stages`: 段情報配列（`order`, `step`, `tool`, `depends_on`）
+  - `tools`: `jq|yq|mlr` の期待利用有無（`expected`）
+- 終了コード:
+  - `0`: 成功
+  - `3`: 未対応サブコマンドまたは `--args` 形式不正
+  - `1`: 予期しない内部エラー
+- 実行制約:
+  - 計画解決は静的（外部コマンド実行なし）
+- `--emit-pipeline` との違い:
+  - `emit plan`: 実行前の静的計画
+  - `--emit-pipeline`: 実行時に観測された診断
 
 ## `mcp` 単発JSON-RPC契約（MVP）
 
@@ -62,15 +96,26 @@ dataq [--emit-pipeline] <command> [options]
   - `-32603` internal error
 - `tools/list` の tool 順序は固定:
   - `dataq.canon`
+  - `dataq.ingest.api`
+  - `dataq.ingest.yaml_jobs`
   - `dataq.assert`
+  - `dataq.gate.schema`
+  - `dataq.gate.policy`
   - `dataq.sdiff`
+  - `dataq.diff.source`
   - `dataq.profile`
+  - `dataq.ingest.doc`
   - `dataq.join`
   - `dataq.aggregate`
+  - `dataq.scan.text`
+  - `dataq.transform.rowset`
   - `dataq.merge`
   - `dataq.doctor`
   - `dataq.contract`
+  - `dataq.emit.plan`
   - `dataq.recipe.run`
+  - `dataq.recipe.lock`
+  - `dataq.recipe.replay`
 - `tools/call` 結果契約:
   - `result.structuredContent.exit_code: i32`
   - `result.structuredContent.payload: JSON`
@@ -81,6 +126,8 @@ dataq [--emit-pipeline] <command> [options]
   - すべてのtoolで共通引数として受理（default: `false`）
   - `true` のときのみ `structuredContent.pipeline` を返す
   - 従来CLIの stderr pipeline 出力契約は不変（`mcp` ではstderrへ出さない）
+- `dataq.doctor` の追加引数:
+  - `profile`（任意）: `core|ci-jobs|doc|api|notes|book|scan`
 - 競合入力（path + inline を同一logical inputで同時指定）:
   - JSON-RPCエラーではなく `tools/call` 成功レスポンス内で `exit_code=3` / `isError=true` を返す
 - `mcp` モードのプロセス終了コード:
@@ -99,7 +146,7 @@ dataq [--emit-pipeline] <command> [options]
   - 入力不正または結合実行失敗は exit `3`
 - 実行方式:
   - `mlr` を明示的引数配列で実行（シェル展開なし）
-  - `--emit-pipeline` で `stage_diagnostics` に `join_mlr_execute` を出力
+  - `--emit-pipeline` で `stage_diagnostics` に `join_mlr_execute` を出力（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）
 
 ## `aggregate` コマンド契約（MVP）
 
@@ -118,7 +165,41 @@ dataq [--emit-pipeline] <command> [options]
   - 入力不正または集計実行失敗は exit `3`
 - 実行方式:
   - `mlr` を明示的引数配列で実行（シェル展開なし）
-  - `--emit-pipeline` で `stage_diagnostics` に `aggregate_mlr_execute` を出力
+  - `--emit-pipeline` で `stage_diagnostics` に `aggregate_mlr_execute` を出力（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）
+
+## `scan text` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq scan text --pattern <regex> [--path <dir>] [--glob <glob>...] [--max-matches <n>]`
+- 出力: JSON object（stdout）
+  - `matches`: path/line/column 順に決定的ソートされた配列
+  - `summary`: `total_matches`, `returned_matches`, `files_with_matches`, `truncated`, `policy_mode`, `forbidden_matches`
+- 異常時契約:
+  - `rg` 未導入、regex不正、jq投影失敗（`--jq-project`有効時）は exit `3`
+  - `--policy-mode` 有効かつヒットありは exit `2`
+- 実行方式:
+  - Stage1 `rg` 実行（明示的引数配列）
+  - Stage2 `rg --json` を構造化マッチへ厳密変換
+  - Stage3 `--jq-project` 指定時のみ jq 投影
+  - `--emit-pipeline` ステップ:
+    - `scan_text_rg_execute`
+    - `scan_text_parse`
+    - `scan_text_jq_project`
+
+## `transform rowset` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq transform rowset --input <path|-> --jq-filter <filter> --mlr <verb...>`
+- 出力: JSON 配列（stdout）
+- ステージ:
+  - stage1 `jq`: enrichment/type shaping
+  - stage2 `mlr`: aggregation/join/statistics
+- 異常時契約:
+  - tool 実行失敗または filter/args 不正は exit `3`
+- 実行方式:
+  - `jq` / `mlr` を明示的引数配列で実行（シェル展開なし）
+  - `--emit-pipeline` で `stage_diagnostics` に `transform_rowset_jq`, `transform_rowset_mlr` を出力
+  - stage ごとに `input_records` / `output_records` を出力
 
 ## `profile` 出力契約
 
@@ -137,6 +218,28 @@ dataq [--emit-pipeline] <command> [options]
   - `index = rank - 1`（0始まり）
 - `numeric_stats` の浮動小数は小数点以下6桁に丸めて出力
 
+## `ingest doc` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq ingest doc --input <path|-> --from <md|html|docx|rst|latex>`
+- 出力: JSON object（stdout）
+  - `meta`
+  - `headings`
+  - `links`
+  - `tables`
+  - `code_blocks`
+- 実行方式:
+  - stage1: `pandoc -f <from> -t json` で AST 化
+  - stage2: `jq` で固定スキーマへ投影
+  - `--emit-pipeline` の `external_tools` では `pandoc` と `jq` を `used=true` として記録
+- 異常時契約:
+  - unsupported `--from` は exit `3`
+  - `pandoc` 不在は exit `3`
+  - 文書 parse 失敗は exit `3`
+- `--emit-pipeline` 指定時の `steps`:
+  - `ingest_doc_pandoc_ast`
+  - `ingest_doc_jq_project`
+
 ## このCLIの位置づけ
 
 - `dataq` は `jq` / `yq` / `mlr` の代替ではなく、運用で繰り返す複合処理を短いコマンドに固定するための契約CLI
@@ -149,6 +252,33 @@ dataq [--emit-pipeline] <command> [options]
 - `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
 - `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義を `yq -> jq -> mlr` の固定3段でジョブ単位レコードへ正規化してから `--rules` 検証可能（`yq`/`jq`/`mlr` 必須）
+- 継続利用向けには `dataq ingest yaml-jobs` で正規化結果を固定してから `dataq assert --rules ...` へ接続する運用を推奨
+
+## `gate schema` 契約（MVP）
+
+- コマンド:
+  - `dataq gate schema --schema <path> [--input <path|->] [--from <preset>]`
+- 目的:
+  - JSON Schema 検証を専用 gate コマンドとして固定化
+  - 出力JSONは `assert --schema` と同一形状（`matched`, `mismatch_count`, `mismatches`）
+- `--from`:
+  - 対応 preset: `github-actions-jobs`, `gitlab-ci-jobs`
+  - 未対応 preset は明示的エラーで exit `3`
+- `--emit-pipeline`:
+  - `steps`: `gate_schema_ingest`, `gate_schema_validate`
+
+## `gate policy` 契約（MVP）
+
+- コマンド:
+  - `dataq gate policy --rules <path> [--input <path|->] [--source <preset>]`
+- 目的:
+  - ルール検証結果を policy gate 用の固定形で返す
+  - 出力JSONは `matched`, `violations`, `details`
+- `--source`:
+  - 対応 preset: `scan-text`, `ingest-doc`, `ingest-api`, `ingest-notes`, `ingest-book`
+  - 未対応 preset は明示的エラーで exit `3`
+- `--emit-pipeline`:
+  - `steps`: `gate_policy_source`, `gate_policy_assert_rules`
 
 ## `merge` パス別ポリシー（MVP）
 
@@ -167,8 +297,9 @@ dataq [--emit-pipeline] <command> [options]
 
 ## 外部ツール多段連携（契約方針）
 
-- 多段連携コマンドは、内部で `jq` / `yq` / `mlr` の1つ以上を段階実行して1つの結果JSONを返す
+- 多段連携コマンドは、内部で `pandoc` / `jq` / `yq` / `mlr` の1つ以上を段階実行して1つの結果JSONを返す
 - 各段は役割を分離する:
+  - `pandoc`: ドキュメント AST 化
   - `yq`: YAML抽出/整形
   - `jq`: JSON正規化/判定フラグ付け
   - `mlr`: 集計/結合/統計
@@ -195,12 +326,12 @@ dataq [--emit-pipeline] <command> [options]
 
 - `0`: 成功
 - `2`: 検証失敗（期待仕様に不一致）
-- `3`: 入力不正（フォーマット不正、必須引数不足など）または `doctor` の必須ツール不足/起動不可
+- `3`: 入力不正（フォーマット不正、必須引数不足など）、`doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）、または `ingest doc` の `pandoc`/parse 失敗
 - `1`: その他実行時エラー
 
 ## `doctor` コマンド契約（MVP）
 
-- コマンド: `dataq doctor`
+- コマンド: `dataq doctor [--capabilities] [--profile <core|ci-jobs|doc|api|notes|book|scan>]`
 - 出力: JSON（stdout）
 - 診断対象ツール順: `jq`, `yq`, `mlr`（固定順）
 - 各ツールの出力項目:
@@ -209,11 +340,61 @@ dataq [--emit-pipeline] <command> [options]
   - `version`: 取得できたバージョン文字列（取得不可時は `null`）
   - `executable`: `--version` で起動できたか
   - `message`: 判定理由（失敗時は対処案内を含む）
+- `--capabilities` 指定時:
+  - `capabilities`: 固定順の capability probe 結果
+  - 固定順: `jq.null_input_eval`, `yq.null_input_eval`, `mlr.help_command`
+  - 各項目: `name`, `tool`, `available`, `message`
+- `--profile` 指定時:
+  - `capabilities`: 固定順の capability probe 結果（`*.available`）
+  - `profile`: 要件評価結果
+    - `version`: `dataq.doctor.profile.requirements.v1`
+    - `name`: 指定プロフィール名
+    - `description`: プロフィール用途
+    - `satisfied`: 要件充足可否
+    - `requirements[*]`: `capability`, `tool`, `reason`, `satisfied`, `message`
 - 終了コード:
-  - `0`: 全ツール起動可能
-  - `3`: 1つ以上が欠如または起動不可
+  - `0`: `--profile` 未指定時は `jq|yq|mlr` が全て起動可能、`--profile` 指定時は選択 profile 要件を充足
+  - `3`: `--profile` 未指定時は `jq|yq|mlr` のいずれかが欠如または起動不可、`--profile` 指定時は選択 profile 要件未達
   - `1`: 予期しない内部エラー
-- `--emit-pipeline` 指定時の `steps`: `doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`
+- `--emit-pipeline` 指定時の `steps`:
+  - `--profile` 未指定: `doctor_probe_tools`, `doctor_probe_capabilities`
+  - `--profile` 指定時: `doctor_profile_probe`, `doctor_profile_evaluate`
+
+## `ingest api` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq ingest api --url <url> [--method <GET|POST|PUT|PATCH|DELETE>] [--header <k:v>...] [--body <json>] [--expect-status <u16>]`
+- 出力: JSON オブジェクト（stdout）
+  - `source`: `{"kind":"api","url":"...","method":"..."}`
+  - `status`: HTTP status code (number)
+  - `headers`: allowlist 投影済みヘッダー
+  - `body`: JSONとして解釈可能ならJSON値、不能なら文字列
+  - `fetched_at`: RFC3339 UTC
+- 終了コード:
+  - `0`: 成功
+  - `2`: `--expect-status` 不一致
+  - `3`: 入力不正/依存不足（`xh` 不在・URL不正・`--body` 不正JSON）
+  - `1`: 予期しない内部エラー
+- `--emit-pipeline` 指定時の `steps`:
+  - `ingest_api_xh_fetch`
+  - `ingest_api_jq_normalize`
+- `external_tools` には `jq` と `xh` の使用状態が反映される
+
+## `ingest yaml-jobs` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq ingest yaml-jobs --input <path|-> --mode <github-actions|gitlab-ci|generic-map>`
+- 出力: JSON 配列（stdout）
+- 実行方式:
+  - `yq` でジョブ定義を抽出
+  - `jq` でモード別の正規化フィールドへ変換
+  - `mlr` でジョブ識別子（`job_id`/`job_name`）順へ整列
+- `--emit-pipeline` 指定時の `steps`:
+  - `ingest_yaml_jobs_yq_extract`
+  - `ingest_yaml_jobs_jq_normalize`
+  - `ingest_yaml_jobs_mlr_shape`
+- 異常時契約:
+  - malformed YAML、未知 `--mode`、`jq`/`yq`/`mlr` 不足は exit `3`
 
 ### `sdiff` のCIゲート拡張
 
@@ -224,6 +405,24 @@ dataq [--emit-pipeline] <command> [options]
 - レポートJSON契約（`counts`, `keys`, `ignored_paths`, `values`）は不変
 - `values.total` は実差分件数を維持し、上限超過時のみ `values.truncated=true`
 - `--emit-pipeline` のstderr JSON出力契約は `sdiff` 拡張後も不変
+
+### `diff source` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq diff source --left <preset-or-path> --right <preset-or-path> [--fail-on-diff]`
+- source 指定:
+  - file: `<path>`
+  - preset: `preset:<github-actions-jobs|gitlab-ci-jobs>:<path>`
+- 出力:
+  - `sdiff` レポート（`counts`, `keys`, `ignored_paths`, `values`）を維持
+  - `sources.left` / `sources.right` に解決メタデータ（`kind`, `preset?`, `path`, `format`）を追加
+- 終了コード:
+  - `0`: 成功
+  - `2`: `--fail-on-diff` かつ `values.total > 0`
+  - `3`: source解決またはpreset指定エラー
+  - `1`: 予期しない内部エラー
+- `--emit-pipeline`:
+  - `steps` は `diff_source_resolve_left`, `diff_source_resolve_right`, `diff_source_compare`
 
 ### `--emit-pipeline`（診断出力）
 
@@ -237,12 +436,17 @@ pipeline JSON schema:
 - `command`: 実行サブコマンド名
 - `input`: 入力ソース情報（stdin/path, format）
 - `steps`: 実行ステップ配列
-- `external_tools`: `jq|yq|mlr` の使用有無（ツール名順で固定）
+- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）に、コマンド固有ツール（例: `ingest doc` の `pandoc`）を追記。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
-- `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ), `dataq_version`）
+  - 追加メトリクス: `input_bytes`, `output_bytes`, `duration_ms`（決定性保持のため固定 `0`）
+  - 後方互換: 既存フィールド（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）は不変
+- `fingerprint`: 実行フィンガープリント（`command`, `args_hash`, `input_hash`(optional), `tool_versions`(使用ツールのみ。`DATAQ_*_BIN` オーバーライド先を優先), `dataq_version`）
 - `deterministic_guards`: 適用した決定性ガード
 - `assert --rules-help`/`--schema-help` では `steps` が `emit_assert_rules_help` / `emit_assert_schema_help` になる
 - `recipe run` では `steps` に `load_recipe_file`, `validate_recipe_schema`, `execute_step_<index>_<kind>` が入る
+- `emit plan` では `steps` が `emit_plan_parse`, `emit_plan_resolve` になる
+- `recipe lock` では `steps` に `recipe_lock_parse`, `recipe_lock_probe_tools`, `recipe_lock_fingerprint` が入る
+- `recipe replay` では `steps` に `recipe_replay_parse`, `recipe_replay_verify_lock`, `recipe_replay_execute` が入る
 
 ```bash
 cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.json
@@ -266,6 +470,48 @@ cat in.json | dataq --emit-pipeline canon --from json > out.json 2> pipeline.jso
 - 異常時契約:
   - スキーマ不正 / 未知step / 引数不正は exit `3`
   - `assert` / `sdiff` の不一致は exit `2`
+
+## `recipe lock` MVP スキーマ
+
+- 実行形式: `dataq recipe lock --file <recipe-path> [--out <lock-path>]`
+- `--out` 未指定時は stdout に lock JSON を出力
+- `--out` 指定時は lock JSON を指定パスへ書き込み、stdout は空
+- lock JSON:
+  - `version`: `dataq.recipe.lock.v1`
+  - `command_graph_hash`
+  - `args_hash`
+  - `tool_versions`（使用ツールのみ。キーはツール名の辞書順: `jq` / `mlr` / `yq`）
+  - `dataq_version`
+- pipeline ステップ:
+  - `recipe_lock_parse`
+  - `recipe_lock_probe_tools`
+  - `recipe_lock_fingerprint`
+- 異常時契約:
+  - レシピファイル不正 / step引数不正は exit `3`
+  - ツール解決失敗（未存在/非実行可能/版数取得失敗）は exit `3`
+
+## `recipe replay` MVP スキーマ
+
+- 実行形式: `dataq recipe replay --file <recipe-path> --lock <lock-path> [--strict]`
+- 入力:
+  - `recipe`: `dataq.recipe.v1` 形式のレシピ
+  - `lock`: `dataq.recipe.lock.v1` 形式の lock 情報
+- lock 検証順序は固定:
+  - `lock.version`
+  - `lock.command_graph_hash`
+  - `lock.args_hash`
+  - `lock.dataq_version`
+  - `lock.tool_versions.<tool>`
+- サマリ出力: stdout JSON に `matched`, `exit_code`, `lock_check`, `steps`
+- `lock_check`:
+  - `strict`
+  - `matched`
+  - `mismatch_count`
+  - `mismatches[]` (`constraint`, `expected`, `actual`)
+- 終了コード契約:
+  - strict かつ lock mismatch: exit `2`（validation mismatch、実行スキップ）
+  - non-strict lock mismatch: mismatchを報告して実行継続
+  - 実行された `assert` / `sdiff` の不一致: exit `2`
 
 ## 関連ドキュメント
 

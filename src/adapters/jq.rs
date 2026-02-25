@@ -60,8 +60,215 @@ map(
 )
 "#;
 
+const GENERIC_MAP_JOBS_FILTER: &str = r#"
+map(
+  if type != "object" then
+    error("normalize mode `generic-map` expects object rows from yq stage")
+  else . end
+  | .job_name as $job_name
+  | if ($job_name | type) != "string" then
+      error("normalize mode `generic-map` expects `job_name` string from yq stage")
+    else . end
+  | .job as $job
+  | if ($job | type) != "object" then empty else . end
+  | {
+      job_name: $job_name,
+      field_count: ($job | keys | length),
+      has_stage: ($job | has("stage")),
+      has_script: ($job | has("script"))
+    }
+)
+"#;
+
+const INGEST_API_NORMALIZE_FILTER: &str = r#"
+def allowlist: ["cache-control","content-type","date","etag","last-modified"];
+{
+  source: .source,
+  status: (.status | tonumber),
+  headers: (
+    (.headers // {})
+    | to_entries
+    | map({key: (.key | ascii_downcase), value: (.value | tostring)})
+    | map(select(.key as $k | allowlist | index($k)))
+    | sort_by(.key)
+    | from_entries
+  ),
+  body: (
+    .body as $body
+    | if ($body | type) == "string" then
+        (try ($body | fromjson) catch $body)
+      else
+        $body
+      end
+  ),
+  fetched_at: .fetched_at
+}
+"#;
+
+const INGEST_NOTES_FILTER: &str = r#"
+def to_str:
+  if . == null then "" else tostring end;
+
+def normalize_tags:
+  if . == null then []
+  elif type == "array" then map(select(. != null) | tostring)
+  elif type == "string" then [.]
+  else []
+  end
+  | map(select(length > 0))
+  | unique
+  | sort;
+
+def normalized_note:
+  . as $note
+  | {
+      id: (($note.id // $note.note_id // $note.uuid // $note.slug // $note.path // "") | to_str),
+      title: (($note.title // $note.name // "") | to_str),
+      body: (($note.body // $note.content // $note.text // "") | to_str),
+      tags: (($note.tags // $note.tag_list // $note.metadata.tags // []) | normalize_tags),
+      created_at: (($note.created_at // $note.created // $note.timestamp // $note.date // "") | to_str),
+      updated_at: (
+        ($note.updated_at // $note.updated // $note.modified_at // null) as $updated
+        | if $updated == null then null else ($updated | to_str) end
+      ),
+      metadata: {
+        notebook: (($note.notebook // $note.folder // $note.collection // null) | if . == null then null else tostring end),
+        path: (($note.path // $note.file // $note.filename // null) | if . == null then null else tostring end)
+      }
+    }
+  | .metadata |= with_entries(select(.value != null));
+
+map(normalized_note)
+"#;
+
+const INGEST_DOC_PROJECT_FILTER: &str = r#"
+def trim:
+  gsub("^[[:space:]]+";"")
+  | gsub("[[:space:]]+$";"");
+
+def inline_piece:
+  if type == "string" then .
+  elif type != "object" or (.t? | type) != "string" then ""
+  elif .t == "Str" then (.c // "" | tostring)
+  elif .t == "Code" then (.c[1] // "" | tostring)
+  elif .t == "Space" or .t == "SoftBreak" or .t == "LineBreak" then " "
+  elif .t == "Link" then
+    ((.c[1] // [])
+      | map(
+          if .t == "Str" then (.c // "" | tostring)
+          elif .t == "Code" then (.c[1] // "" | tostring)
+          elif .t == "Space" or .t == "SoftBreak" or .t == "LineBreak" then " "
+          else "" end
+        )
+      | join(""))
+  elif .t == "Image" then
+    ((.c[1] // [])
+      | map(
+          if .t == "Str" then (.c // "" | tostring)
+          elif .t == "Code" then (.c[1] // "" | tostring)
+          elif .t == "Space" or .t == "SoftBreak" or .t == "LineBreak" then " "
+          else "" end
+        )
+      | join(""))
+  else "" end;
+
+def inline_text:
+  if type == "array" then
+    (map(inline_piece) | join("") | gsub("[[:space:]]+";" ") | trim)
+  else "" end;
+
+def normalize_url:
+  tostring | trim;
+
+def meta_value:
+  if type != "object" or (.t? | type) != "string" then .
+  elif .t == "MetaString" then (.c // "" | tostring)
+  elif .t == "MetaBool" then (.c | if . then true else false end)
+  elif .t == "MetaInlines" then ((.c // []) | inline_text)
+  elif .t == "MetaBlocks" then
+    ((.c // [])
+      | map(
+          if .t == "Para" or .t == "Plain" then (.c // [] | inline_text)
+          elif .t == "CodeBlock" then (.c[1] // "" | tostring)
+          else "" end
+        )
+      | map(select(length > 0))
+      | join("\n"))
+  elif .t == "MetaList" then ((.c // []) | map(meta_value))
+  elif .t == "MetaMap" then ((.c // {}) | with_entries(.value |= meta_value))
+  else .c end;
+
+def table_caption:
+  if (.c | type) != "array" then ""
+  elif ((.c | length) > 1 and (.c[1] | type) == "array") then (.c[1] | inline_text)
+  elif ((.c | length) > 1 and (.c[1] | type) == "object" and .c[1].t == "Caption") then
+    if (.c[1].c | type) == "array" and (.c[1].c | length) > 0 then
+      (.c[1].c[0] // [] | inline_text)
+    else "" end
+  else "" end;
+
+if type != "object" then
+  error("ingest doc jq stage expects pandoc JSON AST object")
+else
+  {
+    meta: ((.meta // {}) | with_entries(.value |= meta_value) | to_entries | sort_by(.key) | from_entries),
+    headings: [
+      .. | objects | select(.t? == "Header")
+      | {
+          level: (.c[0] // 0),
+          text: ((.c[2] // []) | inline_text)
+        }
+    ],
+    links: [
+      .. | objects | select(.t? == "Link")
+      | {
+          url: ((.c[2][0] // "") | normalize_url),
+          title: ((.c[2][1] // "") | tostring | trim),
+          text: ((.c[1] // []) | inline_text)
+        }
+    ],
+    tables: [
+      .. | objects | select(.t? == "Table")
+      | {
+          caption: table_caption
+        }
+    ],
+    code_blocks: [
+      .. | objects | select(.t? == "CodeBlock")
+      | {
+          language: ((.c[0][1][0] // "") | tostring | trim),
+          code: ((.c[1] // "") | tostring)
+        }
+    ]
+  }
+end
+"#;
+
+const INGEST_BOOK_PROJECT_FILTER: &str = r#"
+{
+  book: {
+    title: .book.title,
+    authors: .book.authors,
+    description: .book.description,
+    language: .book.language,
+    multilingual: .book.multilingual,
+    src: .book.src,
+    summary_path: .book.summary_path
+  },
+  summary: {
+    chapter_count: .summary.chapter_count,
+    order: .summary.order,
+    chapters: .summary.chapters
+  }
+}
+"#;
+const SCAN_TEXT_PROJECT_FILTER: &str =
+    r#"map({path: .path, line: .line, column: .column, text: .text, line_text: .line_text})"#;
+
 #[derive(Debug, Error)]
 pub enum JqError {
+    #[error("jq filter cannot be empty")]
+    InvalidFilter,
     #[error("`jq` is not available in PATH")]
     Unavailable,
     #[error("failed to spawn jq: {0}")]
@@ -74,6 +281,8 @@ pub enum JqError {
     Parse(serde_json::Error),
     #[error("jq output must be a JSON array")]
     OutputShape,
+    #[error("jq output must be a JSON object")]
+    OutputObjectShape,
     #[error("failed to serialize jq input: {0}")]
     Serialize(serde_json::Error),
 }
@@ -86,9 +295,57 @@ pub fn normalize_gitlab_ci_jobs(values: &[Value]) -> Result<Vec<Value>, JqError>
     run_filter(values, GITLAB_CI_JOBS_FILTER)
 }
 
+pub fn normalize_generic_map_jobs(values: &[Value]) -> Result<Vec<Value>, JqError> {
+    run_filter(values, GENERIC_MAP_JOBS_FILTER)
+}
+
+pub fn normalize_ingest_api_response(value: &Value) -> Result<Value, JqError> {
+    let parsed = run_filter_value(value, INGEST_API_NORMALIZE_FILTER)?;
+    match parsed {
+        Value::Object(_) => Ok(parsed),
+        _ => Err(JqError::OutputObjectShape),
+    }
+}
+
+pub fn normalize_ingest_notes(values: &[Value]) -> Result<Vec<Value>, JqError> {
+    run_filter(values, INGEST_NOTES_FILTER)
+}
+
+pub fn project_document_ast(ast: &Value) -> Result<Value, JqError> {
+    run_filter_value(ast, INGEST_DOC_PROJECT_FILTER)
+}
+
+pub fn project_ingest_book(payload: &Value) -> Result<Value, JqError> {
+    run_filter_value(payload, INGEST_BOOK_PROJECT_FILTER)
+}
+
+pub fn project_scan_text_matches(values: &[Value]) -> Result<Vec<Value>, JqError> {
+    run_filter(values, SCAN_TEXT_PROJECT_FILTER)
+}
+
+pub fn run_custom_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {
+    if filter.trim().is_empty() {
+        return Err(JqError::InvalidFilter);
+    }
+    run_filter(values, filter)
+}
+
 fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {
-    let jq_bin = std::env::var("DATAQ_JQ_BIN").unwrap_or_else(|_| "jq".to_string());
     let input = serde_json::to_vec(values).map_err(JqError::Serialize)?;
+    let parsed = run_filter_bytes(&input, filter)?;
+    match parsed {
+        Value::Array(items) => Ok(items),
+        _ => Err(JqError::OutputShape),
+    }
+}
+
+fn run_filter_value(value: &Value, filter: &str) -> Result<Value, JqError> {
+    let input = serde_json::to_vec(value).map_err(JqError::Serialize)?;
+    run_filter_bytes(&input, filter)
+}
+
+fn run_filter_bytes(input: &[u8], filter: &str) -> Result<Value, JqError> {
+    let jq_bin = std::env::var("DATAQ_JQ_BIN").unwrap_or_else(|_| "jq".to_string());
     let mut child = match Command::new(&jq_bin)
         .arg("-c")
         .arg(filter)
@@ -103,7 +360,7 @@ fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {
     };
 
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(&input).map_err(JqError::Stdin)?;
+        stdin.write_all(input).map_err(JqError::Stdin)?;
     } else {
         return Err(JqError::Execution(
             "jq stdin was not piped as expected".to_string(),
@@ -117,9 +374,5 @@ fn run_filter(values: &[Value], filter: &str) -> Result<Vec<Value>, JqError> {
         return Err(JqError::Execution(stderr.trim().to_string()));
     }
 
-    let parsed: Value = serde_json::from_slice(&output.stdout).map_err(JqError::Parse)?;
-    match parsed {
-        Value::Array(items) => Ok(items),
-        _ => Err(JqError::OutputShape),
-    }
+    serde_json::from_slice(&output.stdout).map_err(JqError::Parse)
 }

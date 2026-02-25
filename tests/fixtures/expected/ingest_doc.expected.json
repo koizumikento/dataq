@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "tags": [
+      "alpha",
+      "beta"
+    ],
+    "title": "Sample Document"
+  },
+  "headings": [
+    {
+      "level": 1,
+      "text": "Overview"
+    }
+  ],
+  "links": [
+    {
+      "url": "https://example.com/docs",
+      "title": "docs",
+      "text": "site"
+    }
+  ],
+  "tables": [
+    {
+      "caption": "Example Table"
+    }
+  ],
+  "code_blocks": [
+    {
+      "language": "rust",
+      "code": "fn main() { println!(\"ok\"); }"
+    }
+  ]
+}

@@ -17,11 +17,16 @@ fn help_is_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains("canon"))
+        .stdout(predicate::str::contains("ingest"))
         .stdout(predicate::str::contains("assert"))
+        .stdout(predicate::str::contains("gate"))
         .stdout(predicate::str::contains("sdiff"))
+        .stdout(predicate::str::contains("diff"))
         .stdout(predicate::str::contains("profile"))
+        .stdout(predicate::str::contains("scan"))
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("contract"))
+        .stdout(predicate::str::contains("emit"))
         .stdout(predicate::str::contains("mcp"));
 }
 

@@ -1,6 +1,6 @@
 # dataq
 
-`dataq` は、JSON / YAML / CSV を対象にした「決定的な前処理・検証・差分」CLIです。  
+`dataq` は、JSON / YAML / CSV とドキュメント入力を対象にした「決定的な前処理・検証・差分」CLIです。  
 AI処理そのものは行わず、エージェントやCIから呼びやすい機械可読I/Oを提供します。
 
 ## これは何か（3行要約）
@@ -20,7 +20,7 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 | 観点 | dataq | jq / yq / mlr |
 | --- | --- | --- |
 | 主目的 | よく使う複合パイプラインを契約化して再利用 | 抽出・変換・集計の表現力 |
-| 実行モデル | Rustオーケストレータ + 必要時 `jq/yq/mlr` 連携 | 各ツールのDSL/フィルタ実行 |
+| 実行モデル | Rustオーケストレータ + 必要時 `pandoc/jq/yq/mlr` 連携 | 各ツールのDSL/フィルタ実行 |
 | 出力契約 | 機械可読JSONを既定、スキーマ化しやすい | フィルタ次第で形式が変動 |
 | 終了コード契約 | `0/2/3/1` を意味付きで固定 | ツールごとに意味が異なる |
 | 決定性ガード | キー順・時刻正規化・差分順序などを固定 | フィルタ/オプション次第 |
@@ -42,13 +42,13 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 - `dataq`:
   同等の処理意図をサブコマンド化し、I/O形式・失敗JSON・終了コードを固定できる
 - 監査性:
-  `--emit-pipeline` で、内部処理ステップ・外部ツール使用有無・`stage_diagnostics`（段ごとの順序/件数/状態）に加えて、`fingerprint`（`args_hash` / `input_hash`(optional) / 使用ツール版数 / `dataq_version`）を機械可読で残せる
+  `--emit-pipeline` で、内部処理ステップ・外部ツール使用有無・`stage_diagnostics`（段ごとの順序/件数/バイト数/`duration_ms`(決定性保持のため常に`0`)/状態）に加えて、`fingerprint`（`args_hash` / `input_hash`(optional) / 使用ツール版数 / `dataq_version`）を機械可読で残せる
 
 ## 外部ツール多段連携の方針
 
 - `dataq` の一部コマンドは、内部的に複数ツールを段階実行することで価値を成立させます
 - これは「3ツールの代替」ではなく「3ツールの合わせ技を再利用可能な契約として固定する」ための設計です
-- 多段連携コマンドでは、`--emit-pipeline` で各段の利用ツール・ステップ順・件数変化・失敗段を追跡可能にします
+- 多段連携コマンドでは、`--emit-pipeline` で各段の利用ツール・ステップ順・件数/バイト数変化・`duration_ms`(決定性保持のため常に`0`)・失敗段を追跡可能にします
 
 ## コマンド一覧
 
@@ -63,20 +63,32 @@ dataq [--emit-pipeline] <command> [options]
 | Command | 用途 | 必須オプション |
 | --- | --- | --- |
 | `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>`（stdin時は省略可） |
+| `ingest api` | HTTP API 応答を `xh -> jq` で決定的JSONへ正規化 | `--url <http(s)://...>` |
+| `ingest yaml-jobs` | YAMLのCIジョブ定義を正規化JSON配列へ変換 | `--input <path|->` `--mode <github-actions|gitlab-ci|generic-map>` |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
+| `gate schema` | JSON Schema で品質ゲートを実行（`assert --schema` の専用ラッパー） | `--schema <path>` |
+| `gate policy` | ルールベース品質ゲートを実行（違反詳細を決定的順序で出力） | `--rules <path>` |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
+| `diff source` | 2ソース（preset/path）を解決して構造差分を出力 | `--left <preset-or-path>` `--right <preset-or-path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
+| `ingest doc` | ドキュメントを共通JSONスキーマへ抽出 | `--input <path|->` `--from <md|html|docx|rst|latex>` |
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
+| `scan text` | テキストを正規表現で走査し構造化結果を出力 | `--pattern <regex>` |
+| `transform rowset` | `jq -> mlr` の2段でrowsetを変換しJSON配列を出力 | `--input <path|->` `--jq-filter <filter>` `--mlr <verb...>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
-| `doctor` | 実行前診断（`jq`/`yq`/`mlr`） | なし |
+| `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
+| `recipe lock` | レシピ再現実行用のロック情報を生成 | `--file <path>` |
+| `recipe replay` | lock 制約を検証してレシピを再実行 | `--file <recipe-path>` `--lock <lock-path>` |
 | `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
+| `emit plan` | サブコマンドの静的実行計画（stage/dependency/tool）を出力 | `--command <name>` |
 | `mcp` | 1リクエスト単位の MCP(JSON-RPC 2.0) サーバーモード | stdin で JSON-RPC リクエストを1件入力 |
 
 グローバルオプション:
 
 - `--emit-pipeline`: stderr に pipeline JSON を1行追加出力（`fingerprint` を含む）
+  - `fingerprint.tool_versions` は実際に呼び出す外部ツール実体を対象に採取（`DATAQ_JQ_BIN` / `DATAQ_YQ_BIN` / `DATAQ_MLR_BIN` / `DATAQ_PANDOC_BIN` を尊重）
 - `-h, --help`: ヘルプ
 - `-V, --version`: バージョン
 
@@ -93,8 +105,21 @@ cat events.jsonl | dataq canon --to jsonl > out.jsonl
 # ルール検証
 dataq assert --input out.jsonl --rules rules.yaml
 
+# API応答を取得して正規化
+dataq ingest api --url https://example.test/items --header 'accept:application/json'
+
+# YAMLのCIジョブ定義を正規化
+dataq ingest yaml-jobs --input .github/workflows/ci.yml --mode github-actions > jobs.json
+dataq assert --input jobs.json --rules examples/assert-rules/github-actions/jobs.rules.yaml
+
 # JSON Schema 検証
 dataq assert --input out.jsonl --schema schema.json
+
+# schema 専用ゲート（assert --schema からの移行先）
+dataq gate schema --input out.jsonl --schema schema.json
+
+# policy 専用ゲート（rules 検証 + violation 出力）
+dataq gate policy --input out.jsonl --rules rules.json --source scan-text
 
 # 差分確認
 dataq sdiff --left before.jsonl --right after.jsonl
@@ -102,11 +127,20 @@ dataq sdiff --left before.jsonl --right after.jsonl
 # 品質プロファイル
 dataq profile --from json --input out.jsonl
 
+# ドキュメント抽出（pandoc AST -> jq 投影）
+dataq ingest doc --input README.md --from md
+
 # 内部結合（idキー）
 dataq join --left users.json --right scores.json --on id --how inner
 
 # グループ集計（team単位でprice平均）
 dataq aggregate --input orders.json --group-by team --metric avg --target price
+
+# テキスト走査（policy mode ではヒット時に終了コード2）
+dataq scan text --pattern 'TODO|FIXME' --path . --glob '*.rs' --policy-mode
+
+# rowset変換（stage1: jq, stage2: mlr）
+dataq transform rowset --input orders.json --jq-filter '.' --mlr stats1 -a mean -f price -g team
 
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
@@ -114,8 +148,20 @@ dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --polic
 # 依存ツール診断
 dataq doctor
 
+# 依存ツールの機能診断
+dataq doctor --capabilities
+
+# ワークフロー別プリフライト（例: scan）
+dataq doctor --profile scan
+
 # assert 出力契約を取得
 dataq contract --command assert
+
+# assert の静的ステージ計画を取得
+dataq emit plan --command assert --args '["--normalize","github-actions-jobs"]'
+
+# lock 制約付きでレシピを再実行（ミスマッチでも実行継続）
+dataq recipe replay --file recipe.json --lock recipe.lock.json
 
 # MCP単発リクエスト（tools/list）
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | dataq mcp
@@ -125,6 +171,12 @@ dataq sdiff --left before.jsonl --right after.jsonl --key '$["id"]' --ignore-pat
 
 # CIゲート: 差分があれば終了コード2、値差分詳細は先頭1件まで
 dataq sdiff --left before.jsonl --right after.jsonl --fail-on-diff --value-diff-cap 1
+
+# CI定義を preset 経由で正規化して差分比較
+dataq diff source \
+  --left 'preset:github-actions-jobs:.github/workflows/ci.yml' \
+  --right expected-jobs.json \
+  --fail-on-diff
 
 # JSON入力をそのままdataqで検証
 dataq assert --input raw.json --rules rules.yaml
@@ -267,6 +319,54 @@ dataq assert \
   --rules examples/assert-rules/github-actions/jobs.rules.yaml
 ```
 
+### 2.1 `gate schema`
+
+`assert --schema` と同じ JSON Schema 検証レポートを、schema gate 用コマンドとして明示化。
+
+- コマンド: `dataq gate schema --schema <path> [--input <path|->] [--from <preset>]`
+- 出力JSON: `assert --schema` と同一（`matched`, `mismatch_count`, `mismatches`）
+- 終了コード:
+  - `0`: すべて一致
+  - `2`: schema mismatch
+  - `3`: schema/input/`--from` の入力不正
+  - `1`: 予期しない内部エラー
+- `--from`（任意）:
+  - `github-actions-jobs`
+  - `gitlab-ci-jobs`
+  - 未対応 preset は明示的エラーで終了コード `3`
+- 移行ガイド:
+  - 旧: `dataq assert --schema schema.json --input in.json`
+  - 新: `dataq gate schema --schema schema.json --input in.json`
+
+### 2.2 `gate policy`
+
+ルールベース検証の結果を policy gate 用の固定出力として返す。
+
+- コマンド: `dataq gate policy --rules <path> [--input <path|->] [--source <preset>]`
+- 出力JSON: `matched`, `violations`, `details`
+- 終了コード:
+  - `0`: すべて一致
+  - `2`: policy violation を検出
+  - `3`: rules/input/source の入力不正
+  - `1`: 予期しない内部エラー
+- `--source`（任意）:
+  - `scan-text`
+  - `ingest-doc`
+  - `ingest-api`
+  - `ingest-notes`
+  - `ingest-book`
+
+### 2.3 `ingest yaml-jobs`
+
+YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決定的JSON配列へ変換します。
+
+- コマンド: `dataq ingest yaml-jobs --input <path|-> --mode <github-actions|gitlab-ci|generic-map>`
+- `--mode github-actions`: `job_id`, `runs_on`, `steps_count`, `uses_unpinned_action`
+- `--mode gitlab-ci`: `job_name`, `stage`, `script_count`, `uses_only_except`
+- `--mode generic-map`: `job_name`, `field_count`, `has_stage`, `has_script`
+- `--emit-pipeline` の `steps`: `ingest_yaml_jobs_yq_extract`, `ingest_yaml_jobs_jq_normalize`, `ingest_yaml_jobs_mlr_shape`
+- malformed YAML、未知 mode、`jq`/`yq`/`mlr` 不足は終了コード `3`
+
 ### 3. `sdiff`
 
 変換前後または2データセット間の構造差分を返す。
@@ -283,7 +383,18 @@ dataq assert \
 - `--ignore-path` 指定時、レポートに `ignored_paths` が出力される
 - `values.total` は実差分件数を維持し、上限超過時のみ `values.truncated=true`
 
-### 4. `profile`
+### 4. `diff source`
+
+異なる入力ソース（file または preset）を解決してから、`sdiff` と同じ差分レポートを返す。
+
+- `--left <preset-or-path>` / `--right <preset-or-path>`
+  - file: `path/to/input.json`
+  - preset: `preset:<github-actions-jobs|gitlab-ci-jobs>:<path>`
+- 出力は `sdiff` と同じ `counts` / `keys` / `ignored_paths` / `values` に加えて、`sources`（左右の解決メタデータ）を含む
+- `--fail-on-diff` 指定時は `values.total > 0` で終了コード `2`
+- `--emit-pipeline` の `steps`: `diff_source_resolve_left`, `diff_source_resolve_right`, `diff_source_compare`
+
+### 5. `profile`
 
 データ品質の概要を決定的な JSON で返す。
 
@@ -302,7 +413,7 @@ dataq assert \
 - `p50` / `p95` は nearest-rank 方式（`rank = ceil(p * n)`、`index = rank - 1`、0始まり配列で評価）
 - `numeric_stats` の浮動小数は小数点以下6桁へ丸め（`round half away from zero` 相当）
 
-### 5. `join`
+### 6. `join`
 
 2つの入力を結合キーで結合し、JSON配列で返す。
 
@@ -312,9 +423,9 @@ dataq assert \
 - `--how <inner|left>`: 結合方式
 - 入力レコードは object であること、および `--on` キーが全レコードに存在することが必須
 - 出力は JSON 配列固定（決定的順序）
-- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断を出力
+- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
-### 6. `aggregate`
+### 7. `aggregate`
 
 単一入力をグループ化して集計し、JSON配列で返す。
 
@@ -325,9 +436,46 @@ dataq assert \
 - `sum` / `avg` は `--target` が数値であることを要求
 - 入力レコードは object であること、および `group-by`/`target` キーが全レコードに存在することが必須
 - 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
-- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断を出力
+- 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
-### 7. `merge`
+### 8. `ingest doc`
+
+ドキュメント入力（Markdown/HTML/DOCX/reStructuredText/LaTeX）を、固定スキーマ JSON へ抽出します。
+
+- `--input <path|->`: 入力ファイルまたは stdin（`-`）
+- `--from <md|html|docx|rst|latex>`: 入力フォーマット
+- stage1: `pandoc -f <from> -t json` で AST 化
+- stage2: `jq` で `meta`, `headings`, `links`, `tables`, `code_blocks` へ投影
+- `pandoc` 不在・parse失敗・不正入力は終了コード `3`
+- `--emit-pipeline` 時のステップは `ingest_doc_pandoc_ast`, `ingest_doc_jq_project`
+  - `external_tools` は `pandoc` と `jq` を `used=true` で記録
+
+### 9. `scan text`
+
+決定的な順序でテキストを走査し、マッチを構造化JSONで返す。
+
+- `dataq scan text --pattern <regex> [--path <dir>] [--glob <glob>...] [--max-matches <n>]`
+- `--policy-mode` を有効にすると、1件以上ヒット時に終了コード `2`
+- `--jq-project` で任意の jq 投影ステージ（`scan_text_jq_project`）を有効化
+- 出力は `matches`（path/line/column順）と `summary`
+- `rg` が未インストール、または regex 不正時は終了コード `3`
+- `--emit-pipeline` ステップ:
+  - `scan_text_rg_execute`
+  - `scan_text_parse`
+  - `scan_text_jq_project`
+
+### 10. `transform rowset`
+
+固定2段 (`jq -> mlr`) で rowset を変換し、JSON配列で返す。
+
+- `--input <path|->`: 入力（`-` は stdin）
+- `--jq-filter <filter>`: stage1 の jq filter
+- `--mlr <verb...>`: stage2 の mlr 引数列
+- 出力は JSON 配列固定
+- `jq`/`mlr` 実行や filter/args 不正は終了コード `3`
+- `--emit-pipeline` では `transform_rowset_jq`, `transform_rowset_mlr` を stage 診断として出力
+
+### 11. `merge`
 
 複数の JSON/YAML 入力をポリシー指定で決定的にマージ。
 
@@ -340,19 +488,28 @@ dataq assert \
   - 解決順: 最長一致する `--policy-path` を優先し、同一深さの一致は後ろに指定した定義を優先。一致なしは `--policy` を適用
 - 出力は JSON 固定（キー順は決定的にソート）
 
-### 8. `doctor`
+### 12. `doctor`
 
-実行環境で `jq` / `yq` / `mlr` が利用可能かを、固定順 (`jq`, `yq`, `mlr`) で診断。
+実行環境の依存を診断。`--capabilities` と `--profile` に対応。
 
 - 出力は JSON 固定（stdout）
 - 各ツールの診断項目: `name`, `found`, `version`, `executable`, `message`
+- `--capabilities` 指定時:
+  - `capabilities`（固定順）を追加: `jq.null_input_eval`, `yq.null_input_eval`, `mlr.help_command`
+  - 項目: `name`, `tool`, `available`, `message`
+- `--profile <core|ci-jobs|doc|api|notes|book|scan>` 指定時:
+  - `capabilities`（固定順の `*.available` probe）を追加
+  - `profile`（`version`, `name`, `description`, `satisfied`, `requirements`）を追加
+  - `version` は `dataq.doctor.profile.requirements.v1` で固定
 - 終了コード:
-  - `0`: 3ツールすべて起動可能
-  - `3`: 1つ以上が欠如または起動不可
+  - `0`: `--profile` 未指定時は `jq|yq|mlr` が全て起動可能、`--profile` 指定時は選択 profile 要件を充足
+  - `3`: `--profile` 未指定時は `jq|yq|mlr` のいずれかが欠如または起動不可、`--profile` 指定時は選択 profile 要件未達
   - `1`: 予期しない内部エラー
-- `--emit-pipeline` 指定時は stderr に診断ステップ (`doctor_probe_jq`, `doctor_probe_yq`, `doctor_probe_mlr`) を追加出力
+- `--emit-pipeline` 指定時の stderr ステップ:
+  - `--profile` 未指定: `doctor_probe_tools`, `doctor_probe_capabilities`
+  - `--profile` 指定: `doctor_profile_probe`, `doctor_profile_evaluate`
 
-### 9. `recipe run`
+### 13. `recipe run`
 
 レシピファイル（YAML/JSON）を読み込み、`steps` を定義順で実行します。
 
@@ -383,19 +540,77 @@ steps:
             type: integer
 ```
 
-### 8. `contract`
+### 14. `recipe lock`
+
+レシピファイル（YAML/JSON）から、再現実行のためのロック情報を生成します。
+
+- 実行コマンド: `dataq recipe lock --file <path> [--out <lock-path>]`
+- 出力:
+  - `--out` なし: stdout に lock JSON
+  - `--out` あり: lock JSON を指定ファイルへ書き出し（stdout は空）
+- lock JSON:
+  - `version`: `dataq.recipe.lock.v1`
+  - `command_graph_hash`
+  - `args_hash`
+  - `tool_versions`（使用ツールのみ。キーはツール名の辞書順: `jq`/`mlr`/`yq`）
+  - `dataq_version`
+- 異常時契約:
+  - レシピ不正 / step引数不正 / ツール解決失敗は exit `3`
+- `--emit-pipeline` 有効時は `recipe_lock_parse`, `recipe_lock_probe_tools`, `recipe_lock_fingerprint` を stderr JSON へ出力
+
+### 15. `recipe replay`
+
+lock ファイルを検証したうえで `recipe run` と同じレシピ実行を行います。
+
+- 実行コマンド: `dataq recipe replay --file <recipe-path> --lock <lock-path> [--strict]`
+- lock 制約は固定順で検証:
+  - `lock.version`
+  - `lock.command_graph_hash`
+  - `lock.args_hash`
+  - `lock.dataq_version`
+  - `lock.tool_versions.<tool>`
+- stdout は実行サマリ JSON（`matched`, `exit_code`, `lock_check`, `steps`）を返す
+- `--strict` 指定時:
+  - lock mismatch は exit `2`（validation mismatch、実行はスキップ）
+- 非 strict 時:
+  - lock mismatch を `lock_check.mismatches` に報告しつつ実行継続
+  - 実行された step の検証不一致は従来どおり exit `2`
+- `--emit-pipeline` 有効時は `recipe_replay_parse`, `recipe_replay_verify_lock`, `recipe_replay_execute` を stderr JSON へ出力
+
+### 16. `contract`
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|assert|sdiff|profile|merge|doctor|recipe>`
+- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|scan|transform-rowset|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
+  - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-  - 順序: `canon`, `assert`, `sdiff`, `profile`, `merge`, `doctor`, `recipe`
+- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `transform-rowset`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
 
-### 10. `mcp`
+### 17. `emit plan`
+
+サブコマンドの静的実行計画を、実行せずに機械可読JSONで取得します（read-only）。
+
+- 実行コマンド:
+  - `dataq emit plan --command <subcommand> [--args <json-array>]`
+- 出力キー:
+  - `command`: 対象サブコマンド
+  - `args`: 解決に使った引数配列
+  - `stages`: `order`, `step`, `tool`, `depends_on` を含む段情報
+  - `tools`: `jq|yq|mlr` の期待利用有無（`expected`）
+- `--args` は JSON 文字列で渡す（例: `'["--normalize","github-actions-jobs"]'`）
+- 終了コード:
+  - `0`: 計画生成成功
+  - `3`: 未対応サブコマンドまたは `--args` 形式不正
+  - `1`: 予期しない内部エラー
+- `emit plan` と `--emit-pipeline` の違い:
+  - `emit plan`: 実行前の静的計画（外部ツール実行なし）
+  - `--emit-pipeline`: 実行時に観測した診断（stderr）
+
+### 18. `mcp`
 
 MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理します。
 
@@ -409,15 +624,26 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `tools/call`
 - `tools/list` のツール順序は固定:
   - `dataq.canon`
+  - `dataq.ingest.api`
+  - `dataq.ingest.yaml_jobs`
   - `dataq.assert`
+  - `dataq.gate.schema`
+  - `dataq.gate.policy`
   - `dataq.sdiff`
+  - `dataq.diff.source`
   - `dataq.profile`
+  - `dataq.ingest.doc`
   - `dataq.join`
   - `dataq.aggregate`
+  - `dataq.scan.text`
+  - `dataq.transform.rowset`
   - `dataq.merge`
   - `dataq.doctor`
   - `dataq.contract`
+  - `dataq.emit.plan`
   - `dataq.recipe.run`
+  - `dataq.recipe.lock`
+  - `dataq.recipe.replay`
 - `tools/call` レスポンス:
   - `structuredContent.exit_code`
   - `structuredContent.payload`
