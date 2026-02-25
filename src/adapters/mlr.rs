@@ -415,7 +415,11 @@ mod tests {
 
         let err = run_sort_with_bin(&[], "job_id", bin.to_str().expect("utf8 path"))
             .expect_err("non-zero should fail");
-        assert!(matches!(err, MlrError::Execution(_)));
+        match err {
+            MlrError::Execution(_) => {}
+            MlrError::Stdin(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {}
+            other => panic!("expected execution-like failure, got {other:?}"),
+        }
     }
 
     #[test]

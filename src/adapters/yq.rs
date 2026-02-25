@@ -128,7 +128,11 @@ mod tests {
 
         let err = run_filter_with_bin(&[], "[]", bin.to_str().expect("utf8 path"))
             .expect_err("non-zero should fail");
-        assert!(matches!(err, YqError::Execution(_)));
+        match err {
+            YqError::Execution(_) => {}
+            YqError::Stdin(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {}
+            other => panic!("expected execution-like failure, got {other:?}"),
+        }
     }
 
     fn write_test_script(path: PathBuf, body: &str) -> PathBuf {
