@@ -360,7 +360,11 @@ fn run_filter_bytes(input: &[u8], filter: &str) -> Result<Value, JqError> {
     };
 
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(input).map_err(JqError::Stdin)?;
+        if let Err(err) = stdin.write_all(input) {
+            if err.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(JqError::Stdin(err));
+            }
+        }
     } else {
         return Err(JqError::Execution(
             "jq stdin was not piped as expected".to_string(),
