@@ -406,7 +406,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let bin = write_test_script(
             dir.path().join("fake-mlr"),
-            "echo 'mlr failed in test' 1>&2\nexit 7",
+            "cat >/dev/null\necho 'mlr failed in test' 1>&2\nexit 7",
         );
 
         let err = run_sort_with_bin(&[], "job_id", bin.to_str().expect("utf8 path"))
@@ -429,6 +429,7 @@ if [ -z "$found_join" ] || [ -z "$found_j" ] || [ -z "$found_f" ]; then
   echo 'missing join args' 1>&2
   exit 9
 fi
+cat >/dev/null
 printf '[{"id":1}]'
 "#,
         );
@@ -512,7 +513,8 @@ printf '[{"id":1,"left_marker":"L","right_marker":"R"}]'
         let dir = tempfile::tempdir().expect("tempdir");
         let bin = write_test_script(
             dir.path().join("fake-mlr"),
-            r#"printf '[{"region":"apac","price_mean":"12.5"}]'"#,
+            r#"cat >/dev/null
+printf '[{"region":"apac","price_mean":"12.5"}]'"#,
         );
 
         let rows = aggregate_rows_with_bin(
