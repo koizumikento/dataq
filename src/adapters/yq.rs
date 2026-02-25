@@ -66,7 +66,11 @@ fn run_filter_with_bin(values: &[Value], filter: &str, bin: &str) -> Result<Vec<
     };
 
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(&input).map_err(YqError::Stdin)?;
+        if let Err(err) = stdin.write_all(&input) {
+            if err.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(YqError::Stdin(err));
+            }
+        }
     } else {
         return Err(YqError::Execution(
             "yq stdin was not piped as expected".to_string(),

@@ -203,7 +203,11 @@ fn run_mlr_with_stdin_values(
     let mut child = spawn_mlr(bin, args)?;
 
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(&input).map_err(MlrError::Stdin)?;
+        if let Err(err) = stdin.write_all(&input) {
+            if err.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(MlrError::Stdin(err));
+            }
+        }
     } else {
         return Err(MlrError::Execution(
             "mlr stdin was not piped as expected".to_string(),
