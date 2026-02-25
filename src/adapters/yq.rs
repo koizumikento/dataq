@@ -136,14 +136,16 @@ mod tests {
     }
 
     fn write_test_script(path: PathBuf, body: &str) -> PathBuf {
+        let tmp_path = path.with_extension("tmp");
         let script = format!("#!/bin/sh\n{body}\n");
-        fs::write(&path, script).expect("write script");
+        fs::write(&tmp_path, script).expect("write script");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let permissions = fs::Permissions::from_mode(0o755);
-            fs::set_permissions(&path, permissions).expect("chmod");
+            fs::set_permissions(&tmp_path, permissions).expect("chmod");
         }
+        fs::rename(&tmp_path, &path).expect("rename script");
         path
     }
 }
