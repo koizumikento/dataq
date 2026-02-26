@@ -507,3 +507,156 @@ pub fn resolve_verify_mdbook_meta() -> bool {
         Err(_) => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn notes_and_book_trace_mark_tool_used_deduplicates_entries() {
+        let mut notes_trace = IngestNotesPipelineTrace::default();
+        notes_trace.mark_tool_used("jq");
+        notes_trace.mark_tool_used("jq");
+        notes_trace.mark_tool_used("nb");
+        assert_eq!(
+            notes_trace.used_tools,
+            vec!["jq".to_string(), "nb".to_string()]
+        );
+
+        let mut book_trace = IngestBookPipelineTrace::default();
+        book_trace.mark_tool_used("jq");
+        book_trace.mark_tool_used("jq");
+        assert_eq!(book_trace.used_tools, vec!["jq".to_string()]);
+    }
+
+    #[test]
+    fn run_notes_rejects_empty_tag_values_before_running_tools() {
+        let args = IngestNotesCommandArgs {
+            tags: vec!["  ".to_string()],
+            since: None,
+            until: None,
+        };
+
+        let (response, trace) = run_notes_with_trace(&args);
+        assert_eq!(response.exit_code, 3);
+        assert_eq!(response.payload["error"], json!("input_usage_error"));
+        assert_eq!(
+            response.payload["message"],
+            json!("`--tag` values cannot be empty")
+        );
+        assert!(trace.used_tools.is_empty());
+        assert!(trace.stage_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn run_book_with_missing_root_returns_input_usage_error() {
+        let args = IngestBookCommandArgs {
+            root: PathBuf::from("/definitely-missing/dataq-book-root"),
+            include_files: false,
+            verify_mdbook_meta: false,
+        };
+
+        let (response, trace) = run_book_with_trace(&args);
+        assert_eq!(response.exit_code, 3);
+        assert_eq!(response.payload["error"], json!("input_usage_error"));
+        assert!(trace.used_tools.is_empty());
+    }
+
+    #[test]
+    fn load_input_bytes_reads_stdin_and_file_sources() {
+        let stdin_args = IngestDocCommandArgs {
+            input: None,
+            from: IngestDocInputFormat::Md,
+        };
+        let stdin_bytes =
+            load_input_bytes(&stdin_args, Cursor::new(b"stdin-input")).expect("read stdin input");
+        assert_eq!(stdin_bytes, b"stdin-input");
+
+        let temp = tempdir().expect("tempdir");
+        let input_path = temp.path().join("doc.md");
+        fs::write(&input_path, b"# Title\n").expect("write file");
+        let file_args = IngestDocCommandArgs {
+            input: Some(input_path),
+            from: IngestDocInputFormat::Md,
+        };
+        let file_bytes =
+            load_input_bytes(&file_args, Cursor::new(Vec::<u8>::new())).expect("read file input");
+        assert_eq!(file_bytes, b"# Title\n");
+    }
+
+    #[test]
+    fn load_input_bytes_reports_missing_file_as_input_error() {
+        let args = IngestDocCommandArgs {
+            input: Some(PathBuf::from("/definitely-missing/dataq-ingest-input.md")),
+            from: IngestDocInputFormat::Md,
+        };
+
+        let error = load_input_bytes(&args, Cursor::new(Vec::<u8>::new()))
+            .expect_err("missing input file should error");
+        assert!(matches!(error, IngestDocError::Input(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to open input file `/definitely-missing/dataq-ingest-input.md`")
+        );
+    }
+
+    #[test]
+    fn run_with_stdin_maps_input_errors_to_command_contract() {
+        let args = IngestDocCommandArgs {
+            input: Some(PathBuf::from("/definitely-missing/dataq-ingest-doc.md")),
+            from: IngestDocInputFormat::Md,
+        };
+
+        let response = run_with_stdin(&args, Cursor::new(Vec::<u8>::new()));
+        assert_eq!(response.exit_code, 3);
+        assert_eq!(response.payload["error"], json!("input_usage_error"));
+    }
+
+    #[test]
+    fn map_error_returns_input_usage_shape() {
+        let response = map_error(IngestDocError::MissingPandoc);
+        assert_eq!(response.exit_code, 3);
+        assert_eq!(response.payload["error"], json!("input_usage_error"));
+        assert_eq!(
+            response.payload["message"],
+            json!("ingest doc requires `pandoc` in PATH")
+        );
+    }
+
+    #[test]
+    fn pipeline_metadata_helpers_are_stable() {
+        assert_eq!(
+            notes_pipeline_steps(),
+            vec![
+                "ingest_notes_nb_export".to_string(),
+                "ingest_notes_jq_normalize".to_string()
+            ]
+        );
+        assert!(
+            notes_deterministic_guards()
+                .iter()
+                .any(|guard| guard == "ingest_notes_timestamps_normalized_to_utc")
+        );
+        assert_eq!(
+            pipeline_steps_book(),
+            vec![
+                "ingest_book_summary_parse".to_string(),
+                "ingest_book_mdbook_meta".to_string(),
+                "ingest_book_jq_project".to_string()
+            ]
+        );
+        assert!(
+            deterministic_guards_book()
+                .iter()
+                .any(|guard| guard == "optional_mdbook_metadata_verification_stage")
+        );
+    }
+}

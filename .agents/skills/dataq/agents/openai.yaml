@@ -1,0 +1,7 @@
+interface:
+  display_name: "dataq Workflow"
+  short_description: "Deterministic dataq command selection and diagnostics"
+  default_prompt: "Use $dataq to select and run deterministic dataq commands with stable JSON outputs, strict exit-code handling, and --emit-pipeline diagnostics when needed."
+
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,8 @@
+{
+  "name": "dataq",
+  "version": "0.1.12",
+  "description": "Deterministic data preprocessing workflows for the dataq CLI.",
+  "author": {
+    "name": "dataq maintainers"
+  }
+}

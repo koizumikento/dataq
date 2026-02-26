@@ -2,6 +2,8 @@
 mod assert_cli;
 #[path = "cli/canon_cli.rs"]
 mod canon_cli;
+#[path = "cli/codex_cli.rs"]
+mod codex_cli;
 #[path = "cli/diff_source_cli.rs"]
 mod diff_source_cli;
 #[path = "cli/doctor_cli.rs"]

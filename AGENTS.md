@@ -126,6 +126,7 @@ Run these before finishing meaningful code changes:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-regions 75
 ```
 
 If the workspace is not initialized yet, initialize first, then run the same gates.

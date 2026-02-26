@@ -1,0 +1,7 @@
+interface:
+  display_name: "dataq Rules + Recipes"
+  short_description: "Author deterministic rules and recipes"
+  default_prompt: "Use $dataq-rules-recipes to create or refine dataq assert rules and recipe files with deterministic validation and replay checks."
+
+policy:
+  allow_implicit_invocation: false

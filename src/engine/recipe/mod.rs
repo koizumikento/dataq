@@ -1174,3 +1174,387 @@ fn status_label(code: Option<i32>) -> String {
 const fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use serde_json::{Map, Value, json};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn args_map(value: Value) -> Map<String, Value> {
+        value.as_object().cloned().expect("args object")
+    }
+
+    fn step(kind: &str, args: Value) -> RecipeStep {
+        RecipeStep {
+            kind: kind.to_string(),
+            args: args_map(args),
+        }
+    }
+
+    fn recipe_with_steps(steps: Vec<RecipeStep>) -> RecipeFile {
+        RecipeFile {
+            version: RECIPE_VERSION.to_string(),
+            steps,
+        }
+    }
+
+    fn assert_input_usage_contains(error: RecipeExecutionErrorKind, expected: &str) {
+        match error {
+            RecipeExecutionErrorKind::InputUsage(message) => {
+                assert!(
+                    message.contains(expected),
+                    "expected message to contain `{expected}`, got `{message}`"
+                );
+            }
+            RecipeExecutionErrorKind::Internal(message) => {
+                panic!("expected input usage error, got internal: {message}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, body).expect("write script");
+        let mut permissions = fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("set permissions");
+    }
+
+    #[test]
+    fn parse_loaded_recipe_rejects_version_mismatch() {
+        let error = parse_loaded_recipe(json!({
+            "version": "dataq.recipe.v0",
+            "steps": []
+        }))
+        .expect_err("version mismatch must fail");
+        assert_input_usage_contains(error, "recipe version must be `dataq.recipe.v1`");
+    }
+
+    #[test]
+    fn load_recipe_value_rejects_non_json_yaml_extension() {
+        let temp = tempdir().expect("tempdir");
+        let recipe_path = temp.path().join("recipe.txt");
+        fs::write(
+            &recipe_path,
+            b"{\"version\":\"dataq.recipe.v1\",\"steps\":[]}",
+        )
+        .expect("write recipe");
+
+        let error = load_recipe_value(recipe_path.as_path()).expect_err("txt extension must fail");
+        assert_input_usage_contains(error, "failed to resolve recipe format from");
+    }
+
+    #[test]
+    fn read_single_value_requires_exactly_one_document() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("values.json");
+        fs::write(&path, b"[1,2]").expect("write values");
+
+        let error =
+            read_single_value_from_path(path.as_path(), "recipe.file").expect_err("must fail");
+        assert_input_usage_contains(error, "`recipe.file` must contain exactly one document");
+    }
+
+    #[test]
+    fn ordered_lock_tool_names_keeps_known_order_and_appends_custom_tools() {
+        let lock = RecipeLockFile {
+            version: RECIPE_LOCK_VERSION.to_string(),
+            command_graph_hash: "a".to_string(),
+            args_hash: "b".to_string(),
+            tool_versions: BTreeMap::from([("custom".to_string(), "1.0.0".to_string())]),
+            dataq_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        assert_eq!(
+            ordered_lock_tool_names(&lock),
+            vec![
+                "jq".to_string(),
+                "mlr".to_string(),
+                "yq".to_string(),
+                "custom".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn lock_probe_failure_values_are_human_readable() {
+        assert_eq!(
+            lock_probe_failure_as_replay_value(RecipeExecutionErrorKind::InputUsage(
+                "missing tool".to_string()
+            )),
+            "error: missing tool"
+        );
+        assert_eq!(
+            lock_probe_failure_as_replay_value(RecipeExecutionErrorKind::Internal(
+                "boom".to_string()
+            )),
+            "error: boom"
+        );
+    }
+
+    #[test]
+    fn validate_recipe_lock_steps_requires_prior_values_for_assert() {
+        let recipe = recipe_with_steps(vec![step("assert", json!({"schema": true}))]);
+        let error = validate_recipe_lock_steps(&recipe).expect_err("assert without prior");
+        assert_input_usage_contains(error, ASSERT_REQUIRES_PRIOR_VALUES);
+    }
+
+    #[test]
+    fn validate_recipe_lock_steps_rejects_unknown_step_kind() {
+        let recipe = recipe_with_steps(vec![step("mystery", json!({}))]);
+        let error = validate_recipe_lock_steps(&recipe).expect_err("unknown step kind");
+        assert_input_usage_contains(error, "unknown recipe step kind `mystery`");
+    }
+
+    #[test]
+    fn execute_recipe_steps_runs_all_supported_step_kinds() {
+        let temp = tempdir().expect("tempdir");
+        let left_path = temp.path().join("left.json");
+        let right_path = temp.path().join("right.json");
+        fs::write(&left_path, b"[{\"id\":\"1\",\"name\":\"A\"}]").expect("write left");
+        fs::write(&right_path, b"[{\"id\":1,\"name\":\"A\"}]").expect("write right");
+
+        let recipe = recipe_with_steps(vec![
+            step(
+                "canon",
+                json!({
+                    "input": "left.json",
+                    "from": "json",
+                    "sort_keys": true,
+                    "normalize_time": false
+                }),
+            ),
+            step("assert", json!({"schema": true})),
+            step("profile", json!({})),
+            step(
+                "sdiff",
+                json!({
+                    "right": "right.json",
+                    "right_from": "json",
+                    "key": "$[\"id\"]"
+                }),
+            ),
+        ]);
+
+        let report =
+            execute_recipe_steps(recipe, temp.path(), None).expect("execute all recipe steps");
+        assert!(report.matched);
+        assert_eq!(report.exit_code, 0);
+        assert_eq!(report.steps.len(), 4);
+        assert!(report.steps.iter().all(|step| step.matched));
+    }
+
+    #[test]
+    fn execute_recipe_steps_stops_after_first_mismatch() {
+        let temp = tempdir().expect("tempdir");
+        let input_path = temp.path().join("input.json");
+        fs::write(&input_path, b"[{\"id\":1}]").expect("write input");
+
+        let recipe = recipe_with_steps(vec![
+            step(
+                "canon",
+                json!({
+                    "input": "input.json",
+                    "from": "json"
+                }),
+            ),
+            step("assert", json!({"schema": false})),
+            step("profile", json!({})),
+        ]);
+
+        let report =
+            execute_recipe_steps(recipe, temp.path(), None).expect("execute mismatching recipe");
+        assert!(!report.matched);
+        assert_eq!(report.exit_code, 2);
+        assert_eq!(report.steps.len(), 2);
+        assert_eq!(report.steps[1].kind, "assert");
+        assert!(!report.steps[1].matched);
+    }
+
+    #[test]
+    fn run_from_value_records_pipeline_steps() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join("input.json"), b"[{\"value\":\"1\"}]").expect("write input");
+        let recipe_value = json!({
+            "version": RECIPE_VERSION,
+            "steps": [
+                {
+                    "kind": "canon",
+                    "args": {
+                        "input": "input.json",
+                        "from": "json"
+                    }
+                }
+            ]
+        });
+
+        let execution = run_from_value(recipe_value, Some(temp.path())).expect("run inline recipe");
+        assert!(execution.report.matched);
+        assert_eq!(
+            execution.pipeline_steps,
+            vec![
+                "load_recipe_inline".to_string(),
+                "validate_recipe_schema".to_string(),
+                "execute_step_0_canon".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn replay_strict_returns_exit_two_when_lock_mismatches() {
+        let temp = tempdir().expect("tempdir");
+        let recipe_path = temp.path().join("recipe.json");
+        let lock_path = temp.path().join("recipe.lock.json");
+        fs::write(
+            &recipe_path,
+            serde_json::to_vec(&json!({
+                "version": RECIPE_VERSION,
+                "steps": []
+            }))
+            .expect("serialize recipe"),
+        )
+        .expect("write recipe");
+        fs::write(
+            &lock_path,
+            serde_json::to_vec(&json!({
+                "version": "wrong",
+                "command_graph_hash": "x",
+                "args_hash": "y",
+                "tool_versions": {},
+                "dataq_version": "0.0.0"
+            }))
+            .expect("serialize lock"),
+        )
+        .expect("write lock");
+
+        let replay_report = replay(recipe_path.as_path(), lock_path.as_path(), true)
+            .expect("strict replay should return deterministic mismatch report");
+        assert!(!replay_report.report.matched);
+        assert_eq!(replay_report.report.exit_code, 2);
+        assert!(replay_report.report.steps.is_empty());
+        assert_eq!(
+            replay_report.pipeline_steps,
+            vec![
+                "recipe_replay_parse".to_string(),
+                "recipe_replay_verify_lock".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn verify_lock_constraints_can_match_with_actual_probed_values() {
+        let recipe = recipe_with_steps(Vec::new());
+        let mut lock = RecipeLockFile {
+            version: RECIPE_LOCK_VERSION.to_string(),
+            command_graph_hash: hash_recipe_command_graph(&recipe),
+            args_hash: hash_recipe_args(&recipe).expect("args hash"),
+            tool_versions: BTreeMap::new(),
+            dataq_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        lock.tool_versions = collect_actual_tool_versions(&lock);
+
+        let report =
+            verify_lock_constraints(&recipe, &lock, false).expect("verify lock constraints");
+        assert!(report.matched);
+        assert_eq!(report.mismatch_count, 0);
+        assert!(report.mismatches.is_empty());
+    }
+
+    #[test]
+    fn resolve_step_input_format_prefers_explicit_and_reports_invalid() {
+        assert_eq!(
+            resolve_step_input_format(None, Path::new("input.json"), "canon.args.input")
+                .expect("infer json format"),
+            Format::Json
+        );
+        assert_eq!(
+            resolve_step_input_format(Some("yaml"), Path::new("input.json"), "canon.args.input")
+                .expect("explicit yaml"),
+            Format::Yaml
+        );
+
+        let error = resolve_step_input_format(
+            Some("unsupported"),
+            Path::new("input.json"),
+            "canon.args.input",
+        )
+        .expect_err("unsupported explicit format");
+        assert_input_usage_contains(error, "invalid format `unsupported` for `canon.args.input`");
+    }
+
+    #[test]
+    fn helper_functions_cover_path_resolution_and_labels() {
+        assert_eq!(
+            resolve_recipe_path(Path::new("/tmp/base"), Path::new("data.json")),
+            PathBuf::from("/tmp/base/data.json")
+        );
+        assert_eq!(
+            resolve_recipe_path(Path::new("/tmp/base"), Path::new("/tmp/abs.json")),
+            PathBuf::from("/tmp/abs.json")
+        );
+        assert_eq!(status_label(Some(9)), "9");
+        assert_eq!(status_label(None), "terminated by signal");
+        assert_eq!(first_non_empty_line(b"\n\n  \nversion"), Some("version"));
+        assert!(first_non_empty_line(&[0xff, 0x00]).is_none());
+        assert!(default_true());
+    }
+
+    #[test]
+    fn map_assert_error_preserves_input_usage_and_internal_kinds() {
+        assert!(matches!(
+            map_assert_error(AssertValidationError::InputUsage("invalid".to_string())),
+            RecipeExecutionErrorKind::InputUsage(_)
+        ));
+        assert!(matches!(
+            map_assert_error(AssertValidationError::Internal("boom".to_string())),
+            RecipeExecutionErrorKind::Internal(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_recipe_lock_tool_version_handles_empty_output() {
+        let temp = tempdir().expect("tempdir");
+        let script_path = temp.path().join("tool-empty");
+        write_executable_script(&script_path, "#!/bin/sh\nexit 0\n");
+        let tool_name = script_path.to_string_lossy().into_owned();
+
+        let error = probe_recipe_lock_tool_version(&tool_name).expect_err("empty output");
+        assert_input_usage_contains(error, "empty `--version` output");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_recipe_lock_tool_version_uses_first_non_empty_line_from_stderr() {
+        let temp = tempdir().expect("tempdir");
+        let script_path = temp.path().join("tool-stderr");
+        write_executable_script(
+            &script_path,
+            "#!/bin/sh\necho \"   \"\necho \"tool 1.2.3\" 1>&2\nexit 0\n",
+        );
+        let tool_name = script_path.to_string_lossy().into_owned();
+
+        let version = probe_recipe_lock_tool_version(&tool_name).expect("version");
+        assert_eq!(version, "tool 1.2.3");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_recipe_lock_tool_version_reports_non_zero_status() {
+        let temp = tempdir().expect("tempdir");
+        let script_path = temp.path().join("tool-fail");
+        write_executable_script(&script_path, "#!/bin/sh\nexit 5\n");
+        let tool_name = script_path.to_string_lossy().into_owned();
+
+        let error = probe_recipe_lock_tool_version(&tool_name).expect_err("status failure");
+        assert_input_usage_contains(error, "`--version` exited with 5");
+    }
+}

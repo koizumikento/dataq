@@ -101,6 +101,7 @@ dataq [--emit-pipeline] <command> [options]
 | `recipe replay` | lock 制約を検証してレシピを再実行 | `--file <recipe-path>` `--lock <lock-path>` |
 | `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
 | `emit plan` | サブコマンドの静的実行計画（stage/dependency/tool）を出力 | `--command <name>` |
+| `codex install-skill` | 埋め込み済み dataq skill を Codex skills root に配置 | `--dest <dir>`（省略時は `CODEX_HOME/skills` → `HOME/.codex/skills`） |
 | `mcp` | 1リクエスト単位の MCP(JSON-RPC 2.0) サーバーモード | stdin で JSON-RPC リクエストを1件入力 |
 
 グローバルオプション:
@@ -178,6 +179,9 @@ dataq contract --command assert
 # assert の静的ステージ計画を取得
 dataq emit plan --command assert --args '["--normalize","github-actions-jobs"]'
 
+# dataq skill を Codex skills root へ配置
+dataq codex install-skill
+
 # lock 制約付きでレシピを再実行（ミスマッチでも実行継続）
 dataq recipe replay --file recipe.json --lock recipe.lock.json
 
@@ -219,18 +223,40 @@ brew install koizumikento/stray-tools/dataq
 
 詳細な設定手順は `docs/homebrew-tap.md` を参照してください。
 
+#### Claude Code plugin
+
+このリポジトリは Claude Code plugin 構成も含みます。
+
+- plugin manifest: `.claude-plugin/plugin.json`
+- skills:
+  - `skills/dataq/SKILL.md`
+  - `skills/dataq-rules-recipes/SKILL.md`
+
+ローカルで plugin として読み込む例:
+
+```bash
+claude --plugin-dir .
+```
+
+plugin 定義の検証:
+
+```bash
+claude plugin validate .
+```
+
 ### 開発（ローカル検証）
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-regions 75
 ```
 
 ### Release
 
 - `v*` タグ（例: `v0.1.0`, `v0.1.0-rc.1`）を push すると、GitHub Actions の Release workflow が起動します
-- workflow は `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features` を通過した場合のみ公開処理へ進みます
+- workflow は `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`、`cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-regions 75` を通過した場合のみ公開処理へ進みます
 - 配布ターゲットは次の4種類です:
   - `x86_64-unknown-linux-gnu`
   - `x86_64-pc-windows-msvc`
@@ -689,6 +715,32 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
 - `mcp` モードのプロセス終了コード:
   - レスポンスを書き出せた場合は、ツール実行結果に関係なく `0`
   - レスポンス出力不能な致命的I/O時のみ `3`
+
+### 19. `codex install-skill`
+
+Codex で再利用できる dataq skill を、CLIに埋め込まれた固定資産からインストールします。
+
+- 実行コマンド: `dataq codex install-skill [--dest <dir>] [--force]`
+- 配置先ルート解決:
+  - `--dest <dir>` 指定時: `<dir>`
+  - 未指定時: `CODEX_HOME/skills`
+  - `CODEX_HOME` 未設定時: `HOME/.codex/skills`
+- 最終配置先: `<root>/dataq`
+- コピー対象（固定）:
+  - `SKILL.md`
+  - `agents/openai.yaml`
+- 成功時は stdout JSON:
+  - `schema`: `dataq.codex.install_skill.output.v1`
+  - `skill_name`: `dataq`
+  - `destination`: 配置先ディレクトリ
+  - `copied_files`: 相対パス配列（固定順）
+  - `overwrite`: `--force` 指定有無
+- 既存ディレクトリがある場合:
+  - `--force` なし: 終了コード `3`
+  - `--force` あり: 上書き再配置
+- `--emit-pipeline`:
+  - `steps`: `resolve_codex_skill_root`, `prepare_codex_skill_destination`, `write_embedded_codex_skill_files`, `emit_codex_install_skill_output`
+  - `deterministic_guards`: `rust_native_fs_execution`, `compile_time_embedded_skill_assets`, `fixed_embedded_asset_write_order`
 
 ## 設計ドキュメント
 

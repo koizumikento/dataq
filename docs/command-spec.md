@@ -31,6 +31,7 @@ dataq [--emit-pipeline] <command> [options]
 - `recipe replay`: lock 制約を検証してレシピを再実行
 - `contract`: サブコマンド出力契約を機械可読JSONで取得
 - `emit plan`: サブコマンドの静的実行計画（stage/dependency/tool）を取得
+- `codex install-skill`: 埋め込み済み dataq skill を Codex skill root へコピー
 - `mcp`: MCP(JSON-RPC 2.0) 単発リクエストを処理
 
 ## `contract` 出力契約（MVP）
@@ -76,6 +77,37 @@ dataq [--emit-pipeline] <command> [options]
 - `--emit-pipeline` との違い:
   - `emit plan`: 実行前の静的計画
   - `--emit-pipeline`: 実行時に観測された診断
+
+## `codex install-skill` 出力契約（MVP）
+
+- コマンド:
+  - `dataq codex install-skill [--dest <dir>] [--force]`
+- 目的:
+  - リポジトリに同梱した dataq skill 資産を Codex の skill 配置先へインストールする
+- コピー元（コンパイル時埋め込み）:
+  - `.agents/skills/dataq/SKILL.md`
+  - `.agents/skills/dataq/agents/openai.yaml`
+- 配置先ルート解決:
+  - `--dest <dir>` 指定時: `<dir>` を直接ルートとして使用
+  - 未指定時: `CODEX_HOME/skills`（`CODEX_HOME` が設定されている場合）
+  - 上記が未設定時: `HOME/.codex/skills`
+  - 最終配置先は常に `<root>/dataq`
+- `--force`:
+  - 既存の `<root>/dataq` を上書きして再配置
+  - 未指定時に既存ディレクトリがある場合は終了コード `3`
+- 成功時出力（stdout JSON）:
+  - `schema`: `dataq.codex.install_skill.output.v1`
+  - `skill_name`: `dataq`
+  - `destination`: 配置先ディレクトリ
+  - `copied_files`: 相対パス配列（固定順: `SKILL.md`, `agents/openai.yaml`）
+  - `overwrite`: `--force` 指定有無
+- 終了コード:
+  - `0`: 成功
+  - `3`: 入力/使用エラー（ルート解決失敗、既存ディレクトリ未上書き、コピー先I/O失敗）
+  - `1`: 予期しない内部エラー（例: 成功ペイロードのシリアライズ失敗）
+- `--emit-pipeline`:
+  - `steps`: `resolve_codex_skill_root`, `prepare_codex_skill_destination`, `write_embedded_codex_skill_files`, `emit_codex_install_skill_output`
+  - `deterministic_guards`: `rust_native_fs_execution`, `compile_time_embedded_skill_assets`, `fixed_embedded_asset_write_order`
 
 ## `mcp` 単発JSON-RPC契約（MVP）
 
@@ -326,7 +358,7 @@ dataq [--emit-pipeline] <command> [options]
 
 - `0`: 成功
 - `2`: 検証失敗（期待仕様に不一致）
-- `3`: 入力不正（フォーマット不正、必須引数不足など）、`doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）、または `ingest doc` の `pandoc`/parse 失敗
+- `3`: 入力不正（フォーマット不正、必須引数不足など）、`doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）、`ingest doc` の `pandoc`/parse 失敗、または `codex install-skill` のルート解決/コピー失敗
 - `1`: その他実行時エラー
 
 ## `doctor` コマンド契約（MVP）

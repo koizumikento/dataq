@@ -2821,3 +2821,891 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         _ => Err(format!("unsupported contract command `{value}`")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    fn args(value: Value) -> Map<String, Value> {
+        value.as_object().expect("args object").clone()
+    }
+
+    #[test]
+    fn parse_request_validates_json_rpc_shape() {
+        let mut output = Vec::new();
+        let code = run_single_request(Cursor::new(b"{"), &mut output);
+        assert_eq!(code, 0);
+        let response: Value = serde_json::from_slice(&output).expect("json response");
+        assert_eq!(response["error"]["code"], Value::from(JSONRPC_PARSE_ERROR));
+
+        let invalid = parse_request_value(json!([])).expect_err("array is invalid request");
+        assert_eq!(invalid.0, Value::Null);
+        assert_eq!(invalid.1, JSONRPC_INVALID_REQUEST);
+        assert_eq!(invalid.2, "request must be a JSON object");
+
+        let unknown_field = parse_request_value(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {},
+            "extra": true
+        }))
+        .expect_err("unexpected field is invalid");
+        assert_eq!(unknown_field.0, Value::from(1));
+        assert_eq!(unknown_field.1, JSONRPC_INVALID_REQUEST);
+        assert!(unknown_field.2.contains("unexpected request field"));
+
+        let invalid_id = parse_request_value(json!({
+            "jsonrpc": "2.0",
+            "id": {"x": 1},
+            "method": "tools/list"
+        }))
+        .expect_err("object id is invalid");
+        assert_eq!(invalid_id.0, Value::Null);
+        assert_eq!(invalid_id.1, JSONRPC_INVALID_REQUEST);
+        assert_eq!(invalid_id.2, "`id` must be null, string, or number");
+
+        let invalid_params = parse_request_value(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": []
+        }))
+        .expect_err("params must be object");
+        assert_eq!(invalid_params.0, Value::from(2));
+        assert_eq!(invalid_params.1, JSONRPC_INVALID_REQUEST);
+        assert_eq!(invalid_params.2, "`params` must be an object");
+
+        let request = parse_request_value(json!({
+            "jsonrpc": "2.0",
+            "id": "abc",
+            "method": "tools/list"
+        }))
+        .expect("valid request");
+        assert_eq!(request.id, Value::from("abc"));
+        assert_eq!(request.method, "tools/list");
+        assert!(request.params.is_empty());
+    }
+
+    #[test]
+    fn parse_alias_and_scalar_helpers_cover_success_and_errors() {
+        let conflict = args(json!({"a": true, "b": false}));
+        let err = parse_bool(&conflict, &["a", "b"], false, "flag").expect_err("alias conflict");
+        assert!(err.contains("multiple aliases provided"));
+
+        let none = args(json!({}));
+        assert!(!parse_emit_pipeline(&none).expect("default emit_pipeline"));
+
+        let bad_bool = args(json!({"emit_pipeline": "yes"}));
+        assert_eq!(
+            parse_emit_pipeline(&bad_bool).expect_err("invalid boolean"),
+            "`emit_pipeline` must be a boolean"
+        );
+
+        let ints = args(json!({"n": 7, "u16n": 42, "u16s": "43"}));
+        assert_eq!(parse_usize(&ints, &["n"], 0, "n").expect("usize"), 7);
+        assert_eq!(
+            parse_optional_u16(&ints, &["u16n"], "u16n").expect("u16 number"),
+            Some(42)
+        );
+        assert_eq!(
+            parse_optional_u16(&ints, &["u16s"], "u16s").expect("u16 string"),
+            Some(43)
+        );
+
+        let bad_ints = args(json!({"n": -1, "u16n": 70000, "u16s": "x", "u16b": true}));
+        assert!(parse_usize(&bad_ints, &["n"], 0, "n").is_err());
+        assert!(parse_optional_u16(&bad_ints, &["u16n"], "u16n").is_err());
+        assert!(parse_optional_u16(&bad_ints, &["u16s"], "u16s").is_err());
+        assert!(parse_optional_u16(&bad_ints, &["u16b"], "u16b").is_err());
+
+        let defaults = args(json!({}));
+        assert_eq!(
+            parse_optional_usize(&defaults, &["missing"], "missing").expect("optional usize"),
+            None
+        );
+        assert_eq!(
+            parse_optional_u16(&defaults, &["missing"], "missing").expect("optional u16"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_string_and_list_helpers_cover_success_and_errors() {
+        let values = args(json!({
+            "name": "value",
+            "empty": "",
+            "arr": ["x", "y"],
+            "scalar": "z",
+            "json_body": {"k": "v"}
+        }));
+
+        assert_eq!(
+            parse_required_string(&values, &["name"], "name").expect("required string"),
+            "value"
+        );
+        assert_eq!(
+            parse_optional_string_allow_empty(&values, &["empty"], "empty").expect("allow empty"),
+            Some(String::new())
+        );
+        assert_eq!(
+            parse_string_list(&values, &["arr"], "arr").expect("string list"),
+            vec!["x".to_string(), "y".to_string()]
+        );
+        assert_eq!(
+            parse_string_list(&values, &["scalar"], "scalar").expect("scalar list"),
+            vec!["z".to_string()]
+        );
+        assert_eq!(
+            parse_optional_string_array(&values, &["arr"], "arr").expect("string array"),
+            Some(vec!["x".to_string(), "y".to_string()])
+        );
+        assert_eq!(
+            parse_optional_json_body(&values, &["json_body"], "json_body").expect("json body"),
+            Some("{\"k\":\"v\"}".to_string())
+        );
+
+        let invalid = args(json!({
+            "name": true,
+            "empty": "",
+            "arr": ["x", 1],
+            "array_only": "x",
+            "format": "bogus",
+            "normalize": "bogus",
+            "mode": "bogus",
+            "profile": "bogus",
+            "path": "in.bin",
+        }));
+        assert!(parse_optional_string(&invalid, &["name"], "name").is_err());
+        assert!(parse_optional_string(&invalid, &["empty"], "empty").is_err());
+        assert!(parse_string_list(&invalid, &["arr"], "arr").is_err());
+        assert!(parse_optional_string_array(&invalid, &["array_only"], "array_only").is_err());
+        assert!(parse_optional_format(&invalid, &["format"], "format").is_err());
+        assert!(parse_optional_normalize_mode(&invalid).is_err());
+        assert!(parse_required_ingest_yaml_jobs_mode(&invalid).is_err());
+        assert!(parse_optional_doctor_profile(&invalid).is_err());
+        assert_eq!(
+            parse_optional_path(&invalid, &["path"], "path").expect("path"),
+            Some(PathBuf::from("in.bin"))
+        );
+
+        let normalize = args(json!({"normalize": "github-actions-jobs"}));
+        assert_eq!(
+            parse_optional_normalize_mode(&normalize).expect("normalize mode"),
+            Some(AssertInputNormalizeMode::GithubActionsJobs)
+        );
+    }
+
+    #[test]
+    fn parse_input_and_document_sources_cover_variants() {
+        let inline_rows = args(json!({"input": [{"id": 1}, {"id": 2}]}));
+        let source = parse_value_input(&inline_rows, &["input_path"], &["input"], "input", true)
+            .expect("value input")
+            .expect("some source");
+        match source {
+            ValueInputSource::Inline(rows) => {
+                assert_eq!(rows.len(), 2);
+            }
+            ValueInputSource::Path(path) => panic!("expected inline rows, got {}", path.display()),
+        }
+
+        let scalar_inline = args(json!({"input": {"id": 1}}));
+        let source = parse_value_input(&scalar_inline, &["input_path"], &["input"], "input", true)
+            .expect("value input")
+            .expect("some source");
+        match source {
+            ValueInputSource::Inline(rows) => {
+                assert_eq!(rows, vec![json!({"id": 1})]);
+            }
+            ValueInputSource::Path(path) => {
+                panic!("expected inline scalar, got {}", path.display())
+            }
+        }
+
+        let path_only = args(json!({"input_path": "values.json"}));
+        let source = parse_value_input(&path_only, &["input_path"], &["input"], "input", true)
+            .expect("value input")
+            .expect("some source");
+        match source {
+            ValueInputSource::Path(path) => assert_eq!(path, PathBuf::from("values.json")),
+            ValueInputSource::Inline(_) => panic!("expected path source"),
+        }
+
+        let missing = args(json!({}));
+        assert!(parse_value_input(&missing, &["p"], &["i"], "input", true).is_err());
+
+        let conflict = args(json!({"input_path": "values.json", "input": []}));
+        assert!(parse_value_input(&conflict, &["input_path"], &["input"], "input", true).is_err());
+
+        let doc_inline = args(json!({"schema": {"type": "object"}}));
+        let source = parse_document_input(&doc_inline, &["schema_path"], &["schema"], "schema")
+            .expect("document input")
+            .expect("document source");
+        match source {
+            DocumentInputSource::Inline(value) => assert_eq!(value["type"], Value::from("object")),
+            DocumentInputSource::Path(path) => {
+                panic!("expected inline schema, got {}", path.display())
+            }
+        }
+
+        let doc_path = args(json!({"schema_path": "schema.json"}));
+        let source = parse_document_input(&doc_path, &["schema_path"], &["schema"], "schema")
+            .expect("document input")
+            .expect("document source");
+        match source {
+            DocumentInputSource::Path(path) => assert_eq!(path, PathBuf::from("schema.json")),
+            DocumentInputSource::Inline(_) => panic!("expected path schema"),
+        }
+    }
+
+    #[test]
+    fn io_and_payload_helpers_cover_source_transforms() {
+        let dir = tempdir().expect("tempdir");
+        let values_path = dir.path().join("values.json");
+        let doc_path = dir.path().join("doc.json");
+        let unknown_path = dir.path().join("unknown.bin");
+
+        fs::write(&values_path, b"[{\"id\":1},{\"id\":2}]").expect("write values");
+        fs::write(&doc_path, b"{\"k\":\"v\"}").expect("write document");
+        fs::write(&unknown_path, b"[]").expect("write unknown");
+
+        let inline_loaded = read_values_from_source(
+            &ValueInputSource::Inline(vec![json!({"id": 1})]),
+            "input",
+            None,
+        )
+        .expect("inline values");
+        assert_eq!(inline_loaded.values, vec![json!({"id": 1})]);
+        assert_eq!(inline_loaded.format, Some(Format::Json));
+
+        let path_loaded =
+            read_values_from_source(&ValueInputSource::Path(values_path.clone()), "input", None)
+                .expect("path values");
+        assert_eq!(path_loaded.values.len(), 2);
+        assert_eq!(path_loaded.format, Some(Format::Json));
+
+        let unknown_error =
+            read_values_from_source(&ValueInputSource::Path(unknown_path.clone()), "input", None)
+                .expect_err("unknown extension should fail");
+        assert!(unknown_error.contains("failed to resolve format"));
+
+        let document =
+            read_document_from_source(&DocumentInputSource::Path(doc_path.clone()), "schema")
+                .expect("read document");
+        assert_eq!(document, json!({"k":"v"}));
+
+        let inline_doc =
+            read_document_from_source(&DocumentInputSource::Inline(json!([1, 2])), "schema")
+                .expect("inline document");
+        assert_eq!(inline_doc, json!([1, 2]));
+
+        let payload = values_to_payload(vec![json!({"id": 1}), json!({"id": 2})]);
+        assert_eq!(payload, json!([{"id": 1}, {"id": 2}]));
+        let single_payload = values_to_payload(vec![json!({"id": 1})]);
+        assert_eq!(single_payload, json!({"id": 1}));
+
+        assert_eq!(value_to_rows(json!([1, 2])), vec![json!(1), json!(2)]);
+        assert_eq!(value_to_rows(json!({"k": "v"})), vec![json!({"k":"v"})]);
+
+        assert_eq!(
+            serde_json::from_slice::<Value>(&serialize_values_as_json_input(&[json!({"id": 1})]))
+                .expect("serialized json"),
+            json!({"id": 1})
+        );
+    }
+
+    #[test]
+    fn pipeline_and_conversion_helpers_cover_all_variants() {
+        let path_source = ValueInputSource::Path(PathBuf::from("rows.json"));
+        let inline_values = ValueInputSource::Inline(vec![json!({"id": 1})]);
+        let inline_document = DocumentInputSource::Inline(json!({"base": true}));
+        let path_document = DocumentInputSource::Path(PathBuf::from("base.json"));
+
+        match to_join_input(path_source.clone()) {
+            join::JoinCommandInput::Path(path) => assert_eq!(path, PathBuf::from("rows.json")),
+            join::JoinCommandInput::Inline(_) => panic!("expected path join input"),
+        }
+        match to_join_input(inline_values.clone()) {
+            join::JoinCommandInput::Inline(values) => assert_eq!(values, vec![json!({"id": 1})]),
+            join::JoinCommandInput::Path(path) => {
+                panic!("expected inline join input, got {}", path.display())
+            }
+        }
+
+        match to_ingest_yaml_jobs_input(ValueInputSource::Path(PathBuf::from("-"))) {
+            ingest_yaml_jobs::IngestYamlJobsInput::Stdin => {}
+            _ => panic!("expected stdin ingest_yaml_jobs input"),
+        }
+        match to_ingest_yaml_jobs_input(ValueInputSource::Path(PathBuf::from("jobs.yml"))) {
+            ingest_yaml_jobs::IngestYamlJobsInput::Path(path) => {
+                assert_eq!(path, PathBuf::from("jobs.yml"))
+            }
+            _ => panic!("expected path ingest_yaml_jobs input"),
+        }
+        match to_ingest_yaml_jobs_input(inline_values.clone()) {
+            ingest_yaml_jobs::IngestYamlJobsInput::Inline(values) => {
+                assert_eq!(values, vec![json!({"id": 1})])
+            }
+            _ => panic!("expected inline ingest_yaml_jobs input"),
+        }
+
+        assert!(is_stdin_input_path_sentinel(Path::new("-")));
+        assert!(is_stdin_input_path_sentinel(Path::new("/dev/stdin")));
+        assert!(!is_stdin_input_path_sentinel(Path::new("rows.json")));
+
+        match to_aggregate_input(path_source.clone()) {
+            aggregate::AggregateCommandInput::Path(path) => {
+                assert_eq!(path, PathBuf::from("rows.json"))
+            }
+            _ => panic!("expected path aggregate input"),
+        }
+        match to_transform_rowset_input(inline_values.clone()) {
+            transform::TransformRowsetCommandInput::Inline(values) => {
+                assert_eq!(values, vec![json!({"id": 1})])
+            }
+            _ => panic!("expected inline transform input"),
+        }
+        match to_merge_input(path_document.clone()) {
+            merge::MergeCommandInput::Path(path) => assert_eq!(path, PathBuf::from("base.json")),
+            _ => panic!("expected path merge input"),
+        }
+        match to_merge_input(inline_document.clone()) {
+            merge::MergeCommandInput::Inline(value) => assert_eq!(value, json!({"base": true})),
+            _ => panic!("expected inline merge input"),
+        }
+
+        assert_eq!(source_format(&inline_values), Some(Format::Json));
+        assert_eq!(source_format(&path_source), Some(Format::Json));
+
+        let inline_pipeline = pipeline_source("input", &inline_values, Some(Format::Json));
+        assert_eq!(inline_pipeline.source, "inline");
+        let path_pipeline = pipeline_source("input", &path_source, Some(Format::Json));
+        assert_eq!(path_pipeline.source, "path");
+        assert_eq!(path_pipeline.path.as_deref(), Some("rows.json"));
+
+        let document_inline_pipeline = document_pipeline_source("base", &inline_document);
+        assert_eq!(document_inline_pipeline.source, "inline");
+        let document_path_pipeline = document_pipeline_source("base", &path_document);
+        assert_eq!(document_path_pipeline.source, "path");
+
+        let sources = assert_pipeline_sources(
+            &inline_values,
+            Some(Format::Json),
+            Some(&path_document),
+            Some(&inline_document),
+        );
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[0].label, "rules");
+        assert_eq!(sources[1].label, "schema");
+        assert_eq!(sources[2].label, "input");
+
+        let path_sources = assert_pipeline_sources_for_paths(
+            Some(Path::new("input.json")),
+            Some(Format::Json),
+            Some(Path::new("rules.json")),
+            None,
+        );
+        assert_eq!(path_sources.len(), 2);
+        assert_eq!(path_sources[0].source, "path");
+        assert_eq!(path_sources[1].path.as_deref(), Some("input.json"));
+
+        let inline_sources =
+            assert_pipeline_sources_for_paths(None, Some(Format::Json), None, None);
+        assert_eq!(inline_sources.len(), 1);
+        assert_eq!(inline_sources[0].source, "inline");
+
+        let pipeline = PipelineReport::new(
+            "assert",
+            PipelineInput::new(Vec::new()),
+            vec!["step".to_string()],
+            vec!["guard".to_string()],
+        );
+        assert!(
+            pipeline_as_value(pipeline)
+                .expect("pipeline value")
+                .is_object()
+        );
+    }
+
+    #[test]
+    fn protocol_and_parser_helpers_cover_commands_and_formats() {
+        assert_eq!(
+            parse_ingest_doc_format("md").expect("md"),
+            IngestDocInputFormat::Md
+        );
+        assert_eq!(
+            parse_ingest_doc_format("html").expect("html"),
+            IngestDocInputFormat::Html
+        );
+        assert_eq!(
+            parse_ingest_doc_format("docx").expect("docx"),
+            IngestDocInputFormat::Docx
+        );
+        assert_eq!(
+            parse_ingest_doc_format("rst").expect("rst"),
+            IngestDocInputFormat::Rst
+        );
+        assert_eq!(
+            parse_ingest_doc_format("latex").expect("latex"),
+            IngestDocInputFormat::Latex
+        );
+        assert!(parse_ingest_doc_format("txt").is_err());
+
+        assert_eq!(
+            contract_command_from_str("gate-policy").expect("gate-policy alias"),
+            contract::ContractCommand::Gate
+        );
+        assert_eq!(
+            contract_command_from_str("transform.rowset").expect("transform alias"),
+            contract::ContractCommand::TransformRowset
+        );
+        assert!(contract_command_from_str("unknown").is_err());
+
+        let tools = tools_list_result();
+        let tool_names: Vec<&str> = tools["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|entry| entry["name"].as_str().expect("tool name"))
+            .collect();
+        assert_eq!(tool_names, TOOL_ORDER);
+
+        let doctor_definition = tool_definition("dataq.doctor");
+        assert!(doctor_definition["inputSchema"]["properties"]["capabilities"].is_object());
+        assert!(doctor_definition["inputSchema"]["properties"]["profile"].is_object());
+
+        let canon_definition = tool_definition("dataq.canon");
+        assert!(canon_definition["inputSchema"]["properties"]["emit_pipeline"].is_object());
+        assert!(canon_definition["inputSchema"]["properties"]["profile"].is_null());
+
+        let execution = ToolExecution {
+            exit_code: 2,
+            payload: json!({"error":"x"}),
+            pipeline: Some(json!({"command":"assert"})),
+        };
+        let result = tool_call_result(execution);
+        assert_eq!(result["isError"], Value::Bool(true));
+        assert!(result["structuredContent"]["pipeline"].is_object());
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("\"exit_code\":2")
+        );
+
+        let success = success_response(Value::from(1), json!({"ok": true}));
+        assert_eq!(success["result"]["ok"], Value::Bool(true));
+        let error = error_response(Value::from("id"), JSONRPC_METHOD_NOT_FOUND, "not found");
+        assert_eq!(
+            error["error"]["code"],
+            Value::from(JSONRPC_METHOD_NOT_FOUND)
+        );
+
+        let invalid_id_object =
+            serde_json::Map::from_iter(vec![("id".to_string(), json!({"x":1}))]);
+        assert_eq!(extract_error_id(&invalid_id_object), Value::Null);
+        let valid_id_object = serde_json::Map::from_iter(vec![("id".to_string(), json!("ok"))]);
+        assert_eq!(extract_error_id(&valid_id_object), Value::from("ok"));
+
+        let usage = input_usage_error("bad input");
+        assert_eq!(usage.exit_code, 3);
+        assert_eq!(usage.payload["error"], Value::from("input_usage_error"));
+        let internal = internal_error("boom");
+        assert_eq!(internal.exit_code, 1);
+        assert_eq!(internal.payload["error"], Value::from("internal_error"));
+
+        let request = JsonRpcRequest {
+            id: Value::from(7),
+            method: "tools/list".to_string(),
+            params: Map::new(),
+        };
+        let handled = handle_request(request);
+        assert!(handled["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn execute_functions_validate_inputs_before_runtime_execution() {
+        let exec = execute_canon(&args(json!({})));
+        assert_eq!(exec.exit_code, 3);
+        assert_eq!(exec.payload["error"], json!("input_usage_error"));
+
+        let exec = execute_ingest_api(&args(json!({
+            "url": "https://example.test",
+            "method": "TRACE"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("method")
+        );
+
+        let exec = execute_ingest_yaml_jobs(&args(json!({
+            "mode": "generic-map",
+            "input_path": "-"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("stdin sentinels")
+        );
+
+        let exec = execute_assert(&args(json!({
+            "input": [{"id": 1}]
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("exactly one")
+        );
+
+        let exec = execute_assert(&args(json!({
+            "input": [{"id": 1}],
+            "rules": {"required_keys": [], "forbid_keys": [], "fields": {}},
+            "schema": {"type": "object"}
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("mutually exclusive")
+        );
+
+        let exec = execute_assert(&args(json!({
+            "input": [{"id": 1}],
+            "rules": {"required_keys": [], "forbid_keys": [], "fields": {}},
+            "normalize": "github-actions-jobs"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("only supported")
+        );
+
+        let exec = execute_gate_schema(&args(json!({
+            "input": [{"id": 1}],
+            "schema": {"type": "object"}
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("inline `schema`")
+        );
+
+        let exec = execute_gate_schema(&args(json!({
+            "from": "github-actions-raw",
+            "input": [{"id": 1}],
+            "schema_path": "schema.json"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert_eq!(exec.payload["error"], json!("input_usage_error"));
+
+        let exec = execute_gate_policy(&args(json!({
+            "rules_path": "rules.json",
+            "input_path": "-"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("stdin sentinel")
+        );
+
+        let exec = execute_sdiff(&args(json!({
+            "left": [{"id": 1}],
+            "right": [{"id": 1}],
+            "left_from": "invalid"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("format")
+        );
+
+        let exec = execute_diff_source(&args(json!({
+            "left": "left.json",
+            "right": "right.json",
+            "fail_on_diff": "yes"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("boolean")
+        );
+
+        let exec = execute_profile(&args(json!({
+            "input": [{"id": 1}],
+            "from": "csv"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("from=json")
+        );
+
+        let exec = execute_ingest_doc(&args(json!({
+            "from": "txt",
+            "input": "# title"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must be one of")
+        );
+
+        let exec = execute_ingest_doc(&args(json!({
+            "from": "md"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("missing required")
+        );
+
+        let exec = execute_ingest_doc(&args(json!({
+            "from": "md",
+            "input": "# title",
+            "input_path": "doc.md"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("mutually exclusive")
+        );
+
+        let exec = execute_ingest_doc(&args(json!({
+            "from": "md",
+            "input_path": "-"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("not supported")
+        );
+
+        let exec = execute_ingest_notes(&args(json!({
+            "to": "xml"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("json")
+        );
+
+        let exec = execute_ingest_notes(&args(json!({
+            "since": "2025-02-01T00:00:00Z",
+            "until": "2025-01-01T00:00:00Z"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must be less than or equal")
+        );
+
+        let exec = execute_ingest_book(&args(json!({
+            "root": ".",
+            "include_files": "yes"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("boolean")
+        );
+
+        let exec = execute_join(&args(json!({
+            "left": [{"id": 1}],
+            "right": [{"id": 1}],
+            "on": "id",
+            "how": "outer"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("inner")
+        );
+
+        let exec = execute_aggregate(&args(json!({
+            "input": [{"team": "a", "value": 1}],
+            "group_by": "team",
+            "target": "value",
+            "metric": "median"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("count")
+        );
+
+        let exec = execute_scan_text(&args(json!({
+            "pattern": "x",
+            "max_matches": "many"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("non-negative integer")
+        );
+
+        let exec = execute_transform_rowset(&args(json!({
+            "input": [{"id": 1}],
+            "jq_filter": ".",
+            "mlr": []
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("missing required")
+        );
+
+        let exec = execute_merge(&args(json!({
+            "base": {"a": 1},
+            "overlay_paths": ["a.json"],
+            "overlays": [{"a": 2}]
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("mutually exclusive")
+        );
+
+        let exec = execute_merge(&args(json!({
+            "base": {"a": 1}
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("at least one overlay")
+        );
+
+        let exec = execute_doctor(&args(json!({
+            "capabilities": "yes"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("boolean")
+        );
+
+        let exec = execute_contract(&args(json!({
+            "command": "unknown-command"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unsupported contract command")
+        );
+
+        let exec = execute_emit_plan(&args(json!({})));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("missing required")
+        );
+
+        let exec = execute_recipe_run(&args(json!({})));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must be provided")
+        );
+
+        let exec = execute_recipe_run(&args(json!({
+            "file_path": "recipe.json",
+            "recipe": {"version":"dataq.recipe.v1","steps":[]}
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("mutually exclusive")
+        );
+
+        let exec = execute_recipe_lock(&args(json!({})));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("missing required")
+        );
+
+        let exec = execute_recipe_replay(&args(json!({
+            "file_path": "recipe.json"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("missing required")
+        );
+
+        let exec = execute_recipe_replay(&args(json!({
+            "file_path": "recipe.json",
+            "lock_path": "recipe.lock.json",
+            "strict": "yes"
+        })));
+        assert_eq!(exec.exit_code, 3);
+        assert!(
+            exec.payload["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("boolean")
+        );
+    }
+}

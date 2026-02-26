@@ -4,6 +4,8 @@ mod canon_assert_flow;
 mod canon_flow;
 #[path = "integration/canon_sdiff_flow.rs"]
 mod canon_sdiff_flow;
+#[path = "integration/codex_install_skill_flow.rs"]
+mod codex_install_skill_flow;
 #[path = "integration/diff_source_flow.rs"]
 mod diff_source_flow;
 #[path = "integration/doctor_capabilities_flow.rs"]
@@ -20,6 +22,8 @@ mod ingest_api_flow;
 mod ingest_book_flow;
 #[path = "integration/ingest_doc_roundtrip.rs"]
 mod ingest_doc_roundtrip;
+#[path = "integration/ingest_notes_flow.rs"]
+mod ingest_notes_flow;
 #[path = "integration/ingest_yaml_jobs_flow.rs"]
 mod ingest_yaml_jobs_flow;
 #[path = "integration/io_format_resolution.rs"]

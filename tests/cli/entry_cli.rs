@@ -27,6 +27,7 @@ fn help_is_available() {
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("contract"))
         .stdout(predicate::str::contains("emit"))
+        .stdout(predicate::str::contains("codex"))
         .stdout(predicate::str::contains("mcp"));
 }
 

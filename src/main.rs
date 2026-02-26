@@ -7,7 +7,7 @@ use std::process::{self, Command};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
-    aggregate, r#assert, canon, contract, diff, doctor, emit, gate, ingest, ingest_api,
+    aggregate, r#assert, canon, codex, contract, diff, doctor, emit, gate, ingest, ingest_api,
     ingest_yaml_jobs, join, mcp, merge, profile, recipe, scan, sdiff, transform,
 };
 use dataq::domain::error::CanonError;
@@ -74,6 +74,8 @@ enum Commands {
     Contract(ContractArgs),
     /// Emit static execution plans for existing subcommands.
     Emit(EmitArgs),
+    /// Install or manage dataq Codex skill assets.
+    Codex(CodexArgs),
     /// Handle a single MCP JSON-RPC request from stdin.
     Mcp,
 }
@@ -498,6 +500,27 @@ struct EmitPlanArgs {
     args: Option<String>,
 }
 
+#[derive(Debug, clap::Args)]
+struct CodexArgs {
+    #[command(subcommand)]
+    command: CodexSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexSubcommand {
+    /// Install embedded dataq skill assets into a Codex skills root.
+    InstallSkill(CodexInstallSkillArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct CodexInstallSkillArgs {
+    #[arg(long)]
+    dest: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    force: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliInputFormat {
     Json,
@@ -793,6 +816,7 @@ fn run() -> i32 {
         Commands::Doctor(args) => run_doctor(args, emit_pipeline),
         Commands::Contract(args) => run_contract(args, emit_pipeline),
         Commands::Emit(args) => run_emit(args, emit_pipeline),
+        Commands::Codex(args) => run_codex(args, emit_pipeline),
         Commands::Mcp => run_mcp(),
     }
 }
@@ -2738,6 +2762,66 @@ fn run_emit_plan(args: EmitPlanArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
+fn run_codex(args: CodexArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        CodexSubcommand::InstallSkill(install_skill_args) => {
+            run_codex_install_skill(install_skill_args, emit_pipeline)
+        }
+    }
+}
+
+fn run_codex_install_skill(args: CodexInstallSkillArgs, emit_pipeline: bool) -> i32 {
+    let command_args = codex::CodexInstallSkillCommandArgs {
+        dest_root: args.dest.clone(),
+        force: args.force,
+    };
+    let (response, trace) = codex::install_skill_with_trace(&command_args);
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize codex install-skill response".to_string(),
+                    json!({"command": "codex", "subcommand": "install-skill"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize codex install-skill error".to_string(),
+                    json!({"command": "codex", "subcommand": "install-skill"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected codex install-skill exit code: {other}"),
+                json!({"command": "codex", "subcommand": "install-skill"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_codex_install_skill_pipeline_report(&args, &trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
+}
+
 fn read_values_from_path(path: &PathBuf, format: Format) -> Result<(Vec<Value>, Vec<u8>), String> {
     let bytes = fs::read(path)
         .map_err(|error| format!("failed to read input file `{}`: {error}", path.display()))?;
@@ -3441,6 +3525,41 @@ fn build_emit_plan_pipeline_report() -> PipelineReport {
     )
 }
 
+fn build_codex_install_skill_pipeline_report(
+    args: &CodexInstallSkillArgs,
+    trace: &codex::CodexInstallSkillPipelineTrace,
+) -> PipelineReport {
+    let mut sources = Vec::new();
+    if let Some(dest_root) = args.dest.as_ref() {
+        sources.push(PipelineInputSource::path(
+            "dest_root",
+            dest_root.display().to_string(),
+            None,
+        ));
+    } else if let Some(resolved_root) = trace.resolved_root.as_ref() {
+        sources.push(PipelineInputSource::path(
+            "dest_root",
+            resolved_root.display().to_string(),
+            None,
+        ));
+    }
+
+    if let Some(destination_path) = trace.destination_path.as_ref() {
+        sources.push(PipelineInputSource::path(
+            "destination",
+            destination_path.display().to_string(),
+            None,
+        ));
+    }
+
+    PipelineReport::new(
+        "codex.install-skill",
+        PipelineInput::new(sources),
+        codex::install_skill_pipeline_steps(),
+        codex::install_skill_deterministic_guards(),
+    )
+}
+
 fn build_recipe_pipeline_report(
     args: &RecipeRunArgs,
     recipe_format: Option<Format>,
@@ -3732,5 +3851,942 @@ fn emit_error(error: &'static str, message: String, details: Value, code: i32) {
         Err(_) => eprintln!(
             "{{\"error\":\"internal_error\",\"message\":\"failed to serialize error\",\"code\":1}}"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn cli_enum_conversions_cover_all_variants() {
+        assert_eq!(Format::from(CliInputFormat::Json), Format::Json);
+        assert_eq!(Format::from(CliInputFormat::Yaml), Format::Yaml);
+        assert_eq!(Format::from(CliInputFormat::Csv), Format::Csv);
+        assert_eq!(Format::from(CliInputFormat::Jsonl), Format::Jsonl);
+
+        assert_eq!(Format::from(CanonOutputFormat::Json), Format::Json);
+        assert_eq!(Format::from(CanonOutputFormat::Jsonl), Format::Jsonl);
+
+        assert_eq!(
+            MergePolicy::from(CliMergePolicy::LastWins),
+            MergePolicy::LastWins
+        );
+        assert_eq!(
+            MergePolicy::from(CliMergePolicy::DeepMerge),
+            MergePolicy::DeepMerge
+        );
+        assert_eq!(
+            MergePolicy::from(CliMergePolicy::ArrayReplace),
+            MergePolicy::ArrayReplace
+        );
+
+        assert_eq!(JoinHow::from(CliJoinHow::Inner), JoinHow::Inner);
+        assert_eq!(JoinHow::from(CliJoinHow::Left), JoinHow::Left);
+
+        assert_eq!(
+            AggregateMetric::from(CliAggregateMetric::Count),
+            AggregateMetric::Count
+        );
+        assert_eq!(
+            AggregateMetric::from(CliAggregateMetric::Sum),
+            AggregateMetric::Sum
+        );
+        assert_eq!(
+            AggregateMetric::from(CliAggregateMetric::Avg),
+            AggregateMetric::Avg
+        );
+
+        assert_eq!(
+            r#assert::AssertInputNormalizeMode::from(CliAssertNormalizeMode::GithubActionsJobs),
+            r#assert::AssertInputNormalizeMode::GithubActionsJobs
+        );
+        assert_eq!(
+            r#assert::AssertInputNormalizeMode::from(CliAssertNormalizeMode::GitlabCiJobs),
+            r#assert::AssertInputNormalizeMode::GitlabCiJobs
+        );
+
+        assert_eq!(
+            gate::GatePolicySourcePreset::from(CliGatePolicySource::ScanText),
+            gate::GatePolicySourcePreset::ScanText
+        );
+        assert_eq!(
+            gate::GatePolicySourcePreset::from(CliGatePolicySource::IngestDoc),
+            gate::GatePolicySourcePreset::IngestDoc
+        );
+        assert_eq!(
+            gate::GatePolicySourcePreset::from(CliGatePolicySource::IngestApi),
+            gate::GatePolicySourcePreset::IngestApi
+        );
+        assert_eq!(
+            gate::GatePolicySourcePreset::from(CliGatePolicySource::IngestNotes),
+            gate::GatePolicySourcePreset::IngestNotes
+        );
+        assert_eq!(
+            gate::GatePolicySourcePreset::from(CliGatePolicySource::IngestBook),
+            gate::GatePolicySourcePreset::IngestBook
+        );
+
+        assert_eq!(
+            contract::ContractCommand::from(CliContractCommand::TransformRowset),
+            contract::ContractCommand::TransformRowset
+        );
+        assert_eq!(
+            contract::ContractCommand::from(CliContractCommand::RecipeRun),
+            contract::ContractCommand::RecipeRun
+        );
+        assert_eq!(
+            contract::ContractCommand::from(CliContractCommand::RecipeLock),
+            contract::ContractCommand::RecipeLock
+        );
+
+        assert_eq!(
+            doctor::DoctorProfile::from(CliDoctorProfile::Core),
+            doctor::DoctorProfile::Core
+        );
+        assert_eq!(
+            doctor::DoctorProfile::from(CliDoctorProfile::CiJobs),
+            doctor::DoctorProfile::CiJobs
+        );
+        assert_eq!(
+            doctor::DoctorProfile::from(CliDoctorProfile::Doc),
+            doctor::DoctorProfile::Doc
+        );
+        assert_eq!(
+            doctor::DoctorProfile::from(CliDoctorProfile::Api),
+            doctor::DoctorProfile::Api
+        );
+        assert_eq!(
+            doctor::DoctorProfile::from(CliDoctorProfile::Notes),
+            doctor::DoctorProfile::Notes
+        );
+        assert_eq!(
+            doctor::DoctorProfile::from(CliDoctorProfile::Book),
+            doctor::DoctorProfile::Book
+        );
+        assert_eq!(
+            doctor::DoctorProfile::from(CliDoctorProfile::Scan),
+            doctor::DoctorProfile::Scan
+        );
+
+        assert_eq!(
+            ingest_api::IngestApiMethod::from(CliIngestApiMethod::Get),
+            ingest_api::IngestApiMethod::Get
+        );
+        assert_eq!(
+            ingest_api::IngestApiMethod::from(CliIngestApiMethod::Post),
+            ingest_api::IngestApiMethod::Post
+        );
+        assert_eq!(
+            ingest_api::IngestApiMethod::from(CliIngestApiMethod::Put),
+            ingest_api::IngestApiMethod::Put
+        );
+        assert_eq!(
+            ingest_api::IngestApiMethod::from(CliIngestApiMethod::Patch),
+            ingest_api::IngestApiMethod::Patch
+        );
+        assert_eq!(
+            ingest_api::IngestApiMethod::from(CliIngestApiMethod::Delete),
+            ingest_api::IngestApiMethod::Delete
+        );
+
+        assert_eq!(
+            IngestYamlJobsMode::from(CliIngestYamlJobsMode::GithubActions),
+            IngestYamlJobsMode::GithubActions
+        );
+        assert_eq!(
+            IngestYamlJobsMode::from(CliIngestYamlJobsMode::GitlabCi),
+            IngestYamlJobsMode::GitlabCi
+        );
+        assert_eq!(
+            IngestYamlJobsMode::from(CliIngestYamlJobsMode::GenericMap),
+            IngestYamlJobsMode::GenericMap
+        );
+
+        assert_eq!(
+            ingest::IngestDocInputFormat::from(CliIngestDocFormat::Md),
+            ingest::IngestDocInputFormat::Md
+        );
+        assert_eq!(
+            ingest::IngestDocInputFormat::from(CliIngestDocFormat::Html),
+            ingest::IngestDocInputFormat::Html
+        );
+        assert_eq!(
+            ingest::IngestDocInputFormat::from(CliIngestDocFormat::Docx),
+            ingest::IngestDocInputFormat::Docx
+        );
+        assert_eq!(
+            ingest::IngestDocInputFormat::from(CliIngestDocFormat::Rst),
+            ingest::IngestDocInputFormat::Rst
+        );
+        assert_eq!(
+            ingest::IngestDocInputFormat::from(CliIngestDocFormat::Latex),
+            ingest::IngestDocInputFormat::Latex
+        );
+    }
+
+    #[test]
+    fn canon_and_whitespace_helpers_cover_error_mappings() {
+        assert_eq!(trim_ascii_whitespace(b"  abc \n"), b"abc");
+        assert!(trim_ascii_whitespace(b" \t\r\n").is_empty());
+
+        let read_error = CanonError::ReadInput {
+            format: Format::Json,
+            source: dataq_io::IoError::UnsupportedFormat {
+                format: "bad".to_string(),
+            },
+        };
+        assert_eq!(map_canon_error(&read_error), (3, "input_usage_error"));
+
+        let write_io = CanonError::WriteOutput {
+            format: Format::Json,
+            source: dataq_io::IoError::Io(std::io::Error::other("boom")),
+        };
+        assert_eq!(map_canon_error(&write_io), (1, "internal_error"));
+
+        let write_usage = CanonError::WriteOutput {
+            format: Format::Json,
+            source: dataq_io::IoError::UnsupportedFormat {
+                format: "bad".to_string(),
+            },
+        };
+        assert_eq!(map_canon_error(&write_usage), (3, "input_usage_error"));
+    }
+
+    #[test]
+    fn fingerprint_and_tool_helpers_cover_hashing_and_versions() {
+        assert_eq!(format_label(Some(Format::Json)), Some("json"));
+        assert_eq!(format_label(None), None);
+
+        let hash = hash_normalized_args();
+        assert_eq!(hash.len(), 16);
+
+        let empty_hash = hash_consumed_input_entries(&[]);
+        assert_eq!(empty_hash, None);
+
+        let entries = [ConsumedInputHashEntry {
+            label: "input",
+            source: "inline",
+            path: None,
+            format: Some("json"),
+            bytes: br#"{"id":1}"#,
+        }];
+        let input_hash = hash_consumed_input_entries(&entries);
+        assert!(input_hash.is_some());
+        assert_eq!(input_hash.as_ref().map(String::len), Some(16));
+
+        let preferred_versions =
+            BTreeMap::from([(String::from("jq"), String::from("jq-test 1.0.0"))]);
+        let report = PipelineReport::new(
+            "canon",
+            PipelineInput::new(Vec::new()),
+            vec!["step".to_string()],
+            vec!["guard".to_string()],
+        )
+        .mark_external_tool_used("jq");
+
+        let used_versions = collect_used_tool_versions(&report, &preferred_versions);
+        assert_eq!(used_versions.get("jq"), Some(&"jq-test 1.0.0".to_string()));
+
+        let context = FingerprintContext {
+            input_hash: input_hash.clone(),
+            preferred_tool_versions: preferred_versions.clone(),
+        };
+        let fingerprint = build_pipeline_fingerprint(&report, &context);
+        assert_eq!(fingerprint.command, "canon");
+        assert_eq!(fingerprint.input_hash, input_hash);
+        assert_eq!(
+            fingerprint.tool_versions.get("jq"),
+            Some(&"jq-test 1.0.0".to_string())
+        );
+        assert_eq!(fingerprint.args_hash.len(), 16);
+
+        let missing_tool_version = detect_tool_version("__dataq_missing_tool_for_test__");
+        assert_eq!(missing_tool_version, "error: unavailable in PATH");
+    }
+
+    #[test]
+    fn executable_and_output_helpers_cover_fallback_paths() {
+        assert_eq!(
+            resolve_tool_executable("__unknown_tool__"),
+            "__unknown_tool__".to_string()
+        );
+        assert_eq!(status_label(Some(12)), "12".to_string());
+        assert_eq!(status_label(None), "terminated by signal".to_string());
+
+        assert_eq!(first_non_empty_line(b"\n\nhello\n"), Some("hello"));
+        assert_eq!(first_non_empty_line(b"\n\t\n"), None);
+        assert_eq!(first_non_empty_line(&[0xff, 0xfe]), None);
+
+        assert!(emit_json_stdout(&json!({"ok": true})));
+        assert!(emit_json_stderr(&json!({"ok": true})));
+        assert!(emit_jsonl_stdout(&[json!({"id": 1}), json!({"id": 2})]));
+        assert!(emit_bytes_stdout(br#"{"ok":true}"#));
+    }
+
+    #[test]
+    fn pipeline_report_builders_cover_main_command_shapes() {
+        let canon_args = CanonArgs {
+            input: Some(PathBuf::from("input.json")),
+            from: Some(CliInputFormat::Json),
+            to: Some(CanonOutputFormat::Json),
+            sort_keys: true,
+            normalize_time: false,
+        };
+        let canon_report = build_canon_pipeline_report(
+            &canon_args,
+            Some(Format::Json),
+            canon::CanonCommandOptions::default(),
+        );
+        assert_eq!(canon_report.command, "canon");
+        assert_eq!(canon_report.input.sources.len(), 1);
+
+        let assert_args = AssertArgs {
+            rules: Some(PathBuf::from("rules.json")),
+            schema: None,
+            input: Some(PathBuf::from("input.json")),
+            normalize: Some(CliAssertNormalizeMode::GithubActionsJobs),
+            rules_help: false,
+            schema_help: false,
+        };
+        let assert_trace = r#assert::AssertPipelineTrace {
+            used_tools: vec!["yq".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let assert_report = build_assert_pipeline_report(
+            &assert_args,
+            Some(Format::Json),
+            Some(Format::Json),
+            None,
+            vec!["step".to_string()],
+            vec!["guard".to_string()],
+            &assert_trace,
+        );
+        assert_eq!(assert_report.command, "assert");
+        assert_eq!(assert_report.input.sources.len(), 2);
+
+        let ingest_api_args = IngestApiArgs {
+            url: "https://example.test".to_string(),
+            method: CliIngestApiMethod::Get,
+            header: vec!["accept:application/json".to_string()],
+            body: None,
+            expect_status: None,
+        };
+        let ingest_api_trace = ingest_api::IngestApiPipelineTrace {
+            used_tools: vec!["xh".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let ingest_api_report =
+            build_ingest_api_pipeline_report(&ingest_api_args, &ingest_api_trace);
+        assert_eq!(ingest_api_report.command, "ingest_api");
+
+        let ingest_yaml_jobs_args = IngestYamlJobsArgs {
+            input: PathBuf::from("jobs.yml"),
+            mode: CliIngestYamlJobsMode::GithubActions,
+        };
+        let ingest_yaml_jobs_trace = ingest_yaml_jobs::IngestYamlJobsPipelineTrace {
+            used_tools: vec!["yq".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let ingest_yaml_jobs_report = build_ingest_yaml_jobs_pipeline_report(
+            &ingest_yaml_jobs_args,
+            IngestYamlJobsMode::GithubActions,
+            false,
+            &ingest_yaml_jobs_trace,
+        );
+        assert_eq!(ingest_yaml_jobs_report.command, "ingest_yaml_jobs");
+
+        let gate_schema_args = GateSchemaArgs {
+            schema: PathBuf::from("schema.json"),
+            input: Some(PathBuf::from("input.json")),
+            from: None,
+        };
+        let gate_schema_trace = r#assert::AssertPipelineTrace::default();
+        let gate_schema_report = build_gate_schema_pipeline_report(
+            &gate_schema_args,
+            false,
+            Some(Format::Json),
+            Some(Format::Json),
+            &gate_schema_trace,
+        );
+        assert_eq!(gate_schema_report.command, "gate.schema");
+
+        let gate_policy_args = GatePolicyArgs {
+            rules: PathBuf::from("rules.json"),
+            input: Some(PathBuf::from("input.json")),
+            source: Some(CliGatePolicySource::ScanText),
+        };
+        let gate_policy_report = build_gate_policy_pipeline_report(
+            &gate_policy_args,
+            false,
+            Some(Format::Json),
+            Some(Format::Json),
+            Some(gate::GatePolicySourcePreset::ScanText),
+        );
+        assert_eq!(gate_policy_report.command, "gate.policy");
+
+        let sdiff_args = SdiffArgs {
+            left: PathBuf::from("left.json"),
+            right: PathBuf::from("right.json"),
+            key: Some("$.id".to_string()),
+            ignore_path: vec!["$.updated_at".to_string()],
+            value_diff_cap: sdiff::DEFAULT_VALUE_DIFF_CAP,
+            fail_on_diff: false,
+        };
+        let sdiff_report =
+            build_sdiff_pipeline_report(&sdiff_args, Some(Format::Json), Some(Format::Json));
+        assert_eq!(sdiff_report.command, "sdiff");
+
+        let diff_source_args = DiffSourceArgs {
+            left: "left.json".to_string(),
+            right: "right.json".to_string(),
+            fail_on_diff: false,
+        };
+        let diff_source_report =
+            build_diff_source_pipeline_report(&diff_source_args, None, None, &[]);
+        assert_eq!(diff_source_report.command, "diff.source");
+
+        let profile_args = ProfileArgs {
+            input: Some(PathBuf::from("input.json")),
+            from: CliInputFormat::Json,
+        };
+        let profile_report = build_profile_pipeline_report(&profile_args, Some(Format::Json));
+        assert_eq!(profile_report.command, "profile");
+
+        let ingest_doc_args = IngestDocArgs {
+            input: "-".to_string(),
+            from: CliIngestDocFormat::Md,
+        };
+        let ingest_doc_report = build_ingest_doc_pipeline_report(
+            &ingest_doc_args,
+            None,
+            ingest::IngestDocInputFormat::Md,
+        );
+        assert_eq!(ingest_doc_report.command, "ingest.doc");
+
+        let ingest_book_args = IngestBookArgs {
+            root: PathBuf::from("book"),
+            include_files: true,
+        };
+        let ingest_book_trace = ingest::IngestBookPipelineTrace {
+            used_tools: vec!["jq".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let ingest_book_report =
+            build_ingest_book_pipeline_report(&ingest_book_args, &ingest_book_trace);
+        assert_eq!(ingest_book_report.command, "ingest.book");
+
+        let scan_text_args = ScanTextArgs {
+            pattern: "TODO".to_string(),
+            path: Some(PathBuf::from(".")),
+            glob: vec!["*.rs".to_string()],
+            max_matches: Some(10),
+            policy_mode: false,
+            jq_project: false,
+        };
+        let scan_trace = scan::ScanTextPipelineTrace {
+            used_tools: vec!["rg".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let scan_report =
+            build_scan_text_pipeline_report(&scan_text_args, Path::new("."), &scan_trace);
+        assert_eq!(scan_report.command, "scan");
+
+        let transform_args = TransformRowsetArgs {
+            input: "-".to_string(),
+            jq_filter: ".".to_string(),
+            mlr: vec!["cat".to_string()],
+        };
+        let transform_trace = transform::TransformRowsetPipelineTrace::default();
+        let transform_report = build_transform_rowset_pipeline_report(
+            &transform_args,
+            Some(Format::Json),
+            true,
+            &transform_trace,
+        );
+        assert_eq!(transform_report.command, "transform.rowset");
+
+        let merge_args = MergeArgs {
+            base: PathBuf::from("base.json"),
+            overlay: vec![PathBuf::from("overlay.json")],
+            policy: CliMergePolicy::LastWins,
+            policy_path: vec!["$.cfg=deep-merge".to_string()],
+        };
+        let merge_report =
+            build_merge_pipeline_report(&merge_args, Some(Format::Json), &[Some(Format::Json)]);
+        assert_eq!(merge_report.command, "merge");
+
+        let join_args = JoinArgs {
+            left: PathBuf::from("left.json"),
+            right: PathBuf::from("right.json"),
+            on: "id".to_string(),
+            how: CliJoinHow::Inner,
+        };
+        let join_trace = join::JoinPipelineTrace::default();
+        let join_report = build_join_pipeline_report(
+            &join_args,
+            Some(Format::Json),
+            Some(Format::Json),
+            &join_trace,
+        );
+        assert_eq!(join_report.command, "join");
+
+        let aggregate_args = AggregateArgs {
+            input: PathBuf::from("input.json"),
+            group_by: "team".to_string(),
+            metric: CliAggregateMetric::Count,
+            target: "value".to_string(),
+        };
+        let aggregate_trace = aggregate::AggregatePipelineTrace::default();
+        let aggregate_report =
+            build_aggregate_pipeline_report(&aggregate_args, Some(Format::Json), &aggregate_trace);
+        assert_eq!(aggregate_report.command, "aggregate");
+
+        let doctor_report = build_doctor_pipeline_report(Some(doctor::DoctorProfile::Core));
+        assert_eq!(doctor_report.command, "doctor");
+        let contract_report = build_contract_pipeline_report();
+        assert_eq!(contract_report.command, "contract");
+        let emit_report = build_emit_plan_pipeline_report();
+        assert_eq!(emit_report.command, "emit");
+
+        let codex_args = CodexInstallSkillArgs {
+            dest: Some(PathBuf::from("/tmp/.codex/skills")),
+            force: true,
+        };
+        let codex_trace = codex::CodexInstallSkillPipelineTrace {
+            resolved_root: Some(PathBuf::from("/tmp/.codex/skills")),
+            destination_path: Some(PathBuf::from("/tmp/.codex/skills/dataq")),
+        };
+        let codex_report = build_codex_install_skill_pipeline_report(&codex_args, &codex_trace);
+        assert_eq!(codex_report.command, "codex.install-skill");
+
+        let recipe_run_args = RecipeRunArgs {
+            file: PathBuf::from("recipe.json"),
+        };
+        let recipe_report =
+            build_recipe_pipeline_report(&recipe_run_args, Some(Format::Json), Vec::new());
+        assert_eq!(recipe_report.command, "recipe");
+
+        let recipe_lock_args = RecipeLockArgs {
+            file: PathBuf::from("recipe.json"),
+            out: Some(PathBuf::from("recipe.lock.json")),
+        };
+        let tool_versions = BTreeMap::from([("jq".to_string(), "jq-1.8.1".to_string())]);
+        let recipe_lock_report = build_recipe_lock_pipeline_report(
+            &recipe_lock_args,
+            Some(Format::Json),
+            Vec::new(),
+            &tool_versions,
+        );
+        assert_eq!(recipe_lock_report.command, "recipe");
+
+        let recipe_replay_args = RecipeReplayArgs {
+            file: PathBuf::from("recipe.json"),
+            lock: PathBuf::from("recipe.lock.json"),
+            strict: true,
+        };
+        let recipe_replay_report = build_recipe_replay_pipeline_report(
+            &recipe_replay_args,
+            Some(Format::Json),
+            Some(Format::Json),
+            Vec::new(),
+        );
+        assert_eq!(recipe_replay_report.command, "recipe");
+
+        let report = PipelineReport::new(
+            "scan",
+            PipelineInput::new(Vec::new()),
+            vec!["step".to_string()],
+            vec!["guard".to_string()],
+        )
+        .mark_external_tool_used("rg");
+        let ensured = ensure_external_tool(report, "rg");
+        assert!(ensured.external_tools.iter().any(|tool| tool.name == "rg"));
+    }
+
+    #[test]
+    fn canon_jsonl_helpers_cover_stream_and_buffered_modes() {
+        let mut out = Vec::new();
+        run_canon_jsonl_stream(
+            Cursor::new(br#"[{"b":"2","a":"1"}]"#),
+            &mut out,
+            Format::Json,
+            canon::CanonCommandOptions::default(),
+        )
+        .expect("json input to jsonl stream");
+        let output_text = String::from_utf8(out).expect("utf8");
+        assert!(output_text.contains(r#"{"a":1,"b":2}"#));
+
+        let mut out = Vec::new();
+        run_canon_jsonl_stream(
+            Cursor::new(b"{\"b\":\"2\",\"a\":\"1\"}\n{\"x\":\"true\"}\n"),
+            &mut out,
+            Format::Jsonl,
+            canon::CanonCommandOptions::default(),
+        )
+        .expect("jsonl input to jsonl stream");
+        let output_text = String::from_utf8(out).expect("utf8");
+        assert!(output_text.lines().count() >= 2);
+
+        let mut out = Vec::new();
+        let detected = run_canon_jsonl_with_buffered_stdin(
+            Cursor::new(Vec::<u8>::new()),
+            br#"[{"x":"1"}]"#.to_vec(),
+            &mut out,
+            canon::CanonCommandOptions::default(),
+        )
+        .expect("buffered stdin fallback");
+        assert_eq!(detected, Format::Json);
+
+        struct BrokenWriter;
+        impl Write for BrokenWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("write failed"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("flush failed"))
+            }
+        }
+
+        let mut broken = BrokenWriter;
+        let err = write_jsonl_stream_value(&mut broken, &json!({"id": 1}))
+            .expect_err("writer failure should map to canon error");
+        let (code, label) = map_canon_error(&err);
+        assert_eq!(code, 3);
+        assert_eq!(label, "input_usage_error");
+    }
+
+    #[test]
+    fn run_wrappers_cover_input_usage_exit_paths() {
+        assert_eq!(
+            run_ingest_notes(
+                IngestNotesArgs {
+                    tag: vec!["".to_string()],
+                    since: None,
+                    until: None,
+                    to: CliIngestNotesOutput::Json,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_ingest_doc(
+                IngestDocArgs {
+                    input: "/definitely-missing/dataq-ingest-doc.md".to_string(),
+                    from: CliIngestDocFormat::Md,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_ingest_book(
+                IngestBookArgs {
+                    root: PathBuf::from("/definitely-missing/dataq-book"),
+                    include_files: false,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_gate_schema(
+                GateSchemaArgs {
+                    schema: PathBuf::from("/definitely-missing/schema.json"),
+                    input: Some(PathBuf::from("/definitely-missing/input.json")),
+                    from: None,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_gate_policy(
+                GatePolicyArgs {
+                    rules: PathBuf::from("/definitely-missing/rules.json"),
+                    input: Some(PathBuf::from("/definitely-missing/input.json")),
+                    source: Some(CliGatePolicySource::ScanText),
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_merge(
+                MergeArgs {
+                    base: PathBuf::from("/definitely-missing/base.json"),
+                    overlay: vec![PathBuf::from("/definitely-missing/overlay.json")],
+                    policy: CliMergePolicy::LastWins,
+                    policy_path: Vec::new(),
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_join(
+                JoinArgs {
+                    left: PathBuf::from("/definitely-missing/left.json"),
+                    right: PathBuf::from("/definitely-missing/right.json"),
+                    on: "id".to_string(),
+                    how: CliJoinHow::Inner,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_aggregate(
+                AggregateArgs {
+                    input: PathBuf::from("/definitely-missing/input.json"),
+                    group_by: "team".to_string(),
+                    metric: CliAggregateMetric::Count,
+                    target: "value".to_string(),
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_scan_text(
+                ScanTextArgs {
+                    pattern: "[".to_string(),
+                    path: Some(PathBuf::from(".")),
+                    glob: Vec::new(),
+                    max_matches: None,
+                    policy_mode: false,
+                    jq_project: false,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_transform_rowset(
+                TransformRowsetArgs {
+                    input: "/definitely-missing/input.json".to_string(),
+                    jq_filter: ".".to_string(),
+                    mlr: vec!["cat".to_string()],
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_sdiff(
+                SdiffArgs {
+                    left: PathBuf::from("/definitely-missing/left.json"),
+                    right: PathBuf::from("/definitely-missing/right.json"),
+                    key: Some("$.id".to_string()),
+                    ignore_path: Vec::new(),
+                    fail_on_diff: false,
+                    value_diff_cap: sdiff::DEFAULT_VALUE_DIFF_CAP,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_diff_source(
+                DiffSourceArgs {
+                    left: "/definitely-missing/left.json".to_string(),
+                    right: "/definitely-missing/right.json".to_string(),
+                    fail_on_diff: false,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_profile(
+                ProfileArgs {
+                    input: Some(PathBuf::from("/definitely-missing/input.json")),
+                    from: CliInputFormat::Json,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_recipe_run(
+                RecipeRunArgs {
+                    file: PathBuf::from("/definitely-missing/recipe.txt"),
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_recipe_lock(
+                RecipeLockArgs {
+                    file: PathBuf::from("/definitely-missing/recipe.txt"),
+                    out: None,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_recipe_replay(
+                RecipeReplayArgs {
+                    file: PathBuf::from("/definitely-missing/recipe.json"),
+                    lock: PathBuf::from("/definitely-missing/recipe.lock.json"),
+                    strict: true,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_contract(
+                ContractArgs {
+                    command: None,
+                    all: false,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_emit_plan(
+                EmitPlanArgs {
+                    command: "canon".to_string(),
+                    args: Some("not-json".to_string()),
+                },
+                true,
+            ),
+            3
+        );
+
+        let temp = tempdir().expect("tempdir");
+        assert_eq!(
+            run_codex_install_skill(
+                CodexInstallSkillArgs {
+                    dest: Some(temp.path().join(".codex/skills")),
+                    force: false,
+                },
+                true,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn subcommand_dispatchers_route_to_command_handlers() {
+        let ingest_exit = run_ingest(
+            IngestArgs {
+                command: IngestSubcommand::Doc(IngestDocArgs {
+                    input: "/definitely-missing/ingest-doc.md".to_string(),
+                    from: CliIngestDocFormat::Md,
+                }),
+            },
+            false,
+        );
+        assert_eq!(ingest_exit, 3);
+
+        let gate_exit = run_gate(
+            GateArgs {
+                command: GateSubcommand::Schema(GateSchemaArgs {
+                    schema: PathBuf::from("/definitely-missing/schema.json"),
+                    input: Some(PathBuf::from("/definitely-missing/input.json")),
+                    from: None,
+                }),
+            },
+            false,
+        );
+        assert_eq!(gate_exit, 3);
+
+        let transform_exit = run_transform(
+            TransformArgs {
+                command: TransformSubcommand::Rowset(TransformRowsetArgs {
+                    input: "/definitely-missing/input.json".to_string(),
+                    jq_filter: ".".to_string(),
+                    mlr: vec!["cat".to_string()],
+                }),
+            },
+            false,
+        );
+        assert_eq!(transform_exit, 3);
+
+        let scan_exit = run_scan(
+            ScanArgs {
+                command: ScanSubcommand::Text(ScanTextArgs {
+                    pattern: "[".to_string(),
+                    path: Some(PathBuf::from(".")),
+                    glob: Vec::new(),
+                    max_matches: None,
+                    policy_mode: false,
+                    jq_project: false,
+                }),
+            },
+            false,
+        );
+        assert_eq!(scan_exit, 3);
+
+        let diff_exit = run_diff(
+            DiffArgs {
+                command: DiffSubcommand::Source(DiffSourceArgs {
+                    left: "/definitely-missing/left.json".to_string(),
+                    right: "/definitely-missing/right.json".to_string(),
+                    fail_on_diff: false,
+                }),
+            },
+            false,
+        );
+        assert_eq!(diff_exit, 3);
+
+        let recipe_exit = run_recipe(
+            RecipeArgs {
+                command: RecipeSubcommand::Run(RecipeRunArgs {
+                    file: PathBuf::from("/definitely-missing/recipe.txt"),
+                }),
+            },
+            false,
+        );
+        assert_eq!(recipe_exit, 3);
+
+        let emit_exit = run_emit(
+            EmitArgs {
+                command: EmitSubcommand::Plan(EmitPlanArgs {
+                    command: "canon".to_string(),
+                    args: Some("not-json".to_string()),
+                }),
+            },
+            false,
+        );
+        assert_eq!(emit_exit, 3);
+
+        let codex_temp = tempdir().expect("tempdir");
+        let codex_exit = run_codex(
+            CodexArgs {
+                command: CodexSubcommand::InstallSkill(CodexInstallSkillArgs {
+                    dest: Some(codex_temp.path().join(".codex/skills")),
+                    force: false,
+                }),
+            },
+            false,
+        );
+        assert_eq!(codex_exit, 0);
     }
 }
