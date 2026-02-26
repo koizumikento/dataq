@@ -142,6 +142,12 @@ Prefer `Cargo.toml` lint tables instead of ad-hoc per-file allowances where prac
 - Add targeted unit tests for parser/normalizer/diff edge cases.
 - Keep fixture-based tests deterministic and easy to diff.
 
+## Release note policy
+
+- When creating a release tag, always write release notes describing what changed in that release.
+- Include user-visible changes, bug fixes, and any breaking changes with required migration steps.
+- Keep release notes concise and reproducible (link related docs/PRs/issues where possible).
+
 ## References
 
 - OpenAI Codex AGENTS guide:
