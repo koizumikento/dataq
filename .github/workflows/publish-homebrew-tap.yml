@@ -1,0 +1,100 @@
+name: Publish Homebrew Tap
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish-tap:
+    name: Update tap formula
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag and tap repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "RELEASE_TAG=${{ github.event.release.tag_name }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
+          fi
+
+          if [[ -n "${{ vars.HOMEBREW_TAP_REPO }}" ]]; then
+            echo "TAP_REPO=${{ vars.HOMEBREW_TAP_REPO }}" >> "$GITHUB_ENV"
+          else
+            echo "TAP_REPO=${GITHUB_REPOSITORY_OWNER}/stray-tools" >> "$GITHUB_ENV"
+          fi
+
+      - name: Download checksum assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          gh release download "${RELEASE_TAG}" \
+            --repo "${SOURCE_REPO}" \
+            --pattern "dataq-${RELEASE_TAG}-x86_64-apple-darwin.sha256" \
+            --pattern "dataq-${RELEASE_TAG}-aarch64-apple-darwin.sha256" \
+            --dir dist
+
+      - name: Generate Homebrew formula
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          x86_sha="$(awk '{print $1}' "dist/dataq-${RELEASE_TAG}-x86_64-apple-darwin.sha256")"
+          arm_sha="$(awk '{print $1}' "dist/dataq-${RELEASE_TAG}-aarch64-apple-darwin.sha256")"
+
+          ./scripts/generate-homebrew-formula.sh \
+            --tag "${RELEASE_TAG}" \
+            --repo "${SOURCE_REPO}" \
+            --x86_64-macos-sha "${x86_sha}" \
+            --arm64-macos-sha "${arm_sha}" \
+            --output "dist/dataq.rb"
+
+      - name: Push formula to tap repository
+        shell: bash
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            echo "HOMEBREW_TAP_TOKEN is required" >&2
+            exit 1
+          fi
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+          cp dist/dataq.rb tap/Formula/dataq.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- Formula/dataq.rb; then
+            echo "Formula is already up to date"
+            exit 0
+          fi
+
+          git add Formula/dataq.rb
+          git commit -m "dataq ${RELEASE_TAG}"
+          git push origin HEAD

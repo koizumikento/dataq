@@ -208,6 +208,15 @@ dataq assert --input raw.json --rules rules.yaml
 cargo install --path .
 ```
 
+#### Homebrew（tap）
+
+```bash
+brew tap koizumikento/stray-tools https://github.com/koizumikento/stray-tools.git
+brew install koizumikento/stray-tools/dataq
+```
+
+詳細な設定手順は `docs/homebrew-tap.md` を参照してください。
+
 ### 開発（ローカル検証）
 
 ```bash
@@ -228,6 +237,7 @@ cargo test --workspace --all-features
 - 各ターゲットで `dataq-<tag>-<target>.<ext>` と `dataq-<tag>-<target>.sha256` を GitHub Release に添付します
 - タグ名に `-` を含む場合（例: `v0.1.0-rc.1`）は GitHub Pre-release として公開します
 - この workflow は `crates.io` 公開を行いません（将来は別 workflow で分離予定）
+- Release 公開後、`publish-homebrew-tap.yml` により tap リポジトリの `Formula/dataq.rb` を自動更新できます（設定手順: `docs/homebrew-tap.md`）
 
 ### コントリビュート
 
