@@ -106,11 +106,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- Formula/dataq.rb; then
+          git add Formula/dataq.rb
+
+          if git diff --cached --quiet; then
             echo "Formula is already up to date"
             exit 0
           fi
 
-          git add Formula/dataq.rb
           git commit -m "dataq ${RELEASE_TAG}"
           git push origin HEAD
