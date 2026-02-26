@@ -39,3 +39,4 @@ brew install koizumikento/stray-tools/dataq
 ```
 
 この tap は URL 指定で登録した前提のため、`brew install dataq` より fully-qualified 名を推奨します。
+formula では `jq`, `yq`, `miller`(=`mlr`), `pandoc`, `xh`, `ripgrep`, `nb`, `mdbook` を依存として定義しています。

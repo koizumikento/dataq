@@ -215,6 +215,8 @@ brew tap koizumikento/stray-tools https://github.com/koizumikento/stray-tools.gi
 brew install koizumikento/stray-tools/dataq
 ```
 
+上記 formula は連携ツール依存（`jq`, `yq`, `miller`(=`mlr`), `pandoc`, `xh`, `ripgrep`, `nb`, `mdbook`）も併せて導入します。
+
 詳細な設定手順は `docs/homebrew-tap.md` を参照してください。
 
 ### 開発（ローカル検証）
