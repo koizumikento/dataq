@@ -148,6 +148,16 @@ Prefer `Cargo.toml` lint tables instead of ad-hoc per-file allowances where prac
 - Include user-visible changes, bug fixes, and any breaking changes with required migration steps.
 - Keep release notes concise and reproducible (link related docs/PRs/issues where possible).
 
+## Release and Homebrew flow
+
+- Keep `Cargo.toml` `package.version` aligned with the next release tag before pushing the tag.
+- Ensure `cargo run -- --version` matches the intended release version (e.g., `0.1.12`) before tagging.
+- Push version bump commit to `main` first, then create/push the tag (`vX.Y.Z`) from that commit.
+- After release workflow updates the tap formula, run `brew update` and `brew upgrade koizumikento/stray-tools/dataq`.
+- Validate installation after upgrade with both:
+  - `brew info koizumikento/stray-tools/dataq`
+  - `dataq --version`
+
 ## References
 
 - OpenAI Codex AGENTS guide:
