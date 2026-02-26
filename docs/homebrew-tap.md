@@ -26,7 +26,7 @@ GitHub の tap リポジトリを用意します（例: `stray-tools`）。
 
 `.github/workflows/publish-homebrew-tap.yml` は次のタイミングで `Formula/dataq.rb` を更新します。
 
-- Release 公開時（`release.published`）
+- `Release` workflow 成功時（`workflow_run`）
 - 手動実行（`workflow_dispatch`）
 
 workflow は Release 添付の macOS 向け SHA256 を読み取り、`scripts/generate-homebrew-formula.sh` で formula を生成して tap リポジトリへ push します。

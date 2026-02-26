@@ -1,9 +1,11 @@
 name: Publish Homebrew Tap
 
 on:
-  release:
+  workflow_run:
+    workflows:
+      - Release
     types:
-      - published
+      - completed
   workflow_dispatch:
     inputs:
       tag:
@@ -17,6 +19,11 @@ permissions:
 jobs:
   publish-tap:
     name: Update tap formula
+    if: |
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v')) ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       SOURCE_REPO: ${{ github.repository }}
@@ -29,8 +36,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            echo "RELEASE_TAG=${{ github.event.release.tag_name }}" >> "$GITHUB_ENV"
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "RELEASE_TAG=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_ENV"
           else
             echo "RELEASE_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
           fi
@@ -49,11 +56,20 @@ jobs:
           set -euo pipefail
           mkdir -p dist
 
-          gh release download "${RELEASE_TAG}" \
-            --repo "${SOURCE_REPO}" \
-            --pattern "dataq-${RELEASE_TAG}-x86_64-apple-darwin.sha256" \
-            --pattern "dataq-${RELEASE_TAG}-aarch64-apple-darwin.sha256" \
-            --dir dist
+          for attempt in 1 2 3 4 5; do
+            if gh release download "${RELEASE_TAG}" \
+              --repo "${SOURCE_REPO}" \
+              --pattern "dataq-${RELEASE_TAG}-x86_64-apple-darwin.sha256" \
+              --pattern "dataq-${RELEASE_TAG}-aarch64-apple-darwin.sha256" \
+              --dir dist; then
+              break
+            fi
+            if [[ "${attempt}" == "5" ]]; then
+              echo "failed to download release checksums for ${RELEASE_TAG}" >&2
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Generate Homebrew formula
         shell: bash
