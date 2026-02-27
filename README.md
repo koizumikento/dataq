@@ -689,6 +689,8 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.diff.source`
   - `dataq.profile`
   - `dataq.ingest.doc`
+  - `dataq.ingest.notes`
+  - `dataq.ingest.book`
   - `dataq.join`
   - `dataq.aggregate`
   - `dataq.scan.text`
@@ -700,12 +702,31 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.recipe.run`
   - `dataq.recipe.lock`
   - `dataq.recipe.replay`
+- `tools/list` の各 tool 定義:
+  - `inputSchema.additionalProperties = false`（デフォルト）
+  - canonical 引数名のみ `properties` に掲載し、`required` / `enum` / `oneOf` を明示
+  - `examples` に実行例（canonical 引数）
+  - `meta.exit_code_contract` に `0|2|3|1` の契約メタデータ
+  - `dataq.ingest.api` の `method` は `GET|POST|PUT|PATCH|DELETE` を大文字小文字非依存で受理
 - `tools/call` レスポンス:
   - `structuredContent.exit_code`
   - `structuredContent.payload`
   - `structuredContent.pipeline`（`emit_pipeline=true` のときのみ）
+  - `structuredContent.meta.warnings`（alias 引数使用時の非推奨警告）
   - `isError = (exit_code != 0)`
   - `content[0].text` には `structuredContent` と等価なJSON文字列を格納
+  - 未知引数は `input_usage_error`（exit `3`）として拒否される
+- alias 引数:
+  - 既存 alias は互換性維持のため受理
+  - `tools/call` の `structuredContent.meta.warnings` に
+    - `code = "deprecated_arg_alias"`
+    - `alias`
+    - `canonical`
+    - `message`
+    を返す
+- `input_usage_error` payload:
+  - `error`, `message` に加えて `invalid_params` を返す
+  - `invalid_params[*]` は `name`, `reason` を持つ機械可読エントリ
 - JSON-RPCエラーコード:
   - `-32700` parse error
   - `-32600` invalid request

@@ -234,6 +234,10 @@ fn handle_tools_call(id: Value, params: Map<String, Value>) -> Value {
             );
         }
     };
+    let alias_warnings = deprecated_alias_warnings(name, &arguments);
+    if let Some(execution) = validate_tool_arguments(name, &arguments) {
+        return success_response(id, tool_call_result(execution, alias_warnings));
+    }
 
     let execution = match std::panic::catch_unwind(|| dispatch_tool_call(name, &arguments)) {
         Ok(execution) => execution,
@@ -241,7 +245,7 @@ fn handle_tools_call(id: Value, params: Map<String, Value>) -> Value {
             return error_response(id, JSONRPC_INTERNAL_ERROR, "internal error");
         }
     };
-    success_response(id, tool_call_result(execution))
+    success_response(id, tool_call_result(execution, alias_warnings))
 }
 
 fn dispatch_tool_call(tool_name: &str, args: &Map<String, Value>) -> ToolExecution {
@@ -760,12 +764,12 @@ fn execute_gate_schema(args: &Map<String, Value>) -> ToolExecution {
 
     let schema_source = match parse_document_input(
         args,
-        &["schema_path", "schema_file"],
-        &["schema", "schema_inline"],
-        "schema",
+        &["schema_path", "schema_file", "schema"],
+        &["schema_inline"],
+        "schema_path",
     ) {
         Ok(Some(source)) => source,
-        Ok(None) => return input_usage_error("missing required `schema`"),
+        Ok(None) => return input_usage_error("missing required `schema_path`"),
         Err(message) => return input_usage_error(message),
     };
     let schema_path = match schema_source {
@@ -865,9 +869,9 @@ fn execute_gate_policy(args: &Map<String, Value>) -> ToolExecution {
     };
 
     let rules_path =
-        match parse_optional_path(args, &["rules_path", "rules_file", "rules"], "rules") {
+        match parse_optional_path(args, &["rules_path", "rules_file", "rules"], "rules_path") {
             Ok(Some(path)) => path,
-            Ok(None) => return input_usage_error("missing required `rules`"),
+            Ok(None) => return input_usage_error("missing required `rules_path`"),
             Err(message) => return input_usage_error(message),
         };
 
@@ -1999,13 +2003,15 @@ fn execute_recipe_lock(args: &Map<String, Value>) -> ToolExecution {
         if let Some(out_path) = out_path {
             if let Some(serialized_lock) = serialized_lock {
                 if let Err(error) = std::fs::write(&out_path, serialized_lock.as_slice()) {
+                    let message = format!(
+                        "failed to write recipe lock file `{}`: {error}",
+                        out_path.display()
+                    );
                     execution.exit_code = 3;
                     execution.payload = json!({
                         "error": "input_usage_error",
-                        "message": format!(
-                            "failed to write recipe lock file `{}`: {error}",
-                            out_path.display()
-                        ),
+                        "message": message,
+                        "invalid_params": invalid_params_from_message(message.as_str()),
                     });
                 }
             } else {
@@ -2054,14 +2060,15 @@ fn execute_recipe_replay(args: &Map<String, Value>) -> ToolExecution {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
-    let file_path = match parse_optional_path(args, &["file_path", "file", "recipe_path"], "file") {
+    let file_path =
+        match parse_optional_path(args, &["file_path", "file", "recipe_path"], "file_path") {
+            Ok(Some(path)) => path,
+            Ok(None) => return input_usage_error("missing required `file_path`"),
+            Err(message) => return input_usage_error(message),
+        };
+    let lock_path = match parse_optional_path(args, &["lock_path", "lock"], "lock_path") {
         Ok(Some(path)) => path,
-        Ok(None) => return input_usage_error("missing required `file`"),
-        Err(message) => return input_usage_error(message),
-    };
-    let lock_path = match parse_optional_path(args, &["lock_path", "lock"], "lock") {
-        Ok(Some(path)) => path,
-        Ok(None) => return input_usage_error("missing required `lock`"),
+        Ok(None) => return input_usage_error("missing required `lock_path`"),
         Err(message) => return input_usage_error(message),
     };
     let strict = match parse_bool(args, &["strict"], false, "strict") {
@@ -2142,41 +2149,970 @@ fn tools_list_result() -> Value {
 }
 
 fn tool_definition(tool_name: &str) -> Value {
-    let mut input_schema = json!({
-        "type": "object",
-        "properties": {
-            "emit_pipeline": {
-                "type": "boolean",
-                "default": false
-            }
-        },
-        "additionalProperties": true
+    let deprecated_aliases: Vec<Value> = deprecated_alias_pairs(tool_name)
+        .iter()
+        .map(|(alias, canonical)| {
+            json!({
+                "alias": alias,
+                "canonical": canonical,
+            })
+        })
+        .collect();
+    let mut meta = json!({
+        "exit_code_contract": tool_exit_code_contract(tool_name),
     });
-    if tool_name == "dataq.doctor" {
-        input_schema["properties"]["capabilities"] = json!({
-            "type": "boolean",
-            "default": false
-        });
-        input_schema["properties"]["profile"] = json!({
-            "type": "string",
-            "enum": ["core", "ci-jobs", "doc", "api", "notes", "book", "scan"]
-        });
+    if !deprecated_aliases.is_empty() {
+        meta["deprecated_aliases"] = Value::Array(deprecated_aliases);
     }
 
     json!({
         "name": tool_name,
         "description": format!("dataq MCP tool `{tool_name}`"),
-        "inputSchema": input_schema
+        "inputSchema": tool_input_schema(tool_name),
+        "examples": tool_examples(tool_name),
+        "meta": meta,
     })
 }
 
-fn tool_call_result(execution: ToolExecution) -> Value {
+fn emit_pipeline_schema() -> Value {
+    json!({
+        "type": "boolean",
+        "default": false
+    })
+}
+
+fn format_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["json", "yaml", "csv", "jsonl"]
+    })
+}
+
+fn json_value_schema() -> Value {
+    json!({
+        "oneOf": [
+            { "type": "object" },
+            { "type": "array" },
+            { "type": "string" },
+            { "type": "number" },
+            { "type": "boolean" },
+            { "type": "null" }
+        ]
+    })
+}
+
+fn string_or_array_of_strings_schema() -> Value {
+    json!({
+        "oneOf": [
+            { "type": "string" },
+            {
+                "type": "array",
+                "items": { "type": "string" }
+            }
+        ]
+    })
+}
+
+fn u16_or_numeric_string_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535
+            },
+            {
+                "type": "string",
+                "pattern": "^[0-9]{1,5}$"
+            }
+        ]
+    })
+}
+
+fn tool_input_schema(tool_name: &str) -> Value {
+    match tool_name {
+        "dataq.canon" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "input": json_value_schema(),
+                "input_path": { "type": "string" },
+                "sort_keys": { "type": "boolean", "default": true },
+                "normalize_time": { "type": "boolean", "default": false },
+                "from": format_schema(),
+                "to": format_schema()
+            },
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["input"] },
+                { "required": ["input_path"] }
+            ]
+        }),
+        "dataq.ingest.api" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "url": { "type": "string" },
+                "method": {
+                    "type": "string",
+                    "pattern": "^(?:[Gg][Ee][Tt]|[Pp][Oo][Ss][Tt]|[Pp][Uu][Tt]|[Pp][Aa][Tt][Cc][Hh]|[Dd][Ee][Ll][Ee][Tt][Ee])$"
+                },
+                "header": string_or_array_of_strings_schema(),
+                "body": json_value_schema(),
+                "expect_status": u16_or_numeric_string_schema()
+            },
+            "required": ["url"],
+            "additionalProperties": false
+        }),
+        "dataq.ingest.yaml_jobs" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "mode": {
+                    "type": "string",
+                    "enum": ["github-actions", "gitlab-ci", "generic-map"]
+                },
+                "input": json_value_schema(),
+                "input_path": { "type": "string" }
+            },
+            "required": ["mode"],
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["input"] },
+                { "required": ["input_path"] }
+            ]
+        }),
+        "dataq.assert" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "normalize": {
+                    "type": "string",
+                    "enum": ["github-actions-jobs", "gitlab-ci-jobs"]
+                },
+                "from": format_schema(),
+                "input": json_value_schema(),
+                "input_path": { "type": "string" },
+                "rules": json_value_schema(),
+                "rules_path": { "type": "string" },
+                "schema": json_value_schema(),
+                "schema_path": { "type": "string" }
+            },
+            "additionalProperties": false,
+            "allOf": [
+                {
+                    "oneOf": [
+                        { "required": ["input"] },
+                        { "required": ["input_path"] }
+                    ]
+                },
+                {
+                    "oneOf": [
+                        { "required": ["rules"] },
+                        { "required": ["rules_path"] },
+                        { "required": ["schema"] },
+                        { "required": ["schema_path"] }
+                    ]
+                }
+            ]
+        }),
+        "dataq.gate.schema" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "from": {
+                    "type": "string",
+                    "enum": ["github-actions-jobs", "gitlab-ci-jobs"]
+                },
+                "input": json_value_schema(),
+                "input_path": { "type": "string" },
+                "schema_path": { "type": "string" }
+            },
+            "required": ["schema_path"],
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["input"] },
+                { "required": ["input_path"] }
+            ]
+        }),
+        "dataq.gate.policy" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "rules_path": { "type": "string" },
+                "input": json_value_schema(),
+                "input_path": { "type": "string" },
+                "source": {
+                    "type": "string",
+                    "enum": ["scan-text", "ingest-doc", "ingest-api", "ingest-notes", "ingest-book"]
+                }
+            },
+            "required": ["rules_path"],
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["input"] },
+                { "required": ["input_path"] }
+            ]
+        }),
+        "dataq.sdiff" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "left": json_value_schema(),
+                "left_path": { "type": "string" },
+                "right": json_value_schema(),
+                "right_path": { "type": "string" },
+                "left_from": format_schema(),
+                "right_from": format_schema(),
+                "key": { "type": "string" },
+                "ignore_path": string_or_array_of_strings_schema(),
+                "fail_on_diff": { "type": "boolean", "default": false },
+                "value_diff_cap": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false,
+            "allOf": [
+                {
+                    "oneOf": [
+                        { "required": ["left"] },
+                        { "required": ["left_path"] }
+                    ]
+                },
+                {
+                    "oneOf": [
+                        { "required": ["right"] },
+                        { "required": ["right_path"] }
+                    ]
+                }
+            ]
+        }),
+        "dataq.diff.source" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "left": { "type": "string" },
+                "right": { "type": "string" },
+                "fail_on_diff": { "type": "boolean", "default": false }
+            },
+            "required": ["left", "right"],
+            "additionalProperties": false
+        }),
+        "dataq.profile" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "from": format_schema(),
+                "input": json_value_schema(),
+                "input_path": { "type": "string" }
+            },
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["input"] },
+                { "required": ["input_path"] }
+            ]
+        }),
+        "dataq.ingest.doc" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "from": {
+                    "type": "string",
+                    "enum": ["md", "html", "docx", "rst", "latex"]
+                },
+                "input": { "type": "string" },
+                "input_path": { "type": "string" }
+            },
+            "required": ["from"],
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["input"] },
+                { "required": ["input_path"] }
+            ]
+        }),
+        "dataq.ingest.notes" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "tag": string_or_array_of_strings_schema(),
+                "since": { "type": "string" },
+                "until": { "type": "string" },
+                "to": {
+                    "type": "string",
+                    "enum": ["json", "jsonl"]
+                }
+            },
+            "additionalProperties": false
+        }),
+        "dataq.ingest.book" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "root": { "type": "string" },
+                "include_files": { "type": "boolean", "default": false },
+                "verify_mdbook_meta": { "type": "boolean" }
+            },
+            "required": ["root"],
+            "additionalProperties": false
+        }),
+        "dataq.join" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "left": json_value_schema(),
+                "left_path": { "type": "string" },
+                "right": json_value_schema(),
+                "right_path": { "type": "string" },
+                "on": { "type": "string" },
+                "how": {
+                    "type": "string",
+                    "enum": ["inner", "left"]
+                }
+            },
+            "required": ["on"],
+            "additionalProperties": false,
+            "allOf": [
+                {
+                    "oneOf": [
+                        { "required": ["left"] },
+                        { "required": ["left_path"] }
+                    ]
+                },
+                {
+                    "oneOf": [
+                        { "required": ["right"] },
+                        { "required": ["right_path"] }
+                    ]
+                }
+            ]
+        }),
+        "dataq.aggregate" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "input": json_value_schema(),
+                "input_path": { "type": "string" },
+                "group_by": { "type": "string" },
+                "target": { "type": "string" },
+                "metric": {
+                    "type": "string",
+                    "enum": ["count", "sum", "avg"]
+                }
+            },
+            "required": ["group_by", "target"],
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["input"] },
+                { "required": ["input_path"] }
+            ]
+        }),
+        "dataq.scan.text" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "pattern": { "type": "string" },
+                "path": { "type": "string" },
+                "glob": string_or_array_of_strings_schema(),
+                "max_matches": { "type": "integer", "minimum": 0 },
+                "policy_mode": { "type": "boolean", "default": false },
+                "jq_project": { "type": "boolean", "default": false }
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        }),
+        "dataq.transform.rowset" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "input": json_value_schema(),
+                "input_path": { "type": "string" },
+                "jq_filter": { "type": "string" },
+                "mlr": {
+                    "oneOf": [
+                        { "type": "string" },
+                        {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "minItems": 1
+                        }
+                    ]
+                }
+            },
+            "required": ["jq_filter", "mlr"],
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["input"] },
+                { "required": ["input_path"] }
+            ]
+        }),
+        "dataq.merge" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "base": json_value_schema(),
+                "base_path": { "type": "string" },
+                "overlays": json_value_schema(),
+                "overlay_paths": string_or_array_of_strings_schema(),
+                "policy": {
+                    "type": "string",
+                    "enum": ["last-wins", "deep-merge", "array-replace"]
+                },
+                "policy_path": string_or_array_of_strings_schema()
+            },
+            "additionalProperties": false,
+            "allOf": [
+                {
+                    "oneOf": [
+                        { "required": ["base"] },
+                        { "required": ["base_path"] }
+                    ]
+                },
+                {
+                    "oneOf": [
+                        { "required": ["overlays"] },
+                        { "required": ["overlay_paths"] }
+                    ]
+                }
+            ]
+        }),
+        "dataq.doctor" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "capabilities": {
+                    "type": "boolean",
+                    "default": false
+                },
+                "profile": {
+                    "type": "string",
+                    "enum": ["core", "ci-jobs", "doc", "api", "notes", "book", "scan"]
+                }
+            },
+            "additionalProperties": false
+        }),
+        "dataq.contract" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "all": {
+                    "type": "boolean",
+                    "default": false
+                },
+                "command": {
+                    "type": "string",
+                    "enum": [
+                        "canon",
+                        "ingest-api",
+                        "ingest",
+                        "assert",
+                        "gate-schema",
+                        "gate",
+                        "sdiff",
+                        "diff-source",
+                        "profile",
+                        "ingest-doc",
+                        "ingest-notes",
+                        "ingest-book",
+                        "scan",
+                        "transform-rowset",
+                        "merge",
+                        "doctor",
+                        "recipe-run",
+                        "recipe-lock"
+                    ]
+                }
+            },
+            "additionalProperties": false
+        }),
+        "dataq.emit.plan" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "command": { "type": "string" },
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        }),
+        "dataq.recipe.run" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "file_path": { "type": "string" },
+                "recipe": json_value_schema(),
+                "base_dir": { "type": "string" }
+            },
+            "additionalProperties": false,
+            "oneOf": [
+                { "required": ["file_path"] },
+                { "required": ["recipe"] }
+            ]
+        }),
+        "dataq.recipe.lock" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "file_path": { "type": "string" },
+                "out_path": { "type": "string" }
+            },
+            "required": ["file_path"],
+            "additionalProperties": false
+        }),
+        "dataq.recipe.replay" => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema(),
+                "file_path": { "type": "string" },
+                "lock_path": { "type": "string" },
+                "strict": {
+                    "type": "boolean",
+                    "default": false
+                }
+            },
+            "required": ["file_path", "lock_path"],
+            "additionalProperties": false
+        }),
+        _ => json!({
+            "type": "object",
+            "properties": {
+                "emit_pipeline": emit_pipeline_schema()
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn tool_examples(tool_name: &str) -> Vec<Value> {
+    match tool_name {
+        "dataq.canon" => vec![json!({
+            "name": "inline-canon",
+            "arguments": {
+                "input": [{"z": "2", "a": "1"}]
+            }
+        })],
+        "dataq.ingest.api" => vec![json!({
+            "name": "simple-get",
+            "arguments": {
+                "url": "https://example.test/items",
+                "method": "GET"
+            }
+        })],
+        "dataq.ingest.yaml_jobs" => vec![json!({
+            "name": "generic-map-inline",
+            "arguments": {
+                "mode": "generic-map",
+                "input": [{
+                    "job_name": "build",
+                    "field_count": 2,
+                    "has_stage": true,
+                    "has_script": true
+                }]
+            }
+        })],
+        "dataq.assert" => vec![json!({
+            "name": "assert-with-rules",
+            "arguments": {
+                "input": [{"id": 1}],
+                "rules": {
+                    "required_keys": ["id"],
+                    "forbid_keys": [],
+                    "fields": {"id": {"type": "integer"}}
+                }
+            }
+        })],
+        "dataq.gate.schema" => vec![json!({
+            "name": "gate-schema-paths",
+            "arguments": {
+                "input_path": "rows.json",
+                "schema_path": "schema.json"
+            }
+        })],
+        "dataq.gate.policy" => vec![json!({
+            "name": "gate-policy-inline",
+            "arguments": {
+                "input": [{"id": 1}],
+                "rules_path": "rules.json",
+                "source": "scan-text"
+            }
+        })],
+        "dataq.sdiff" => vec![json!({
+            "name": "sdiff-inline",
+            "arguments": {
+                "left": [{"id": 1}],
+                "right": [{"id": 1}]
+            }
+        })],
+        "dataq.diff.source" => vec![json!({
+            "name": "diff-source-preset",
+            "arguments": {
+                "left": "preset:scan-text:scan-left.json",
+                "right": "preset:scan-text:scan-right.json"
+            }
+        })],
+        "dataq.profile" => vec![json!({
+            "name": "profile-inline",
+            "arguments": {
+                "input": [{"id": 1}, {"id": 2}]
+            }
+        })],
+        "dataq.ingest.doc" => vec![json!({
+            "name": "ingest-doc-inline",
+            "arguments": {
+                "from": "md",
+                "input": "# heading"
+            }
+        })],
+        "dataq.ingest.notes" => vec![json!({
+            "name": "ingest-notes-tags",
+            "arguments": {
+                "tag": ["work", "ops"],
+                "to": "json"
+            }
+        })],
+        "dataq.ingest.book" => vec![json!({
+            "name": "ingest-book-root",
+            "arguments": {
+                "root": ".",
+                "include_files": false
+            }
+        })],
+        "dataq.join" => vec![json!({
+            "name": "join-inline",
+            "arguments": {
+                "left": [{"id": 1, "l": "L1"}],
+                "right": [{"id": 1, "r": "R1"}],
+                "on": "id",
+                "how": "inner"
+            }
+        })],
+        "dataq.aggregate" => vec![json!({
+            "name": "aggregate-count",
+            "arguments": {
+                "input": [{"team": "a", "price": 10}],
+                "group_by": "team",
+                "target": "price",
+                "metric": "count"
+            }
+        })],
+        "dataq.scan.text" => vec![json!({
+            "name": "scan-pattern",
+            "arguments": {
+                "pattern": "token",
+                "path": ".",
+                "policy_mode": true
+            }
+        })],
+        "dataq.transform.rowset" => vec![json!({
+            "name": "transform-rowset",
+            "arguments": {
+                "input": [{"id": 1}],
+                "jq_filter": ".",
+                "mlr": ["cat"]
+            }
+        })],
+        "dataq.merge" => vec![json!({
+            "name": "merge-inline",
+            "arguments": {
+                "base": {"cfg": {"a": 1}},
+                "overlays": [{"cfg": {"b": 2}}],
+                "policy": "deep-merge"
+            }
+        })],
+        "dataq.doctor" => vec![json!({
+            "name": "doctor-profile",
+            "arguments": {
+                "profile": "core"
+            }
+        })],
+        "dataq.contract" => vec![json!({
+            "name": "contract-command",
+            "arguments": {
+                "command": "assert"
+            }
+        })],
+        "dataq.emit.plan" => vec![json!({
+            "name": "emit-plan-canon",
+            "arguments": {
+                "command": "canon",
+                "args": ["--sort-keys"]
+            }
+        })],
+        "dataq.recipe.run" => vec![json!({
+            "name": "recipe-run-inline",
+            "arguments": {
+                "recipe": {
+                    "version": "dataq.recipe.v1",
+                    "steps": []
+                }
+            }
+        })],
+        "dataq.recipe.lock" => vec![json!({
+            "name": "recipe-lock",
+            "arguments": {
+                "file_path": "recipe.json"
+            }
+        })],
+        "dataq.recipe.replay" => vec![json!({
+            "name": "recipe-replay",
+            "arguments": {
+                "file_path": "recipe.json",
+                "lock_path": "recipe.lock.json",
+                "strict": false
+            }
+        })],
+        _ => Vec::new(),
+    }
+}
+
+fn tool_contract_command(tool_name: &str) -> Option<contract::ContractCommand> {
+    match tool_name {
+        "dataq.canon" => Some(contract::ContractCommand::Canon),
+        "dataq.ingest.api" => Some(contract::ContractCommand::IngestApi),
+        "dataq.ingest.yaml_jobs" => Some(contract::ContractCommand::Ingest),
+        "dataq.assert" => Some(contract::ContractCommand::Assert),
+        "dataq.gate.schema" => Some(contract::ContractCommand::GateSchema),
+        "dataq.gate.policy" => Some(contract::ContractCommand::Gate),
+        "dataq.sdiff" => Some(contract::ContractCommand::Sdiff),
+        "dataq.diff.source" => Some(contract::ContractCommand::DiffSource),
+        "dataq.profile" => Some(contract::ContractCommand::Profile),
+        "dataq.ingest.doc" => Some(contract::ContractCommand::IngestDoc),
+        "dataq.ingest.notes" => Some(contract::ContractCommand::IngestNotes),
+        "dataq.ingest.book" => Some(contract::ContractCommand::IngestBook),
+        "dataq.scan.text" => Some(contract::ContractCommand::Scan),
+        "dataq.transform.rowset" => Some(contract::ContractCommand::TransformRowset),
+        "dataq.merge" => Some(contract::ContractCommand::Merge),
+        "dataq.doctor" => Some(contract::ContractCommand::Doctor),
+        "dataq.recipe.run" => Some(contract::ContractCommand::RecipeRun),
+        "dataq.recipe.lock" => Some(contract::ContractCommand::RecipeLock),
+        _ => None,
+    }
+}
+
+fn default_exit_code_contract() -> Value {
+    json!({
+        "0": "success",
+        "2": "validation mismatch is not used by this command",
+        "3": "input/usage error",
+        "1": "internal/unexpected error"
+    })
+}
+
+fn tool_exit_code_contract(tool_name: &str) -> Value {
+    if tool_name == "dataq.recipe.replay" {
+        return json!({
+            "0": "success",
+            "2": "strict lock mismatch or step-level validation mismatch",
+            "3": "input/usage error",
+            "1": "internal/unexpected error"
+        });
+    }
+    let Some(command) = tool_contract_command(tool_name) else {
+        return default_exit_code_contract();
+    };
+    let response = contract::run_for_command(command);
+    if response.exit_code != 0 {
+        return default_exit_code_contract();
+    }
+    response
+        .payload
+        .get("exit_codes")
+        .cloned()
+        .unwrap_or_else(default_exit_code_contract)
+}
+
+fn deprecated_alias_pairs(tool_name: &str) -> &'static [(&'static str, &'static str)] {
+    match tool_name {
+        "dataq.canon" => &[
+            ("input_file", "input_path"),
+            ("input_inline", "input"),
+            ("input_value", "input"),
+        ],
+        "dataq.ingest.api" => &[("headers", "header"), ("expect-status", "expect_status")],
+        "dataq.ingest.yaml_jobs" => &[
+            ("input_file", "input_path"),
+            ("input_inline", "input"),
+            ("input_value", "input"),
+        ],
+        "dataq.assert" => &[
+            ("input_file", "input_path"),
+            ("input_inline", "input"),
+            ("input_value", "input"),
+            ("rules_file", "rules_path"),
+            ("rules_inline", "rules"),
+            ("schema_file", "schema_path"),
+            ("schema_inline", "schema"),
+        ],
+        "dataq.gate.schema" => &[
+            ("input_file", "input_path"),
+            ("input_inline", "input"),
+            ("input_value", "input"),
+            ("schema_file", "schema_path"),
+            ("schema", "schema_path"),
+            ("schema_inline", "schema_path"),
+        ],
+        "dataq.gate.policy" => &[
+            ("rules_file", "rules_path"),
+            ("rules", "rules_path"),
+            ("input_file", "input_path"),
+            ("input_inline", "input"),
+            ("input_value", "input"),
+        ],
+        "dataq.sdiff" => &[
+            ("left_file", "left_path"),
+            ("left_inline", "left"),
+            ("left_value", "left"),
+            ("right_file", "right_path"),
+            ("right_inline", "right"),
+            ("right_value", "right"),
+            ("ignore_paths", "ignore_path"),
+        ],
+        "dataq.profile" => &[
+            ("input_file", "input_path"),
+            ("input_inline", "input"),
+            ("input_value", "input"),
+        ],
+        "dataq.ingest.doc" => &[
+            ("input_file", "input_path"),
+            ("input_text", "input"),
+            ("input_inline", "input"),
+        ],
+        "dataq.ingest.notes" => &[("tags", "tag")],
+        "dataq.ingest.book" => &[("root_path", "root"), ("book_root", "root")],
+        "dataq.join" => &[
+            ("left_file", "left_path"),
+            ("left_inline", "left"),
+            ("left_value", "left"),
+            ("right_file", "right_path"),
+            ("right_inline", "right"),
+            ("right_value", "right"),
+        ],
+        "dataq.aggregate" => &[
+            ("input_file", "input_path"),
+            ("input_inline", "input"),
+            ("input_value", "input"),
+        ],
+        "dataq.scan.text" => &[("globs", "glob")],
+        "dataq.transform.rowset" => &[
+            ("input_file", "input_path"),
+            ("input_inline", "input"),
+            ("input_value", "input"),
+            ("jq-filter", "jq_filter"),
+            ("mlr_args", "mlr"),
+        ],
+        "dataq.merge" => &[
+            ("base_file", "base_path"),
+            ("base_inline", "base"),
+            ("overlay_path", "overlay_paths"),
+            ("overlays_inline", "overlays"),
+            ("overlay_inline", "overlays"),
+            ("policy_paths", "policy_path"),
+        ],
+        "dataq.recipe.run" => &[
+            ("file", "file_path"),
+            ("recipe_path", "file_path"),
+            ("recipe_inline", "recipe"),
+        ],
+        "dataq.recipe.lock" => &[
+            ("file", "file_path"),
+            ("recipe_path", "file_path"),
+            ("out", "out_path"),
+        ],
+        "dataq.recipe.replay" => &[
+            ("file", "file_path"),
+            ("recipe_path", "file_path"),
+            ("lock", "lock_path"),
+        ],
+        _ => &[],
+    }
+}
+
+fn deprecated_alias_warnings(tool_name: &str, args: &Map<String, Value>) -> Vec<Value> {
+    let mut warnings = Vec::new();
+    for (alias, canonical) in deprecated_alias_pairs(tool_name) {
+        if args.contains_key(*alias) {
+            warnings.push(json!({
+                "code": "deprecated_arg_alias",
+                "alias": alias,
+                "canonical": canonical,
+                "message": format!("`{alias}` is deprecated; use `{canonical}`"),
+            }));
+        }
+    }
+    warnings
+}
+
+fn is_known_tool(tool_name: &str) -> bool {
+    TOOL_ORDER.contains(&tool_name)
+}
+
+fn tool_allowed_argument_names(tool_name: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(properties) = tool_input_schema(tool_name)
+        .get("properties")
+        .and_then(Value::as_object)
+    {
+        names.extend(properties.keys().cloned());
+    }
+    for (alias, _) in deprecated_alias_pairs(tool_name) {
+        names.push((*alias).to_string());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn validate_tool_arguments(tool_name: &str, args: &Map<String, Value>) -> Option<ToolExecution> {
+    if !is_known_tool(tool_name) {
+        return None;
+    }
+
+    let allowed = tool_allowed_argument_names(tool_name);
+    let mut unknown: Vec<String> = args
+        .keys()
+        .filter(|key| !allowed.iter().any(|allowed_name| allowed_name == *key))
+        .cloned()
+        .collect();
+    unknown.sort();
+
+    if unknown.is_empty() {
+        return None;
+    }
+
+    let listed = unknown
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let message = format!("unknown argument(s) for `{tool_name}`: {listed}");
+    let invalid_params = unknown
+        .iter()
+        .map(|name| invalid_param_entry(name.as_str(), "unknown_argument"))
+        .collect();
+    Some(input_usage_error_with_invalid_params(
+        message,
+        invalid_params,
+    ))
+}
+
+fn tool_call_result(execution: ToolExecution, alias_warnings: Vec<Value>) -> Value {
+    let ToolExecution {
+        exit_code,
+        payload,
+        pipeline,
+    } = execution;
+    let payload = normalize_input_usage_payload(payload);
     let mut structured = json!({
-        "exit_code": execution.exit_code,
-        "payload": execution.payload,
+        "exit_code": exit_code,
+        "payload": payload,
     });
-    if let Some(pipeline) = execution.pipeline {
+    if let Some(pipeline) = pipeline {
         structured["pipeline"] = pipeline;
+    }
+    if !alias_warnings.is_empty() {
+        structured["meta"] = json!({
+            "warnings": alias_warnings,
+        });
     }
 
     let text = serde_json::to_string(&structured)
@@ -2190,8 +3126,30 @@ fn tool_call_result(execution: ToolExecution) -> Value {
             }
         ],
         "structuredContent": structured,
-        "isError": execution.exit_code != 0,
+        "isError": exit_code != 0,
     })
+}
+
+fn normalize_input_usage_payload(payload: Value) -> Value {
+    let Some(object) = payload.as_object() else {
+        return payload;
+    };
+    if object.get("error") != Some(&Value::from("input_usage_error")) {
+        return payload;
+    }
+    if object.get("invalid_params").is_some() {
+        return payload;
+    }
+    let message = object
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("input usage error");
+    let mut normalized = object.clone();
+    normalized.insert(
+        "invalid_params".to_string(),
+        Value::Array(invalid_params_from_message(message)),
+    );
+    Value::Object(normalized)
 }
 
 fn success_response(id: Value, result: Value) -> Value {
@@ -2223,14 +3181,172 @@ fn extract_error_id(object: &Map<String, Value>) -> Value {
 }
 
 fn input_usage_error(message: impl Into<String>) -> ToolExecution {
+    let message = message.into();
+    let invalid_params = invalid_params_from_message(message.as_str());
+    input_usage_error_with_invalid_params(message, invalid_params)
+}
+
+fn input_usage_error_with_invalid_params(
+    message: impl Into<String>,
+    invalid_params: Vec<Value>,
+) -> ToolExecution {
+    let message = message.into();
     ToolExecution {
         exit_code: 3,
         payload: json!({
             "error": "input_usage_error",
-            "message": message.into(),
+            "message": message,
+            "invalid_params": invalid_params,
         }),
         pipeline: None,
     }
+}
+
+const MACHINE_PARAM_NAMES: &[&str] = &[
+    "all",
+    "args",
+    "base",
+    "base_dir",
+    "base_path",
+    "body",
+    "capabilities",
+    "command",
+    "emit_pipeline",
+    "expect_status",
+    "fail_on_diff",
+    "file_path",
+    "from",
+    "glob",
+    "group_by",
+    "header",
+    "how",
+    "ignore_path",
+    "include_files",
+    "input",
+    "input_path",
+    "jq_filter",
+    "jq_project",
+    "key",
+    "left",
+    "left_from",
+    "left_path",
+    "lock_path",
+    "max_matches",
+    "metric",
+    "method",
+    "mlr",
+    "mode",
+    "normalize",
+    "normalize_time",
+    "on",
+    "out_path",
+    "overlay_paths",
+    "overlays",
+    "path",
+    "pattern",
+    "policy",
+    "policy_mode",
+    "policy_path",
+    "profile",
+    "recipe",
+    "right",
+    "right_from",
+    "right_path",
+    "root",
+    "rules",
+    "rules_path",
+    "schema",
+    "schema_path",
+    "since",
+    "sort_keys",
+    "source",
+    "strict",
+    "tag",
+    "target",
+    "to",
+    "url",
+    "until",
+    "value_diff_cap",
+    "verify_mdbook_meta",
+];
+
+fn invalid_param_entry(name: &str, reason: &str) -> Value {
+    json!({
+        "name": name,
+        "reason": reason,
+    })
+}
+
+fn normalize_invalid_param_name(name: &str, message: &str) -> String {
+    if name == "rules(_path)" {
+        return "rules".to_string();
+    }
+    if name == "schema(_path)" {
+        return "schema".to_string();
+    }
+    if name == "schema" && message.contains("dataq.gate.schema") {
+        return "schema_path".to_string();
+    }
+    if name == "schema" && message.contains("`schema_path`") {
+        return "schema_path".to_string();
+    }
+    if name == "rules" && message.contains("`rules_path`") {
+        return "rules_path".to_string();
+    }
+    name.to_string()
+}
+
+fn invalid_params_from_message(message: &str) -> Vec<Value> {
+    let mut names: Vec<String> = Vec::new();
+    if message.starts_with("unknown tool `") {
+        names.push("name".to_string());
+    }
+    if message.starts_with("unknown source `") {
+        names.push("source".to_string());
+    }
+    if message.starts_with("failed to write recipe lock file ") {
+        names.push("out_path".to_string());
+    }
+
+    for token in backtick_tokens(message) {
+        if MACHINE_PARAM_NAMES.contains(&token) || token.contains("(_path)") {
+            names.push(token.to_string());
+        }
+    }
+
+    let mut unique_names: Vec<String> = Vec::new();
+    for name in names {
+        let normalized = normalize_invalid_param_name(name.as_str(), message);
+        if !unique_names.iter().any(|existing| existing == &normalized) {
+            unique_names.push(normalized);
+        }
+    }
+
+    if unique_names.is_empty() {
+        unique_names.push("arguments".to_string());
+    }
+
+    unique_names
+        .into_iter()
+        .map(|name| invalid_param_entry(name.as_str(), message))
+        .collect()
+}
+
+fn backtick_tokens(message: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut remaining = message;
+    while let Some(start) = remaining.find('`') {
+        let after_start = &remaining[start + 1..];
+        let Some(end) = after_start.find('`') else {
+            break;
+        };
+        let token = &after_start[..end];
+        if !token.is_empty() {
+            tokens.push(token);
+        }
+        remaining = &after_start[end + 1..];
+    }
+    tokens
 }
 
 fn internal_error(message: impl Into<String>) -> ToolExecution {
@@ -3276,17 +4392,28 @@ mod tests {
         let doctor_definition = tool_definition("dataq.doctor");
         assert!(doctor_definition["inputSchema"]["properties"]["capabilities"].is_object());
         assert!(doctor_definition["inputSchema"]["properties"]["profile"].is_object());
+        assert_eq!(
+            doctor_definition["inputSchema"]["additionalProperties"],
+            Value::Bool(false)
+        );
+        assert!(doctor_definition["examples"].is_array());
+        assert!(
+            doctor_definition["meta"]["exit_code_contract"]["0"]
+                .as_str()
+                .is_some()
+        );
 
         let canon_definition = tool_definition("dataq.canon");
         assert!(canon_definition["inputSchema"]["properties"]["emit_pipeline"].is_object());
         assert!(canon_definition["inputSchema"]["properties"]["profile"].is_null());
+        assert!(canon_definition["inputSchema"]["oneOf"].is_array());
 
         let execution = ToolExecution {
             exit_code: 2,
             payload: json!({"error":"x"}),
             pipeline: Some(json!({"command":"assert"})),
         };
-        let result = tool_call_result(execution);
+        let result = tool_call_result(execution, Vec::new());
         assert_eq!(result["isError"], Value::Bool(true));
         assert!(result["structuredContent"]["pipeline"].is_object());
         assert!(
@@ -3294,6 +4421,20 @@ mod tests {
                 .as_str()
                 .unwrap_or("")
                 .contains("\"exit_code\":2")
+        );
+
+        let legacy_usage = ToolExecution {
+            exit_code: 3,
+            payload: json!({
+                "error": "input_usage_error",
+                "message": "missing required `input`"
+            }),
+            pipeline: None,
+        };
+        let legacy_result = tool_call_result(legacy_usage, Vec::new());
+        assert_eq!(
+            legacy_result["structuredContent"]["payload"]["invalid_params"][0]["name"],
+            Value::from("input")
         );
 
         let success = success_response(Value::from(1), json!({"ok": true}));
@@ -3313,6 +4454,7 @@ mod tests {
         let usage = input_usage_error("bad input");
         assert_eq!(usage.exit_code, 3);
         assert_eq!(usage.payload["error"], Value::from("input_usage_error"));
+        assert!(usage.payload["invalid_params"].is_array());
         let internal = internal_error("boom");
         assert_eq!(internal.exit_code, 1);
         assert_eq!(internal.payload["error"], Value::from("internal_error"));
@@ -3324,6 +4466,141 @@ mod tests {
         };
         let handled = handle_request(request);
         assert!(handled["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn tools_list_definitions_are_strict_and_expose_metadata() {
+        let tools = tools_list_result();
+        let list = tools["tools"].as_array().expect("tools array");
+        assert_eq!(list.len(), TOOL_ORDER.len());
+
+        for tool in list {
+            assert_eq!(
+                tool["inputSchema"]["additionalProperties"],
+                Value::Bool(false)
+            );
+            assert!(tool["examples"].is_array());
+            assert!(tool["meta"]["exit_code_contract"].is_object());
+        }
+
+        let assert_tool = list
+            .iter()
+            .find(|tool| tool["name"] == json!("dataq.assert"))
+            .expect("assert tool");
+        assert!(assert_tool["inputSchema"]["allOf"].is_array());
+        assert!(assert_tool["inputSchema"]["properties"]["normalize"]["enum"].is_array());
+
+        let ingest_api_tool = list
+            .iter()
+            .find(|tool| tool["name"] == json!("dataq.ingest.api"))
+            .expect("ingest api tool");
+        assert_eq!(ingest_api_tool["inputSchema"]["required"], json!(["url"]));
+        assert_eq!(
+            ingest_api_tool["inputSchema"]["properties"]["method"]["pattern"],
+            Value::from(
+                "^(?:[Gg][Ee][Tt]|[Pp][Oo][Ss][Tt]|[Pp][Uu][Tt]|[Pp][Aa][Tt][Cc][Hh]|[Dd][Ee][Ll][Ee][Tt][Ee])$",
+            )
+        );
+
+        let replay_tool = list
+            .iter()
+            .find(|tool| tool["name"] == json!("dataq.recipe.replay"))
+            .expect("recipe replay tool");
+        assert_eq!(
+            replay_tool["meta"]["exit_code_contract"]["2"],
+            Value::from("strict lock mismatch or step-level validation mismatch")
+        );
+    }
+
+    #[test]
+    fn input_usage_error_payload_includes_machine_readable_invalid_params() {
+        let missing = input_usage_error("missing required `input`");
+        let entries = missing.payload["invalid_params"]
+            .as_array()
+            .expect("invalid params array");
+        assert!(!entries.is_empty());
+        assert_eq!(entries[0]["name"], Value::from("input"));
+        assert_eq!(
+            entries[0]["reason"],
+            Value::from("missing required `input`")
+        );
+
+        let source =
+            input_usage_error("unknown source `x`: expected one of `scan-text`, `ingest-doc`");
+        assert_eq!(
+            source.payload["invalid_params"][0]["name"],
+            Value::from("source")
+        );
+
+        let assert_contract =
+            input_usage_error("assert requires exactly one of `rules(_path)` or `schema(_path)`");
+        let assert_names: Vec<String> = assert_contract.payload["invalid_params"]
+            .as_array()
+            .expect("invalid params array")
+            .iter()
+            .map(|item| item["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(assert_names.contains(&"rules".to_string()));
+        assert!(assert_names.contains(&"schema".to_string()));
+        assert!(!assert_names.iter().any(|name| name.contains("(_path)")));
+
+        let gate_schema_alias_conflict = input_usage_error(
+            "multiple aliases provided for `schema_path` (`schema_path` and `schema`)",
+        );
+        let gate_schema_names: Vec<String> = gate_schema_alias_conflict.payload["invalid_params"]
+            .as_array()
+            .expect("invalid params array")
+            .iter()
+            .map(|item| item["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(gate_schema_names, vec!["schema_path".to_string()]);
+    }
+
+    #[test]
+    fn tools_call_structured_content_meta_includes_alias_deprecation_warning() {
+        let response = handle_request(JsonRpcRequest {
+            id: Value::from(99),
+            method: "tools/call".to_string(),
+            params: args(json!({
+                "name": "dataq.canon",
+                "arguments": {
+                    "input_inline": [{"z":"2","a":"1"}]
+                }
+            })),
+        });
+
+        assert_eq!(response["result"]["isError"], Value::Bool(false));
+        let warnings = response["result"]["structuredContent"]["meta"]["warnings"]
+            .as_array()
+            .expect("warnings");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["alias"], Value::from("input_inline"));
+        assert_eq!(warnings[0]["canonical"], Value::from("input"));
+    }
+
+    #[test]
+    fn tools_call_rejects_unknown_arguments_even_for_known_tools() {
+        let response = handle_request(JsonRpcRequest {
+            id: Value::from(100),
+            method: "tools/call".to_string(),
+            params: args(json!({
+                "name": "dataq.canon",
+                "arguments": {
+                    "input": [{"id": 1}],
+                    "unexpected_arg": true
+                }
+            })),
+        });
+
+        assert_eq!(response["result"]["isError"], Value::Bool(true));
+        assert_eq!(
+            response["result"]["structuredContent"]["exit_code"],
+            Value::from(3)
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["payload"]["invalid_params"][0]["name"],
+            Value::from("unexpected_arg")
+        );
     }
 
     #[test]
@@ -3402,7 +4679,7 @@ mod tests {
             exec.payload["message"]
                 .as_str()
                 .unwrap_or("")
-                .contains("inline `schema`")
+                .contains("schema_path")
         );
 
         let exec = execute_gate_schema(&args(json!({

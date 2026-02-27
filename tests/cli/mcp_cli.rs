@@ -98,6 +98,45 @@ fn tools_list_is_deterministic_and_in_fixed_order() {
         .map(|tool| tool["name"].as_str().expect("tool name").to_string())
         .collect();
     assert_eq!(listed, TOOL_ORDER);
+
+    let canon_tool = first_json["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == json!("dataq.canon"))
+        .expect("canon tool");
+    assert_eq!(
+        canon_tool["inputSchema"]["additionalProperties"],
+        Value::Bool(false)
+    );
+    assert!(canon_tool["inputSchema"]["oneOf"].is_array());
+    assert!(canon_tool["examples"].is_array());
+    assert!(canon_tool["meta"]["exit_code_contract"].is_object());
+
+    let ingest_api_tool = first_json["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == json!("dataq.ingest.api"))
+        .expect("ingest api tool");
+    assert_eq!(ingest_api_tool["inputSchema"]["required"], json!(["url"]));
+    assert_eq!(
+        ingest_api_tool["inputSchema"]["properties"]["method"]["pattern"],
+        Value::from(
+            "^(?:[Gg][Ee][Tt]|[Pp][Oo][Ss][Tt]|[Pp][Uu][Tt]|[Pp][Aa][Tt][Cc][Hh]|[Dd][Ee][Ll][Ee][Tt][Ee])$",
+        )
+    );
+
+    let replay_tool = first_json["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == json!("dataq.recipe.replay"))
+        .expect("recipe replay tool");
+    assert_eq!(
+        replay_tool["meta"]["exit_code_contract"]["2"],
+        Value::from("strict lock mismatch or step-level validation mismatch")
+    );
 }
 
 #[test]
@@ -402,6 +441,87 @@ fn ingest_yaml_jobs_tool_supports_mode_and_pipeline() {
 }
 
 #[test]
+fn tools_call_alias_arguments_emit_deprecation_warnings() {
+    let request = tool_call_request(
+        103,
+        "dataq.canon",
+        json!({
+            "input_inline": [{"z":"2","a":"1"}]
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(false));
+    let warnings = response["result"]["structuredContent"]["meta"]["warnings"]
+        .as_array()
+        .expect("warnings array");
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["code"], Value::from("deprecated_arg_alias"));
+    assert_eq!(warnings[0]["alias"], Value::from("input_inline"));
+    assert_eq!(warnings[0]["canonical"], Value::from("input"));
+}
+
+#[test]
+fn tools_call_rejects_unknown_arguments() {
+    let request = tool_call_request(
+        104,
+        "dataq.canon",
+        json!({
+            "input": [{"id": 1}],
+            "typo_option": true
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["invalid_params"][0]["name"],
+        Value::from("typo_option")
+    );
+}
+
+#[test]
+fn assert_missing_rules_or_schema_uses_canonical_invalid_param_names() {
+    let request = tool_call_request(
+        105,
+        "dataq.assert",
+        json!({
+            "input": [{"id": 1}]
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+
+    let names: Vec<String> = response["result"]["structuredContent"]["payload"]["invalid_params"]
+        .as_array()
+        .expect("invalid params")
+        .iter()
+        .map(|item| item["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(names.contains(&"rules".to_string()));
+    assert!(names.contains(&"schema".to_string()));
+    assert!(!names.iter().any(|name| name.contains("(_path)")));
+}
+
+#[test]
 fn emit_pipeline_true_includes_pipeline() {
     let request = tool_call_request(
         1,
@@ -554,6 +674,11 @@ fn inline_path_conflict_returns_exit_three() {
         response["result"]["structuredContent"]["payload"]["error"],
         Value::from("input_usage_error")
     );
+    let invalid_params = response["result"]["structuredContent"]["payload"]["invalid_params"]
+        .as_array()
+        .expect("invalid params");
+    assert!(!invalid_params.is_empty());
+    assert_eq!(invalid_params[0]["name"], Value::from("left"));
 }
 
 #[test]
@@ -591,6 +716,110 @@ fn gate_schema_rejects_input_path_stdin_sentinels() {
         assert!(message.contains("stdin sentinel paths"));
         assert!(message.contains("inline `input`"));
     }
+}
+
+#[test]
+fn gate_schema_missing_schema_path_uses_canonical_invalid_param_name() {
+    let request = tool_call_request(
+        23,
+        "dataq.gate.schema",
+        json!({
+            "input": [{"id": 1}]
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["invalid_params"][0]["name"],
+        Value::from("schema_path")
+    );
+}
+
+#[test]
+fn gate_schema_conflicting_schema_forms_use_canonical_invalid_param_name() {
+    let request = tool_call_request(
+        24,
+        "dataq.gate.schema",
+        json!({
+            "input": [{"id": 1}],
+            "schema_path": "schema.json",
+            "schema": {"type": "object"}
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["invalid_params"][0]["name"],
+        Value::from("schema_path")
+    );
+}
+
+#[test]
+fn gate_schema_invalid_schema_path_type_uses_canonical_invalid_param_name() {
+    let request = tool_call_request(
+        25,
+        "dataq.gate.schema",
+        json!({
+            "input": [{"id": 1}],
+            "schema_path": 1
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["invalid_params"][0]["name"],
+        Value::from("schema_path")
+    );
+}
+
+#[test]
+fn ingest_book_invalid_include_files_type_uses_canonical_invalid_param_name() {
+    let request = tool_call_request(
+        26,
+        "dataq.ingest.book",
+        json!({
+            "root": ".",
+            "include_files": "yes"
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["invalid_params"][0]["name"],
+        Value::from("include_files")
+    );
 }
 
 #[test]

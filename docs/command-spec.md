@@ -137,6 +137,8 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.diff.source`
   - `dataq.profile`
   - `dataq.ingest.doc`
+  - `dataq.ingest.notes`
+  - `dataq.ingest.book`
   - `dataq.join`
   - `dataq.aggregate`
   - `dataq.scan.text`
@@ -148,12 +150,29 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.recipe.run`
   - `dataq.recipe.lock`
   - `dataq.recipe.replay`
+- `tools/list` の各 tool 定義:
+  - `inputSchema.additionalProperties = false`
+  - canonical 引数名のみ `properties` に掲載
+  - `required` / `enum` / `oneOf` で入力制約を明示
+  - `examples` を同梱
+  - `meta.exit_code_contract` に exit code 契約を同梱
+  - `dataq.ingest.api` の `method` は `GET|POST|PUT|PATCH|DELETE` を大文字小文字非依存で受理
 - `tools/call` 結果契約:
   - `result.structuredContent.exit_code: i32`
   - `result.structuredContent.payload: JSON`
   - `result.structuredContent.pipeline: JSON`（`emit_pipeline=true`時のみ）
+  - `result.structuredContent.meta.warnings: JSON[]`（alias 使用時）
   - `result.isError = (exit_code != 0)`
   - `result.content[0].text` は `structuredContent` と等価なJSON文字列
+  - 未知引数は `input_usage_error`（exit `3`）として拒否
+- alias 引数の扱い:
+  - alias は後方互換のため受理する
+  - `result.structuredContent.meta.warnings[*]` に
+    - `code = "deprecated_arg_alias"`
+    - `alias`
+    - `canonical`
+    - `message`
+    を返す
 - `emit_pipeline`:
   - すべてのtoolで共通引数として受理（default: `false`）
   - `true` のときのみ `structuredContent.pipeline` を返す
@@ -162,6 +181,9 @@ dataq [--emit-pipeline] <command> [options]
   - `profile`（任意）: `core|ci-jobs|doc|api|notes|book|scan`
 - 競合入力（path + inline を同一logical inputで同時指定）:
   - JSON-RPCエラーではなく `tools/call` 成功レスポンス内で `exit_code=3` / `isError=true` を返す
+- `input_usage_error` payload:
+  - `error`, `message` に加えて `invalid_params` を返す
+  - `invalid_params[*]` は `name`, `reason` を持つ
 - `mcp` モードのプロセス終了コード:
   - JSON-RPCレスポンスを書き出せた場合は tool `exit_code` に関係なく `0`
   - レスポンス出力不能な致命的I/O時のみ `3`
