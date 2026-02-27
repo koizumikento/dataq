@@ -256,6 +256,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-reg
 ### Release
 
 - `v*` タグ（例: `v0.1.0`, `v0.1.0-rc.1`）を push すると、GitHub Actions の Release workflow が起動します
+- リリースノートは `docs/releases/` 配下に `vX.Y.Z.md` 形式で記録します
 - workflow は `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`、`cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-regions 75` を通過した場合のみ公開処理へ進みます
 - 配布ターゲットは次の4種類です:
   - `x86_64-unknown-linux-gnu`
