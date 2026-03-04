@@ -10,8 +10,9 @@ use crate::domain::rules::{AssertReport, MismatchEntry};
 
 use super::AssertValidationError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchemaValidationEngine {
+    #[default]
     Jsonschema,
     Ajv,
 }
@@ -22,12 +23,6 @@ impl SchemaValidationEngine {
             Self::Jsonschema => "jsonschema",
             Self::Ajv => "ajv",
         }
-    }
-}
-
-impl Default for SchemaValidationEngine {
-    fn default() -> Self {
-        Self::Jsonschema
     }
 }
 
@@ -350,8 +345,7 @@ fn schema_keyword_from_path(path: &str) -> Option<String> {
     normalized
         .trim_start_matches('/')
         .split('/')
-        .filter(|segment| !segment.is_empty())
-        .next_back()
+        .rfind(|segment| !segment.is_empty())
         .map(decode_pointer_token)
 }
 
@@ -546,11 +540,10 @@ mod tests {
 exit 1"##,
         );
         let schema = json!({"type":"object","properties":{"id":{"type":"integer"}}});
-        let values = vec![json!({"id":"x"})];
+        let value = json!({"id":"x"});
 
-        let ajv_errors =
-            run_ajv_for_row_with_bin(&schema, &values[0], script.to_str().expect("utf8"))
-                .expect("ajv rows");
+        let ajv_errors = run_ajv_for_row_with_bin(&schema, &value, script.to_str().expect("utf8"))
+            .expect("ajv rows");
         assert_eq!(ajv_errors.len(), 1);
         assert_eq!(ajv_errors[0].instance_path, "/id");
         assert_eq!(ajv_errors[0].schema_path, "/properties/id/type");

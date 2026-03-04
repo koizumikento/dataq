@@ -1231,7 +1231,7 @@ fn assert_cli_ajv_engine_marks_external_tool_in_pipeline() {
         .expect("external_tools array");
     let ajv_tool = external_tools
         .iter()
-        .find(|tool| tool["name"] == Value::from("ajv"))
+        .find(|tool| tool["name"] == "ajv")
         .expect("ajv external tool");
     assert_eq!(ajv_tool["used"], Value::Bool(true));
     drop(tool_dir);
