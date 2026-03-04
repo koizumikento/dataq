@@ -1,5 +1,6 @@
-pub mod duckdb;
 pub mod check_jsonschema;
+pub mod duckdb;
+pub mod jc;
 pub mod jq;
 pub mod mdbook;
 pub mod mlr;
