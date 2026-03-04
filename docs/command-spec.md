@@ -49,6 +49,7 @@ dataq [--emit-pipeline] <command> [options]
   - `output_fields`
   - `exit_codes`
   - `notes`
+  - `assert` の `notes` には `--schema` 経路の `check-jsonschema` 契約メタデータを含む
 - 終了コード:
   - `0`: 成功
   - `3`: 入力不正（例: `--command` に未知値）
@@ -67,7 +68,10 @@ dataq [--emit-pipeline] <command> [options]
   - `command`: 対象サブコマンド名
   - `args`: 計画解決に使った引数配列
   - `stages`: 段情報配列（`order`, `step`, `tool`, `depends_on`）
-  - `tools`: `jq|yq|mlr` の期待利用有無（`expected`）
+  - `tools`: `jq|yq|mlr|check-jsonschema` の期待利用有無（`expected`）
+- `assert --schema` を解決した場合:
+  - `stages` に `validate_assert_schema_with_check_jsonschema`
+  - `tools` に `check-jsonschema.expected=true`
 - 終了コード:
   - `0`: 成功
   - `3`: 未対応サブコマンドまたは `--args` 形式不正

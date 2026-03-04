@@ -9,7 +9,7 @@ use crate::cmd::{
     canon, contract, doctor, join, merge, profile, sdiff,
 };
 
-const TOOL_ORDER: [&str; 3] = ["jq", "yq", "mlr"];
+const TOOL_ORDER: [&str; 4] = ["jq", "yq", "mlr", "check-jsonschema"];
 
 /// Request shape for static plan resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +134,32 @@ fn resolve_assert_steps(args: &[String]) -> Result<Vec<String>, EmitPlanError> {
     if schema_help {
         return Ok(vec!["emit_assert_schema_help".to_string()]);
     }
+
+    let uses_rules = has_flag_or_assigned_value(args, "--rules");
+    let uses_schema = has_flag_or_assigned_value(args, "--schema");
+    if uses_rules && uses_schema {
+        return Err(EmitPlanError::InvalidArguments(
+            "`--rules` and `--schema` are mutually exclusive".to_string(),
+        ));
+    }
+    if uses_schema {
+        return Ok(assert_schema_pipeline_steps(normalize_mode));
+    }
+
     Ok(assert_cmd::pipeline_steps(normalize_mode))
+}
+
+fn assert_schema_pipeline_steps(normalize: Option<AssertInputNormalizeMode>) -> Vec<String> {
+    let mut steps = vec![
+        "load_schema".to_string(),
+        "resolve_input_format".to_string(),
+        "read_input_values".to_string(),
+        "validate_assert_schema_with_check_jsonschema".to_string(),
+    ];
+    if normalize.is_some() {
+        steps.insert(3, "normalize_assert_input".to_string());
+    }
+    steps
 }
 
 fn resolve_recipe_steps(args: &[String]) -> Result<Vec<String>, EmitPlanError> {
@@ -201,6 +226,12 @@ fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
 
+fn has_flag_or_assigned_value(args: &[String], flag: &str) -> bool {
+    let prefix = format!("{flag}=");
+    args.iter()
+        .any(|arg| arg == flag || arg.starts_with(prefix.as_str()))
+}
+
 fn reject_assigned_assert_help_value(args: &[String], flag: &str) -> Result<(), EmitPlanError> {
     let prefix = format!("{flag}=");
     if let Some(received) = args.iter().find(|arg| arg.starts_with(prefix.as_str())) {
@@ -231,6 +262,7 @@ fn build_stages(command: &str, steps: &[String]) -> Vec<EmitPlanStage> {
 fn stage_tool(command: &str, step: &str) -> &'static str {
     match command {
         "assert" if step == "normalize_assert_input" => "yq+jq+mlr",
+        "assert" if step == "validate_assert_schema_with_check_jsonschema" => "check-jsonschema",
         "join" if step == "execute_join_with_mlr" => "mlr",
         "aggregate" if step == "execute_aggregate_with_mlr" => "mlr",
         "doctor" => match step {
@@ -295,6 +327,60 @@ mod tests {
             plan.tools
                 .iter()
                 .any(|tool| tool.name == "mlr" && tool.expected)
+        );
+        assert!(
+            plan.tools
+                .iter()
+                .any(|tool| tool.name == "check-jsonschema" && !tool.expected)
+        );
+    }
+
+    #[test]
+    fn resolves_assert_schema_plan_with_check_jsonschema_tool() {
+        let plan = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec!["--schema=schema.json".to_string()],
+        })
+        .expect("assert schema plan");
+
+        let steps: Vec<String> = plan.stages.iter().map(|stage| stage.step.clone()).collect();
+        assert_eq!(
+            steps,
+            vec![
+                "load_schema",
+                "resolve_input_format",
+                "read_input_values",
+                "validate_assert_schema_with_check_jsonschema",
+            ]
+        );
+        assert!(
+            plan.stages
+                .iter()
+                .any(|stage| stage.tool == "check-jsonschema")
+        );
+        assert!(
+            plan.tools
+                .iter()
+                .any(|tool| tool.name == "check-jsonschema" && tool.expected)
+        );
+    }
+
+    #[test]
+    fn rejects_rules_and_schema_combination_for_assert_plan() {
+        let error = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec![
+                "--rules".to_string(),
+                "rules.yaml".to_string(),
+                "--schema".to_string(),
+            ],
+        })
+        .expect_err("rules + schema must fail");
+        assert_eq!(
+            error,
+            EmitPlanError::InvalidArguments(
+                "`--rules` and `--schema` are mutually exclusive".to_string()
+            )
         );
     }
 

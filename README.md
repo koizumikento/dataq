@@ -646,6 +646,7 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
 - 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `transform-rowset`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
+  - `assert` の `notes` には `--schema` 経路の `check-jsonschema` 契約メタデータを含む
 
 ### 17. `emit plan`
 
@@ -657,8 +658,11 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
   - `command`: 対象サブコマンド
   - `args`: 解決に使った引数配列
   - `stages`: `order`, `step`, `tool`, `depends_on` を含む段情報
-  - `tools`: `jq|yq|mlr` の期待利用有無（`expected`）
+  - `tools`: `jq|yq|mlr|check-jsonschema` の期待利用有無（`expected`）
 - `--args` は JSON 文字列で渡す（例: `'["--normalize","github-actions-jobs"]'`）
+- `assert --schema` を解決した場合、`stages` には
+  `validate_assert_schema_with_check_jsonschema` が入り、`tools` で
+  `check-jsonschema.expected=true` になる
 - 終了コード:
   - `0`: 計画生成成功
   - `3`: 未対応サブコマンドまたは `--args` 形式不正

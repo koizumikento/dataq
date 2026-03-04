@@ -118,6 +118,7 @@ const INGEST_YAML_JOBS_NOTES: &[&str] = &[
 const ASSERT_NOTES: &[&str] = &[
     "Validation mismatch details are emitted in `mismatches`.",
     "`--rules-help` and `--schema-help` have dedicated schema IDs.",
+    "`--schema` path is exposed as `check-jsonschema` in contract/plan metadata.",
 ];
 const GATE_SCHEMA_NOTES: &[&str] = &[
     "JSON output shape is aligned with `assert --schema`.",
@@ -385,5 +386,32 @@ fn serialize_payload<T: Serialize>(payload: &T) -> ContractCommandResponse {
                 "message": format!("failed to serialize contract payload: {error}"),
             }),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{ContractCommand, run_for_command};
+
+    #[test]
+    fn assert_contract_keeps_expected_output_fields() {
+        let response = run_for_command(ContractCommand::Assert);
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(
+            response.payload["output_fields"],
+            json!(["matched", "mismatch_count", "mismatches"])
+        );
+    }
+
+    #[test]
+    fn assert_contract_exposes_check_jsonschema_schema_path_note() {
+        let response = run_for_command(ContractCommand::Assert);
+        let notes = response.payload["notes"].as_array().expect("notes array");
+        assert!(notes.iter().any(|note| {
+            note.as_str()
+                .is_some_and(|text| text.contains("`check-jsonschema`"))
+        }));
     }
 }
