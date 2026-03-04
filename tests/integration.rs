@@ -44,6 +44,8 @@ mod recipe_replay_flow;
 mod scan_text_flow;
 #[path = "integration/transform_rowset_flow.rs"]
 mod transform_rowset_flow;
+#[path = "integration/transform_sql_flow.rs"]
+mod transform_sql_flow;
 #[path = "integration/util_sort.rs"]
 mod util_sort;
 #[path = "integration/util_time.rs"]
