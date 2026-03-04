@@ -24,6 +24,8 @@ mod ingest_book_flow;
 mod ingest_doc_roundtrip;
 #[path = "integration/ingest_notes_flow.rs"]
 mod ingest_notes_flow;
+#[path = "integration/ingest_tabular_flow.rs"]
+mod ingest_tabular_flow;
 #[path = "integration/ingest_yaml_jobs_flow.rs"]
 mod ingest_yaml_jobs_flow;
 #[path = "integration/io_format_resolution.rs"]

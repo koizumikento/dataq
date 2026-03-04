@@ -1,3 +1,4 @@
+pub mod csvkit;
 pub mod jq;
 pub mod mdbook;
 pub mod mlr;

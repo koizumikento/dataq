@@ -13,6 +13,7 @@ dataq [--emit-pipeline] <command> [options]
 - `canon`: 入力を決定的に正規化し、JSON/JSONLへ変換
 - `ingest api`: HTTP API 応答を `xh -> jq` で決定的JSONへ正規化
 - `ingest yaml-jobs`: YAMLのCIジョブ定義を正規化JSON配列へ変換
+- `ingest tabular`: 表形式入力を `csvkit` (`in2csv -> csvjson`) で決定的JSON配列へ変換
 - `assert`: ルールまたはJSON Schemaで検証
 - `gate schema`: JSON Schemaで品質ゲートを実行（`assert --schema` ラッパー）
 - `gate policy`: ルールベース品質ゲートを実行（`matched/violations/details`）
@@ -380,7 +381,7 @@ dataq [--emit-pipeline] <command> [options]
 
 - `0`: 成功
 - `2`: 検証失敗（期待仕様に不一致）
-- `3`: 入力不正（フォーマット不正、必須引数不足など）、`doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）、`ingest doc` の `pandoc`/parse 失敗、または `codex install-skill` のルート解決/コピー失敗
+- `3`: 入力不正（フォーマット不正、必須引数不足など）、`doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）、`ingest doc` の `pandoc`/parse 失敗、`ingest tabular` の `csvkit` 不足/変換失敗、または `codex install-skill` のルート解決/コピー失敗
 - `1`: その他実行時エラー
 
 ## `doctor` コマンド契約（MVP）
@@ -450,6 +451,21 @@ dataq [--emit-pipeline] <command> [options]
 - 異常時契約:
   - malformed YAML、未知 `--mode`、`jq`/`yq`/`mlr` 不足は exit `3`
 
+## `ingest tabular` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq ingest tabular --input <path|->`
+- 出力: JSON 配列（stdout）
+- 実行方式:
+  - `in2csv` で入力をCSVへ正規化
+  - `csvjson --no-inference` でJSON配列へ変換
+  - 行オブジェクトのキー順を再帰的に固定して出力
+- `--emit-pipeline` 指定時の `steps`:
+  - `ingest_tabular_csvkit_in2csv`
+  - `ingest_tabular_csvkit_csvjson`
+- 異常時契約:
+  - `csvkit` 不足、表形式変換失敗、不正入力は exit `3`
+
 ### `sdiff` のCIゲート拡張
 
 - `--fail-on-diff`（既定: `false`）:
@@ -490,7 +506,7 @@ pipeline JSON schema:
 - `command`: 実行サブコマンド名
 - `input`: 入力ソース情報（stdin/path, format）
 - `steps`: 実行ステップ配列
-- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）に、コマンド固有ツール（例: `ingest doc` の `pandoc`）を追記。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
+- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）に、コマンド固有ツール（例: `ingest doc` の `pandoc`, `ingest tabular` の `csvkit`）を追記。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
   - 追加メトリクス: `input_bytes`, `output_bytes`, `duration_ms`（決定性保持のため固定 `0`）
   - 後方互換: 既存フィールド（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）は不変

@@ -60,6 +60,7 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 | コア（canon/assert/gate/sdiff/profile/join/aggregate など） | `jq`, `yq`, `mlr` |
 | `ingest api` | `xh`, `jq` |
 | `ingest doc` | `pandoc`, `jq` |
+| `ingest tabular` | `csvkit`（`in2csv`, `csvjson`） |
 | `ingest notes` | `nb`, `jq` |
 | `ingest book` | `jq`（`DATAQ_INGEST_BOOK_VERIFY_MDBOOK` 有効時は `mdbook` も必要） |
 | `scan text` | `rg`（`--jq-project` を使う場合は `jq` も必要） |
@@ -83,6 +84,7 @@ dataq [--emit-pipeline] <command> [options]
 | `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>`（stdin時は省略可） |
 | `ingest api` | HTTP API 応答を `xh -> jq` で決定的JSONへ正規化 | `--url <http(s)://...>` |
 | `ingest yaml-jobs` | YAMLのCIジョブ定義を正規化JSON配列へ変換 | `--input <path|->` `--mode <github-actions|gitlab-ci|generic-map>` |
+| `ingest tabular` | 表形式入力を `csvkit` で決定的JSON配列へ正規化 | `--input <path|->` |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
 | `gate schema` | JSON Schema で品質ゲートを実行（`assert --schema` の専用ラッパー） | `--schema <path>` |
 | `gate policy` | ルールベース品質ゲートを実行（違反詳細を決定的順序で出力） | `--rules <path>` |
@@ -130,6 +132,9 @@ dataq ingest api --url https://example.test/items --header 'accept:application/j
 # YAMLのCIジョブ定義を正規化
 dataq ingest yaml-jobs --input .github/workflows/ci.yml --mode github-actions > jobs.json
 dataq assert --input jobs.json --rules examples/assert-rules/github-actions/jobs.rules.yaml
+
+# 表形式データをcsvkit経由で正規化
+dataq ingest tabular --input orders.csv > rows.json
 
 # JSON Schema 検証
 dataq assert --input out.jsonl --schema schema.json
@@ -494,6 +499,19 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 - 入力レコードは object であること、および `group-by`/`target` キーが全レコードに存在することが必須
 - 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
 - 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
+
+### `ingest tabular`
+
+表形式入力（CSVなど）を `csvkit` (`in2csv -> csvjson`) で JSON 配列へ変換します。
+
+- `--input <path|->`: 入力ファイルまたは stdin（`-`）
+- stage1: `in2csv` で CSV へ正規化
+- stage2: `csvjson --no-inference` で JSON 配列化
+- 行オブジェクトはキー順を再帰的に固定し、同一入力で同一出力を保証
+- `csvkit` 不在・変換失敗・不正入力は終了コード `3`
+- `--emit-pipeline` ステップ:
+  - `ingest_tabular_csvkit_in2csv`
+  - `ingest_tabular_csvkit_csvjson`
 
 ### 8. `ingest doc`
 
