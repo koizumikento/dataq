@@ -10,7 +10,7 @@ use crate::domain::report::PipelineStageDiagnostic;
 use crate::engine::transform::{self, TransformRowsetError, TransformSqlError};
 use crate::io;
 
-/// SQL execution engine used for transform rowset stage 2.
+/// Stage-2 execution engine selector for `transform rowset`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransformRowsetSqlEngine {
     Sqlite,
@@ -25,13 +25,13 @@ impl TransformRowsetSqlEngine {
 
     const fn pipeline_tool_label(self) -> &'static str {
         match self {
-            Self::Sqlite => "sqlite",
+            Self::Sqlite => "mlr",
         }
     }
 
     const fn error_label(self) -> &'static str {
         match self {
-            Self::Sqlite => "sqlite",
+            Self::Sqlite => "mlr",
         }
     }
 }
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(response.payload["error"], json!("input_usage_error"));
         assert_eq!(
             response.payload["message"],
-            json!("`--sql` cannot be empty")
+            json!("`--query` cannot be empty")
         );
         assert!(trace.used_tools.is_empty());
         assert!(trace.stage_diagnostics.is_empty());

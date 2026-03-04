@@ -302,6 +302,46 @@ fn ingest_book_emit_pipeline_reports_expected_steps() {
 }
 
 #[test]
+fn ingest_book_emit_pipeline_marks_mdbook_used_when_verify_enabled() {
+    let dir = tempdir().expect("tempdir");
+    let jq_bin = write_passthrough_jq_script(dir.path().join("jq-pass"));
+    let mdbook_bin = write_fake_mdbook_script(dir.path().join("mdbook-pass"));
+    let book_root = dir.path().join("book");
+    let src_dir = book_root.join("src");
+    fs::create_dir_all(&src_dir).expect("create src");
+    fs::write(book_root.join("book.toml"), "[book]\nsrc = \"src\"\n").expect("write book.toml");
+    fs::write(src_dir.join("SUMMARY.md"), "- [Intro](intro.md)\n").expect("write summary");
+    fs::write(src_dir.join("intro.md"), "# Intro\n").expect("write intro");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JQ_BIN", &jq_bin)
+        .env("DATAQ_MDBOOK_BIN", &mdbook_bin)
+        .env("DATAQ_INGEST_BOOK_VERIFY_MDBOOK", "1")
+        .args([
+            "--emit-pipeline",
+            "ingest",
+            "book",
+            "--root",
+            book_root.to_str().expect("utf8 root"),
+        ])
+        .output()
+        .expect("run ingest book with mdbook verify");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], json!("ingest.book"));
+
+    let tools = stderr_json["external_tools"]
+        .as_array()
+        .expect("external_tools");
+    let mdbook_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == json!("mdbook"))
+        .expect("mdbook entry");
+    assert_eq!(mdbook_entry["used"], json!(true));
+}
+
+#[test]
 fn ingest_tabular_path_emits_deterministic_rows_and_pipeline_stages() {
     let dir = tempdir().expect("tempdir");
     let input_path = dir.path().join("rows.csv");
@@ -550,6 +590,20 @@ fi
 
 echo "unsupported parser: $parser" 1>&2
 exit 7
+"#,
+    );
+    path
+}
+
+fn write_fake_mdbook_script(path: PathBuf) -> PathBuf {
+    write_exec_script(
+        &path,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "fake-mdbook 0.1.0"
+  exit 0
+fi
+exit 0
 "#,
     );
     path

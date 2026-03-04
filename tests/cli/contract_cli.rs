@@ -182,6 +182,21 @@ fn contract_transform_rowset_command_is_available() {
 }
 
 #[test]
+fn contract_transform_sql_command_is_available() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "transform-sql"])
+        .output()
+        .expect("run contract transform-sql");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], json!("transform-sql"));
+    assert_eq!(payload["schema"], json!("dataq.transform.sql.output.v1"));
+}
+
+#[test]
 fn contract_all_contains_transform_sql_output_contract() {
     let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["contract", "--all"])

@@ -121,7 +121,7 @@ const INGEST_YAML_JOBS_NOTES: &[&str] = &[
 const ASSERT_NOTES: &[&str] = &[
     "Validation mismatch details are emitted in `mismatches`.",
     "`--rules-help` and `--schema-help` have dedicated schema IDs.",
-    "`--schema` path is exposed as `check-jsonschema` in contract/plan metadata.",
+    "`--schema` defaults to built-in `jsonschema`; optional engines are `ajv` and `checkjs`.",
 ];
 const GATE_SCHEMA_NOTES: &[&str] = &[
     "JSON output shape is aligned with `assert --schema`.",
@@ -421,12 +421,12 @@ mod tests {
     }
 
     #[test]
-    fn assert_contract_exposes_check_jsonschema_schema_path_note() {
+    fn assert_contract_mentions_optional_schema_engines() {
         let response = run_for_command(ContractCommand::Assert);
         let notes = response.payload["notes"].as_array().expect("notes array");
         assert!(notes.iter().any(|note| {
             note.as_str()
-                .is_some_and(|text| text.contains("`check-jsonschema`"))
+                .is_some_and(|text| text.contains("optional engines are `ajv` and `checkjs`"))
         }));
     }
 }

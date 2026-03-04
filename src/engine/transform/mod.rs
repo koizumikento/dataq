@@ -40,7 +40,7 @@ pub enum TransformRowsetError {
 /// Domain errors for transform SQL execution through a DuckDB adapter hook.
 #[derive(Debug, Error)]
 pub enum TransformSqlError {
-    #[error("`--sql` cannot be empty")]
+    #[error("`--query` cannot be empty")]
     InvalidSql,
     #[error("failed to transform rowset with duckdb: {0}")]
     Duckdb(String),

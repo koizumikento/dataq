@@ -126,6 +126,7 @@ struct AssertArgs {
     /// Override schema argument flag forwarded to schema-engine integrations.
     #[arg(
         long,
+        allow_hyphen_values = true,
         requires = "schema",
         conflicts_with_all = ["rules", "rules_help", "schema_help"]
     )]
@@ -134,6 +135,7 @@ struct AssertArgs {
     /// Override input argument flag forwarded to schema-engine integrations.
     #[arg(
         long,
+        allow_hyphen_values = true,
         requires = "schema",
         conflicts_with_all = ["rules", "rules_help", "schema_help"]
     )]
@@ -440,7 +442,7 @@ struct TransformRowsetArgs {
     #[arg(long)]
     input: String,
 
-    /// SQL execution engine for stage 2.
+    /// Stage-2 execution engine selector.
     #[arg(long, value_enum, default_value_t = CliTransformRowsetEngine::Sqlite)]
     engine: CliTransformRowsetEngine,
 
@@ -448,7 +450,7 @@ struct TransformRowsetArgs {
     #[arg(long = "jq-filter")]
     jq_filter: String,
 
-    /// Stage-2 verb/arguments used by the current sqlite-backed adapter path.
+    /// Stage-2 verb/arguments used by the current mlr-backed adapter path.
     #[arg(long = "mlr", required = true, num_args = 1.., allow_hyphen_values = true)]
     mlr: Vec<String>,
 }
@@ -755,6 +757,8 @@ enum CliContractCommand {
     Scan,
     #[value(name = "transform-rowset")]
     TransformRowset,
+    #[value(name = "transform-sql")]
+    TransformSql,
     Merge,
     Doctor,
     #[value(name = "recipe-run", alias = "recipe")]
@@ -833,7 +837,7 @@ impl From<CliAssertSchemaEngine> for r#assert::AssertSchemaEngine {
         match value {
             CliAssertSchemaEngine::Jsonschema => Self::Jsonschema,
             CliAssertSchemaEngine::Ajv => Self::Ajv,
-            CliAssertSchemaEngine::Checkjs => Self::Jsonschema,
+            CliAssertSchemaEngine::Checkjs => Self::Checkjs,
         }
     }
 }
@@ -867,6 +871,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::IngestBook => Self::IngestBook,
             CliContractCommand::Scan => Self::Scan,
             CliContractCommand::TransformRowset => Self::TransformRowset,
+            CliContractCommand::TransformSql => Self::TransformSql,
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
             CliContractCommand::RecipeRun => Self::RecipeRun,
@@ -1193,7 +1198,11 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         .schema
         .as_deref()
         .and_then(|path| dataq_io::resolve_input_format(None, Some(path)).ok());
-    let mut steps = r#assert::pipeline_steps(normalize_mode);
+    let mut steps = if args.schema.is_some() {
+        r#assert::schema_pipeline_steps(normalize_mode, schema_engine)
+    } else {
+        r#assert::pipeline_steps(normalize_mode)
+    };
     let mut deterministic_guards = r#assert::deterministic_guards(normalize_mode, schema_engine);
     if let Some(engine) = schema_dispatch.engine {
         deterministic_guards.push(format!("assert_schema_engine_{}", engine.as_str()));
@@ -1327,6 +1336,8 @@ fn run_assert_with_dispatch<R: Read>(
         stdin,
         normalize_mode,
         selected_engine.into(),
+        schema_dispatch.schema_flag.as_deref(),
+        schema_dispatch.input_flag.as_deref(),
     )
 }
 
@@ -2372,7 +2383,7 @@ fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {
 }
 
 fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
-    let (input_format, stdin_input) = if args.input == "-" {
+    let (input, input_format, stdin_input) = if args.input == "-" {
         let stdin = io::stdin();
         let mut bytes = Vec::new();
         if let Err(error) = stdin.lock().read_to_end(&mut bytes) {
@@ -2384,7 +2395,10 @@ fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
             );
             if emit_pipeline {
                 emit_pipeline_report(&build_transform_sql_pipeline_report(
-                    &args, None, true, false,
+                    &args,
+                    None,
+                    true,
+                    &transform::TransformSqlPipelineTrace::default(),
                 ));
             }
             return 3;
@@ -2401,42 +2415,62 @@ fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
                 );
                 if emit_pipeline {
                     emit_pipeline_report(&build_transform_sql_pipeline_report(
-                        &args, None, true, false,
+                        &args,
+                        None,
+                        true,
+                        &transform::TransformSqlPipelineTrace::default(),
                     ));
                 }
                 return 3;
             }
         };
 
-        if let Err(error) = dataq_io::reader::read_values(Cursor::new(bytes), format) {
-            emit_error(
-                "input_usage_error",
-                format!("failed to read input: {error}"),
-                json!({"command": "transform.sql"}),
-                3,
-            );
-            if emit_pipeline {
-                emit_pipeline_report(&build_transform_sql_pipeline_report(
-                    &args,
-                    Some(format),
-                    true,
-                    false,
-                ));
+        let values = match dataq_io::reader::read_values(Cursor::new(bytes), format) {
+            Ok(values) => values,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    format!("failed to read input: {error}"),
+                    json!({"command": "transform.sql"}),
+                    3,
+                );
+                if emit_pipeline {
+                    emit_pipeline_report(&build_transform_sql_pipeline_report(
+                        &args,
+                        Some(format),
+                        true,
+                        &transform::TransformSqlPipelineTrace::default(),
+                    ));
+                }
+                return 3;
             }
-            return 3;
-        }
+        };
 
-        (Some(format), true)
+        (
+            transform::TransformSqlCommandInput::Inline(values),
+            Some(format),
+            true,
+        )
     } else {
         let path = PathBuf::from(args.input.clone());
         let format = dataq_io::resolve_input_format(None, Some(path.as_path())).ok();
-        (format, false)
+        (
+            transform::TransformSqlCommandInput::Path(path),
+            format,
+            false,
+        )
     };
 
-    let (response_exit_code, response_payload, used_duckdb) = execute_transform_sql(&args);
-    let exit_code = match response_exit_code {
+    let command_args = transform::TransformSqlCommandArgs {
+        input,
+        sql: args.query.clone(),
+    };
+    let (response, trace) =
+        transform::run_sql_with_trace(&command_args, dataq::adapters::duckdb::run_query);
+
+    let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response_payload) {
+            if emit_json_stdout(&response.payload) {
                 0
             } else {
                 emit_error(
@@ -2449,7 +2483,7 @@ fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
             }
         }
         3 => {
-            if emit_json_stderr(&response_payload) {
+            if emit_json_stderr(&response.payload) {
                 3
             } else {
                 emit_error(
@@ -2474,29 +2508,10 @@ fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
 
     if emit_pipeline {
         let pipeline_report =
-            build_transform_sql_pipeline_report(&args, input_format, stdin_input, used_duckdb);
+            build_transform_sql_pipeline_report(&args, input_format, stdin_input, &trace);
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
-}
-
-fn execute_transform_sql(args: &TransformSqlArgs) -> (i32, Value, bool) {
-    let engine = args.engine.as_str();
-    (
-        3,
-        json!({
-            "error": "input_usage_error",
-            "message": format!(
-                "`transform sql` is not available in this build for engine `{engine}`"
-            ),
-            "details": {
-                "command": "transform.sql",
-                "engine": engine,
-                "query": args.query,
-            }
-        }),
-        matches!(args.engine, CliTransformSqlEngine::Duckdb),
-    )
 }
 
 fn run_scan_text(args: ScanTextArgs, emit_pipeline: bool) -> i32 {
@@ -4002,33 +4017,29 @@ fn build_transform_sql_pipeline_report(
     args: &TransformSqlArgs,
     input_format: Option<Format>,
     stdin_input: bool,
-    used_duckdb: bool,
+    trace: &transform::TransformSqlPipelineTrace,
 ) -> PipelineReport {
     let source = if stdin_input {
         PipelineInputSource::stdin("input", format_label(input_format))
     } else {
         PipelineInputSource::path("input", args.input.as_str(), format_label(input_format))
     };
+    let mut deterministic_guards = transform::sql_deterministic_guards();
+    deterministic_guards.push(format!("transform_sql_engine_{}", args.engine.as_str()));
+
     let mut report = ensure_external_tool(
         PipelineReport::new(
             "transform.sql",
             PipelineInput::new(vec![source]),
-            vec![
-                "transform_sql_resolve_input".to_string(),
-                "transform_sql_execute_query".to_string(),
-                "transform_sql_write_output".to_string(),
-            ],
-            vec![
-                "explicit_sql_engine_selection".to_string(),
-                "duckdb_execution_with_explicit_arg_arrays".to_string(),
-            ],
+            transform::sql_pipeline_steps(),
+            deterministic_guards,
         ),
         "duckdb",
     );
-    if used_duckdb {
-        report = report.mark_external_tool_used("duckdb");
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
     }
-    report
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
 fn build_merge_pipeline_report(
@@ -4366,6 +4377,9 @@ fn resolve_tool_executable(tool_name: &str) -> String {
         "jq" => Some("DATAQ_JQ_BIN"),
         "yq" => Some("DATAQ_YQ_BIN"),
         "mlr" => Some("DATAQ_MLR_BIN"),
+        "ajv" => Some("DATAQ_AJV_BIN"),
+        "duckdb" => Some("DATAQ_DUCKDB_BIN"),
+        "check-jsonschema" => Some("DATAQ_CHECK_JSONSCHEMA_BIN"),
         "sqlite" => Some("DATAQ_SQLITE_BIN"),
         "xh" => Some("DATAQ_XH_BIN"),
         "pandoc" => Some("DATAQ_PANDOC_BIN"),
@@ -4546,6 +4560,10 @@ mod tests {
             r#assert::AssertInputNormalizeMode::from(CliAssertNormalizeMode::GitlabCiJobs),
             r#assert::AssertInputNormalizeMode::GitlabCiJobs
         );
+        assert_eq!(
+            r#assert::AssertSchemaEngine::from(CliAssertSchemaEngine::Checkjs),
+            r#assert::AssertSchemaEngine::Checkjs
+        );
         assert_eq!(CliAssertSchemaEngine::Jsonschema.as_str(), "jsonschema");
         assert_eq!(CliAssertSchemaEngine::Checkjs.as_str(), "checkjs");
 
@@ -4573,6 +4591,10 @@ mod tests {
         assert_eq!(
             contract::ContractCommand::from(CliContractCommand::TransformRowset),
             contract::ContractCommand::TransformRowset
+        );
+        assert_eq!(
+            contract::ContractCommand::from(CliContractCommand::TransformSql),
+            contract::ContractCommand::TransformSql
         );
         assert_eq!(
             contract::ContractCommand::from(CliContractCommand::RecipeRun),
@@ -4713,6 +4735,19 @@ mod tests {
         .expect_err("missing --input should fail");
 
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn contract_cli_accepts_transform_sql_command_value() {
+        let cli = Cli::try_parse_from(["dataq", "contract", "--command", "transform-sql"])
+            .expect("parse contract transform-sql");
+        match cli.command {
+            Commands::Contract(ContractArgs {
+                command: Some(CliContractCommand::TransformSql),
+                all: false,
+            }) => {}
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
     }
 
     #[test]
@@ -5077,11 +5112,15 @@ mod tests {
             query: "select 1".to_string(),
             input: "-".to_string(),
         };
+        let transform_sql_trace = transform::TransformSqlPipelineTrace {
+            used_tools: vec!["duckdb".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
         let transform_sql_report = build_transform_sql_pipeline_report(
             &transform_sql_args,
             Some(Format::Json),
             true,
-            true,
+            &transform_sql_trace,
         );
         assert_eq!(transform_sql_report.command, "transform.sql");
         assert!(

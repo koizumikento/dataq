@@ -236,7 +236,11 @@ fn assert_schema_help_outputs_machine_readable_json() {
     );
     assert_eq!(
         stdout_json["mode"]["available_engines"],
-        Value::Array(vec![Value::from("jsonschema"), Value::from("ajv")])
+        Value::Array(vec![
+            Value::from("jsonschema"),
+            Value::from("ajv"),
+            Value::from("checkjs"),
+        ])
     );
     assert!(stdout_json["example_schema"].is_object());
 }

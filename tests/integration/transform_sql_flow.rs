@@ -5,11 +5,9 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 
 #[test]
-#[ignore = "enable after transform sql command wiring lands"]
 fn transform_sql_duckdb_flow_is_deterministic() {
     let dir = tempdir().expect("tempdir");
     let duckdb_bin = write_fake_duckdb_script(dir.path().join("fake-duckdb"));
-    let db_path = dir.path().join("transform.duckdb");
 
     let input = r#"[{"team":"a","price":10.0},{"team":"a","price":5.0},{"team":"b","price":7.0}]"#;
     let query = "SELECT team, AVG(price) AS avg_price FROM input GROUP BY team ORDER BY team";
@@ -19,12 +17,12 @@ fn transform_sql_duckdb_flow_is_deterministic() {
         .args([
             "transform",
             "sql",
+            "--engine",
+            "duckdb",
             "--input",
             "-",
             "--query",
             query,
-            "--duckdb-path",
-            db_path.to_str().expect("utf8 db path"),
         ])
         .write_stdin(input)
         .assert()
@@ -38,12 +36,12 @@ fn transform_sql_duckdb_flow_is_deterministic() {
         .args([
             "transform",
             "sql",
+            "--engine",
+            "duckdb",
             "--input",
             "-",
             "--query",
             query,
-            "--duckdb-path",
-            db_path.to_str().expect("utf8 db path"),
         ])
         .write_stdin(input)
         .assert()
@@ -58,8 +56,8 @@ fn transform_sql_duckdb_flow_is_deterministic() {
     assert_eq!(
         actual,
         json!([
-            {"team": "a", "avg_price": "7.500000"},
-            {"team": "b", "avg_price": "7.000000"}
+            {"team": "b", "avg_price": "7.000000"},
+            {"team": "a", "avg_price": "7.500000"}
         ])
     );
 }

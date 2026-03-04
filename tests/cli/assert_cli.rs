@@ -147,6 +147,63 @@ exit 1
     (dir, ajv_path.display().to_string())
 }
 
+fn create_checkjsonschema_error_shim() -> (tempfile::TempDir, String) {
+    let dir = tempdir().expect("tempdir");
+    let checkjs_path = dir.path().join("fake-check-jsonschema");
+    write_exec_script(
+        &checkjs_path,
+        r#"#!/bin/sh
+target=""
+for arg in "$@"; do
+  target="$arg"
+done
+if [ -z "$target" ]; then
+  echo "missing input path" 1>&2
+  exit 2
+fi
+printf '{"status":"fail","errors":[{"filename":"%s","path":"$.id","message":"bad type"}],"parse_errors":[]}\n' "$target"
+exit 1
+"#,
+    );
+    (dir, checkjs_path.display().to_string())
+}
+
+fn create_checkjsonschema_flag_forwarding_shim() -> (tempfile::TempDir, String) {
+    let dir = tempdir().expect("tempdir");
+    let checkjs_path = dir.path().join("fake-check-jsonschema-flags");
+    write_exec_script(
+        &checkjs_path,
+        r#"#!/bin/sh
+schema_seen=0
+input_seen=0
+target=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --custom-schema)
+      schema_seen=1
+      shift 2
+      ;;
+    --custom-input)
+      input_seen=1
+      target="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [ "$schema_seen" != "1" ] || [ "$input_seen" != "1" ]; then
+  echo "missing forwarded custom flags" 1>&2
+  exit 9
+fi
+printf '{"status":"fail","errors":[{"filename":"%s","path":"$.id","message":"bad type"}],"parse_errors":[]}\n' "$target"
+exit 1
+"#,
+    );
+    (dir, checkjs_path.display().to_string())
+}
+
 #[test]
 fn assert_normalize_emit_pipeline_reports_three_stage_diagnostics() {
     let Some((tool_dir, yq_bin, mlr_bin)) = create_normalize_tool_shims() else {
@@ -1235,6 +1292,225 @@ fn assert_cli_ajv_engine_marks_external_tool_in_pipeline() {
         .expect("ajv external tool");
     assert_eq!(ajv_tool["used"], Value::Bool(true));
     drop(tool_dir);
+}
+
+#[test]
+fn assert_cli_supports_checkjs_schema_engine_with_normalized_shape() {
+    let (tool_dir, checkjsonschema_bin) = create_checkjsonschema_error_shim();
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    let input_path = dir.path().join("input.json");
+    std::fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+    )
+    .expect("write schema");
+    std::fs::write(&input_path, r#"[{"id":"x"}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_CHECK_JSONSCHEMA_BIN", &checkjsonschema_bin)
+        .args([
+            "assert",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+            "--schema",
+            schema_path.to_str().expect("utf8 path"),
+            "--engine",
+            "checkjs",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2));
+    let payload = parse_stdout_json(&output.stdout);
+    assert_eq!(payload["matched"], Value::Bool(false));
+    assert_eq!(payload["mismatch_count"], Value::from(1));
+    assert_eq!(payload["mismatches"][0]["path"], Value::from("$[0].id"));
+    assert_eq!(payload["mismatches"][0]["rule_kind"], Value::from("schema"));
+    assert_eq!(
+        payload["mismatches"][0]["reason"],
+        Value::from("schema_mismatch")
+    );
+    assert_eq!(
+        payload["mismatches"][0]["expected"]["engine"],
+        Value::from("checkjs")
+    );
+    assert_eq!(
+        payload["mismatches"][0]["expected"]["instance_path"],
+        Value::from("$.id")
+    );
+    assert_eq!(
+        payload["mismatches"][0]["expected"]["schema_path"],
+        Value::Null
+    );
+    drop(tool_dir);
+}
+
+#[test]
+fn assert_cli_checkjs_engine_marks_external_tool_in_pipeline() {
+    let (tool_dir, checkjsonschema_bin) = create_checkjsonschema_error_shim();
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    let input_path = dir.path().join("input.json");
+    std::fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+    )
+    .expect("write schema");
+    std::fs::write(&input_path, r#"[{"id":"x"}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_CHECK_JSONSCHEMA_BIN", &checkjsonschema_bin)
+        .args([
+            "assert",
+            "--emit-pipeline",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+            "--schema",
+            schema_path.to_str().expect("utf8 path"),
+            "--engine",
+            "checkjs",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr_json_lines = parse_stderr_json_lines(&output.stderr);
+    let pipeline_json = stderr_json_lines.last().expect("pipeline json");
+    let external_tools = pipeline_json["external_tools"]
+        .as_array()
+        .expect("external_tools array");
+    let checkjsonschema_tool = external_tools
+        .iter()
+        .find(|tool| tool["name"] == "check-jsonschema")
+        .expect("check-jsonschema external tool");
+    assert_eq!(checkjsonschema_tool["used"], Value::Bool(true));
+    drop(tool_dir);
+}
+
+#[test]
+fn assert_cli_forwards_schema_and_input_flags_to_checkjs_engine() {
+    let (tool_dir, checkjsonschema_bin) = create_checkjsonschema_flag_forwarding_shim();
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    let input_path = dir.path().join("input.json");
+    std::fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+    )
+    .expect("write schema");
+    std::fs::write(&input_path, r#"[{"id":"x"}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_CHECK_JSONSCHEMA_BIN", &checkjsonschema_bin)
+        .args([
+            "assert",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+            "--schema",
+            schema_path.to_str().expect("utf8 path"),
+            "--schema-engine",
+            "checkjs",
+            "--schema-flag",
+            "--custom-schema",
+            "--input-flag",
+            "--custom-input",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2));
+    let payload = parse_stdout_json(&output.stdout);
+    assert_eq!(payload["mismatch_count"], Value::from(1));
+    drop(tool_dir);
+}
+
+#[test]
+fn assert_cli_rejects_schema_flag_overrides_without_checkjs_engine() {
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    let input_path = dir.path().join("input.json");
+    std::fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+    )
+    .expect("write schema");
+    std::fs::write(&input_path, r#"[{"id":"x"}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "assert",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+            "--schema",
+            schema_path.to_str().expect("utf8 path"),
+            "--schema-flag",
+            "--custom-schema",
+            "--input-flag",
+            "--custom-input",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_stderr_json_lines(&output.stderr);
+    assert_eq!(
+        stderr_json
+            .first()
+            .expect("error json")
+            .get("message")
+            .and_then(Value::as_str),
+        Some("`--schema-flag` and `--input-flag` are supported only with schema engine `checkjs`")
+    );
+}
+
+#[test]
+fn assert_cli_maps_missing_checkjsonschema_binary_to_exit_three() {
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    let input_path = dir.path().join("input.json");
+    std::fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+    )
+    .expect("write schema");
+    std::fs::write(&input_path, r#"[{"id":"x"}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env(
+            "DATAQ_CHECK_JSONSCHEMA_BIN",
+            "/definitely-missing/check-jsonschema",
+        )
+        .args([
+            "assert",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+            "--schema",
+            schema_path.to_str().expect("utf8 path"),
+            "--engine",
+            "checkjs",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_stderr_json_lines(&output.stderr);
+    assert_eq!(
+        stderr_json
+            .first()
+            .expect("error json")
+            .get("error")
+            .expect("error key"),
+        &Value::from("input_usage_error")
+    );
+    assert_eq!(
+        stderr_json
+            .first()
+            .expect("error json")
+            .get("message")
+            .and_then(Value::as_str),
+        Some("schema engine `checkjs` requires `check-jsonschema` in PATH")
+    );
 }
 
 #[test]

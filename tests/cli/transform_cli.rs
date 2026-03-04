@@ -132,7 +132,7 @@ fn transform_rowset_emit_pipeline_reports_stage_diagnostics_with_record_counts()
     );
     assert_eq!(
         stderr_json["stage_diagnostics"][1]["tool"],
-        Value::from("sqlite")
+        Value::from("mlr")
     );
     assert_eq!(
         stderr_json["stage_diagnostics"][1]["input_records"],
@@ -233,7 +233,7 @@ fn transform_rowset_emit_pipeline_after_mlr_args_is_parsed_as_global_flag() {
     );
     assert_eq!(
         stderr_json["stage_diagnostics"][1]["tool"],
-        Value::from("sqlite")
+        Value::from("mlr")
     );
 }
 
@@ -289,8 +289,154 @@ fn transform_rowset_malformed_commands_return_exit_three() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains(
-            "failed to transform rowset with sqlite",
+            "failed to transform rowset with mlr",
         ));
+}
+
+#[test]
+fn transform_sql_duckdb_is_machine_readable_and_deterministic() {
+    let dir = tempdir().expect("tempdir");
+    let duckdb_bin = write_fake_duckdb_script(dir.path().join("fake-duckdb"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"b","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_DUCKDB_BIN", &duckdb_bin)
+        .args([
+            "transform",
+            "sql",
+            "--engine",
+            "duckdb",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--query",
+            "select team, avg(price) as avg from input group by team",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("parse transform sql output");
+    assert_eq!(
+        parsed,
+        json!([
+            {"avg": 7.0, "team": "a"},
+            {"avg": 7.5, "team": "z"}
+        ])
+    );
+}
+
+#[test]
+fn transform_sql_emit_pipeline_reports_duckdb_stage() {
+    let dir = tempdir().expect("tempdir");
+    let duckdb_bin = write_fake_duckdb_script(dir.path().join("fake-duckdb"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"b","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_DUCKDB_BIN", &duckdb_bin)
+        .args([
+            "transform",
+            "sql",
+            "--emit-pipeline",
+            "--engine",
+            "duckdb",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--query",
+            "select team, avg(price) as avg from input group by team",
+        ])
+        .output()
+        .expect("run transform sql");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], Value::from("transform.sql"));
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["step"],
+        Value::from("transform_sql_duckdb")
+    );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["tool"],
+        Value::from("duckdb")
+    );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["input_records"],
+        Value::from(2)
+    );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["output_records"],
+        Value::from(2)
+    );
+
+    let duckdb_tool = stderr_json["external_tools"]
+        .as_array()
+        .expect("external_tools")
+        .iter()
+        .find(|tool| tool["name"] == "duckdb")
+        .expect("duckdb tool");
+    assert_eq!(duckdb_tool["used"], Value::Bool(true));
+}
+
+#[test]
+fn transform_sql_missing_duckdb_maps_to_exit_three() {
+    let dir = tempdir().expect("tempdir");
+    let input = dir.path().join("input.json");
+    fs::write(&input, r#"[{"team":"a","price":10.0}]"#).expect("write input");
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_DUCKDB_BIN", "/definitely-missing/duckdb")
+        .args([
+            "transform",
+            "sql",
+            "--engine",
+            "duckdb",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--query",
+            "select * from input",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "failed to transform rowset with duckdb: `duckdb` is not available in PATH",
+        ));
+}
+
+#[test]
+fn transform_sql_bootstraps_input_relation_for_duckdb() {
+    let dir = tempdir().expect("tempdir");
+    let duckdb_bin = write_duckdb_bootstrap_asserting_script(dir.path().join("fake-duckdb"));
+
+    let input = dir.path().join("input.json");
+    fs::write(&input, r#"[{"team":"a","price":10.0}]"#).expect("write input");
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_DUCKDB_BIN", &duckdb_bin)
+        .args([
+            "transform",
+            "sql",
+            "--engine",
+            "duckdb",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--query",
+            "select * from input",
+        ])
+        .assert()
+        .code(0);
 }
 
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
@@ -369,6 +515,52 @@ exit 9
 "#;
 
     fs::write(&path, script).expect("write mlr script");
+    set_executable(&path);
+    path
+}
+
+fn write_fake_duckdb_script(path: PathBuf) -> PathBuf {
+    let script = r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    printf 'duckdb v1.3.0\n'
+    exit 0
+  fi
+done
+
+if [ -t 0 ]; then
+  :
+else
+  cat >/dev/null
+fi
+
+printf '[{"team":"z","avg":7.5},{"team":"a","avg":7.0}]'
+"#;
+
+    fs::write(&path, script).expect("write duckdb script");
+    set_executable(&path);
+    path
+}
+
+fn write_duckdb_bootstrap_asserting_script(path: PathBuf) -> PathBuf {
+    let script = r#"#!/bin/sh
+if [ "$1" != "-json" ] || [ "$2" != "-batch" ] || [ "$3" != "-c" ]; then
+  echo 'unexpected duckdb args' 1>&2
+  exit 9
+fi
+case "$4" in
+  *"CREATE OR REPLACE TEMP TABLE input AS SELECT * FROM read_json_auto("*"; select * from input"*)
+    printf '[{"ok":true}]'
+    exit 0
+    ;;
+  *)
+    echo 'missing input bootstrap query' 1>&2
+    exit 9
+    ;;
+esac
+"#;
+
+    fs::write(&path, script).expect("write duckdb script");
     set_executable(&path);
     path
 }
