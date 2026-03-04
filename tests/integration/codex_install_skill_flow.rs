@@ -67,6 +67,32 @@ fn codex_install_skill_resolves_default_root_from_codex_home_and_emits_stable_pa
     );
 }
 
+#[test]
+fn codex_install_skill_falls_back_to_home_agents_skills_when_codex_home_missing() {
+    let home = tempdir().expect("home tempdir");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env_remove("CODEX_HOME")
+        .env("HOME", home.path())
+        .args(["codex", "install-skill"])
+        .output()
+        .expect("run codex install-skill");
+
+    assert_eq!(output.status.code(), Some(0));
+    let destination = home.path().join(".agents").join("skills").join("dataq");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(
+        payload,
+        json!({
+            "schema": "dataq.codex.install_skill.output.v1",
+            "skill_name": "dataq",
+            "destination": destination.display().to_string(),
+            "copied_files": ["SKILL.md", "agents/openai.yaml"],
+            "overwrite": false,
+        })
+    );
+}
+
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
     let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
     let line = text

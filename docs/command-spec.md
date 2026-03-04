@@ -101,7 +101,7 @@ dataq [--emit-pipeline] <command> [options]
 - 配置先ルート解決:
   - `--dest <dir>` 指定時: `<dir>` を直接ルートとして使用
   - 未指定時: `CODEX_HOME/skills`（`CODEX_HOME` が設定されている場合）
-  - 上記が未設定時: `HOME/.codex/skills`
+  - 上記が未設定時: `HOME/.agents/skills`
   - 最終配置先は常に `<root>/dataq`
 - `--force`:
   - 既存の `<root>/dataq` を上書きして再配置

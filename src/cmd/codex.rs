@@ -149,7 +149,7 @@ fn resolve_skill_root(dest_root: Option<&Path>) -> Result<PathBuf, String> {
     }
 
     if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(home).join(".codex").join("skills"));
+        return Ok(PathBuf::from(home).join(".agents").join("skills"));
     }
 
     Err(

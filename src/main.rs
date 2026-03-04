@@ -5174,12 +5174,12 @@ mod tests {
         assert_eq!(emit_report.command, "emit");
 
         let codex_args = CodexInstallSkillArgs {
-            dest: Some(PathBuf::from("/tmp/.codex/skills")),
+            dest: Some(PathBuf::from("/tmp/.agents/skills")),
             force: true,
         };
         let codex_trace = codex::CodexInstallSkillPipelineTrace {
-            resolved_root: Some(PathBuf::from("/tmp/.codex/skills")),
-            destination_path: Some(PathBuf::from("/tmp/.codex/skills/dataq")),
+            resolved_root: Some(PathBuf::from("/tmp/.agents/skills")),
+            destination_path: Some(PathBuf::from("/tmp/.agents/skills/dataq")),
         };
         let codex_report = build_codex_install_skill_pipeline_report(&codex_args, &codex_trace);
         assert_eq!(codex_report.command, "codex.install-skill");
@@ -5597,7 +5597,7 @@ mod tests {
         assert_eq!(
             run_codex_install_skill(
                 CodexInstallSkillArgs {
-                    dest: Some(temp.path().join(".codex/skills")),
+                    dest: Some(temp.path().join(".agents/skills")),
                     force: false,
                 },
                 true,
@@ -5729,7 +5729,7 @@ mod tests {
         let codex_exit = run_codex(
             CodexArgs {
                 command: CodexSubcommand::InstallSkill(CodexInstallSkillArgs {
-                    dest: Some(codex_temp.path().join(".codex/skills")),
+                    dest: Some(codex_temp.path().join(".agents/skills")),
                     force: false,
                 }),
             },

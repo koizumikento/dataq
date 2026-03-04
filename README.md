@@ -84,34 +84,34 @@ dataq [--emit-pipeline] <command> [options]
 
 | Command | 用途 | 必須オプション |
 | --- | --- | --- |
-| `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>`（stdin時は省略可） |
+| `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <format>`（`format`: `json` / `yaml` / `csv` / `jsonl`。stdin時は省略可） |
 | `ingest api` | HTTP API 応答を `xh -> jq` で決定的JSONへ正規化 | `--url <http(s)://...>` |
-| `ingest yaml-jobs` | YAMLのCIジョブ定義を正規化JSON配列へ変換 | `--input <path|->` `--mode <github-actions|gitlab-ci|generic-map>` |
-| `ingest tabular` | 表形式入力を `csvkit` で決定的JSON配列へ正規化 | `--input <path|->` |
+| `ingest yaml-jobs` | YAMLのCIジョブ定義を正規化JSON配列へ変換 | `--input <path-or-stdin>` `--mode <mode>`（`mode`: `github-actions` / `gitlab-ci` / `generic-map`） |
+| `ingest tabular` | 表形式入力を `csvkit` で決定的JSON配列へ正規化 | `--input <path-or-stdin>` |
 | `ingest jc` | 半構造テキストを `jc` で決定的JSONエンベロープへ変換 | `--parser <name>` |
 | `ingest notes` | `nb` ノートをフィルタ・正規化してJSON/JSONLで出力 | なし（`--tag`/`--since`/`--until`/`--to` は任意） |
 | `ingest book` | mdBook `SUMMARY.md` とメタ情報を決定的JSONへ変換 | `--root <path>` |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
 | `gate schema` | JSON Schema で品質ゲートを実行（`assert --schema` の専用ラッパー） | `--schema <path>` |
 | `gate policy` | ルールベース品質ゲートを実行（違反詳細を決定的順序で出力） | `--rules <path>` |
-| `schema infer` | 表形式入力から `qsv` で JSON Schema を推定 | なし（`--input <path|->` は任意） |
+| `schema infer` | 表形式入力から `qsv` で JSON Schema を推定 | なし（`--input <path-or-stdin>` は任意） |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `diff source` | 2ソース（preset/path）を解決して構造差分を出力 | `--left <preset-or-path>` `--right <preset-or-path>` |
-| `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
-| `ingest doc` | ドキュメントを共通JSONスキーマへ抽出 | `--input <path|->` `--from <md|html|docx|rst|latex>` |
-| `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
-| `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
+| `profile` | フィールド統計を決定的JSONで出力 | `--from <format>`（`format`: `json` / `yaml` / `csv` / `jsonl`） |
+| `ingest doc` | ドキュメントを共通JSONスキーマへ抽出 | `--input <path-or-stdin>` `--from <format>`（`format`: `md` / `html` / `docx` / `rst` / `latex`） |
+| `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <how>`（`how`: `inner` / `left`） |
+| `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <metric>`（`metric`: `count` / `sum` / `avg`） `--target <field>` |
 | `scan text` | テキストを正規表現で走査し構造化結果を出力 | `--pattern <regex>` |
-| `transform rowset` | `jq -> mlr` の2段でrowsetを変換しJSON配列を出力 | `--input <path|->` `--engine <sqlite>` `--jq-filter <filter>` `--mlr <verb...>` |
-| `transform sql` | `duckdb` でSQL変換しJSON配列を出力 | `--input <path|->` `--query <sql>` `--engine <duckdb>` |
-| `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
+| `transform rowset` | `jq -> mlr` の2段でrowsetを変換しJSON配列を出力 | `--input <path-or-stdin>` `--engine <sqlite>` `--jq-filter <filter>` `--mlr <verb...>` |
+| `transform sql` | `duckdb` でSQL変換しJSON配列を出力 | `--input <path-or-stdin>` `--query <sql>` `--engine <duckdb>` |
+| `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <policy>`（`policy`: `last-wins` / `deep-merge` / `array-replace`） `--policy-path <path=policy>...` |
 | `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
 | `recipe lock` | レシピ再現実行用のロック情報を生成 | `--file <path>` |
 | `recipe replay` | lock 制約を検証してレシピを再実行 | `--file <recipe-path>` `--lock <lock-path>` |
 | `contract` | サブコマンド出力契約を機械可読JSONで取得 | `--command <name>` または `--all` |
 | `emit plan` | サブコマンドの静的実行計画（stage/dependency/tool）を出力 | `--command <name>` |
-| `codex install-skill` | 埋め込み済み dataq skill を Codex skills root に配置 | `--dest <dir>`（省略時は `CODEX_HOME/skills` → `HOME/.codex/skills`） |
+| `codex install-skill` | 埋め込み済み dataq skill を Codex skills root に配置 | `--dest <dir>`（省略時は `CODEX_HOME/skills` → `HOME/.agents/skills`） |
 | `mcp` | 1リクエスト単位の MCP(JSON-RPC 2.0) サーバーモード | stdin で JSON-RPC リクエストを1件入力 |
 
 グローバルオプション:
@@ -847,7 +847,7 @@ Codex で再利用できる dataq skill を、CLIに埋め込まれた固定資�
 - 配置先ルート解決:
   - `--dest <dir>` 指定時: `<dir>`
   - 未指定時: `CODEX_HOME/skills`
-  - `CODEX_HOME` 未設定時: `HOME/.codex/skills`
+  - `CODEX_HOME` 未設定時: `HOME/.agents/skills`
 - 最終配置先: `<root>/dataq`
 - コピー対象（固定）:
   - `SKILL.md`
