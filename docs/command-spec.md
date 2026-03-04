@@ -278,6 +278,8 @@ dataq [--emit-pipeline] <command> [options]
 
 - 既存キーは固定: `record_count`, `field_count`, `fields`, `type_distribution`
 - `fields.<canonical-path>.numeric_stats` は後方互換な追加キー（数値サンプルが存在するときのみ出力）
+- `--from csv` は通常CSV行の集計に加えて、qsv adapter 出力CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` 等）を同一スキーマへ正規化可能
+- qsv adapter 正規化パスが使われた場合、`--emit-pipeline` で `stage_diagnostics` に `profile_qsv_normalize` を出力し、`external_tools` で `qsv.used=true` を記録
 - `numeric_stats` スキーマ:
   - `count`
   - `min`
@@ -509,7 +511,7 @@ pipeline JSON schema:
 - `command`: 実行サブコマンド名
 - `input`: 入力ソース情報（stdin/path, format）
 - `steps`: 実行ステップ配列
-- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）に、コマンド固有ツール（例: `ingest doc` の `pandoc`）を追記。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
+- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）に、コマンド固有ツール（例: `ingest doc` の `pandoc`, `profile --from csv` の qsv正規化パスで `qsv`）を追記。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
   - 追加メトリクス: `input_bytes`, `output_bytes`, `duration_ms`（決定性保持のため固定 `0`）
   - 後方互換: 既存フィールド（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）は不変

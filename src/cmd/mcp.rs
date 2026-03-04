@@ -1156,19 +1156,17 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
         Err(message) => return input_usage_error(message),
     };
 
-    let (response, input_format) = match &input {
+    let (response, input_format, trace) = match &input {
         ValueInputSource::Path(path) => {
             let input_format = from.or_else(|| io::resolve_input_format(None, Some(path)).ok());
-            (
-                profile::run_with_stdin(
-                    &profile::ProfileCommandArgs {
-                        input: Some(path.clone()),
-                        from,
-                    },
-                    Cursor::new(Vec::new()),
-                ),
-                input_format,
-            )
+            let (response, trace) = profile::run_with_stdin_and_trace(
+                &profile::ProfileCommandArgs {
+                    input: Some(path.clone()),
+                    from,
+                },
+                Cursor::new(Vec::new()),
+            );
+            (response, input_format, trace)
         }
         ValueInputSource::Inline(values) => {
             if let Some(explicit) = from {
@@ -1176,16 +1174,14 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
                     return input_usage_error("inline profile input only supports `from=json`");
                 }
             }
-            (
-                profile::run_with_stdin(
-                    &profile::ProfileCommandArgs {
-                        input: None,
-                        from: Some(Format::Json),
-                    },
-                    Cursor::new(serialize_values_as_json_input(values)),
-                ),
-                Some(Format::Json),
-            )
+            let (response, trace) = profile::run_with_stdin_and_trace(
+                &profile::ProfileCommandArgs {
+                    input: None,
+                    from: Some(Format::Json),
+                },
+                Cursor::new(serialize_values_as_json_input(values)),
+            );
+            (response, Some(Format::Json), trace)
         }
     };
 
@@ -1196,12 +1192,16 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
     };
 
     if emit_pipeline {
-        let pipeline = PipelineReport::new(
+        let mut pipeline = PipelineReport::new(
             "profile",
             PipelineInput::new(vec![pipeline_source("input", &input, input_format)]),
             profile::pipeline_steps(),
             profile::deterministic_guards(),
         );
+        for used_tool in &trace.used_tools {
+            pipeline = pipeline.mark_external_tool_used(used_tool);
+        }
+        pipeline = pipeline.with_stage_diagnostics(trace.stage_diagnostics.clone());
         execution.pipeline = pipeline_as_value(pipeline).ok();
     }
 
