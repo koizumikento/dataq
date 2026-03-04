@@ -9,7 +9,7 @@ use crate::cmd::{
     canon, contract, doctor, join, merge, profile, sdiff,
 };
 
-const TOOL_ORDER: [&str; 3] = ["jq", "yq", "mlr"];
+const TOOL_ORDER: [&str; 4] = ["jq", "yq", "mlr", "duckdb"];
 
 /// Request shape for static plan resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +96,11 @@ fn resolve_steps(command: &str, args: &[String]) -> Result<Vec<String>, EmitPlan
         "join" => Ok(join::pipeline_steps()),
         "aggregate" => Ok(aggregate::pipeline_steps()),
         "merge" => Ok(merge::pipeline_steps()),
+        "transform-sql" => Ok(vec![
+            "resolve_transform_sql_input".to_string(),
+            "execute_transform_sql_with_duckdb".to_string(),
+            "write_transform_sql_output".to_string(),
+        ]),
         "doctor" => Ok(doctor::pipeline_steps(None)),
         "contract" => Ok(contract::pipeline_steps()),
         "recipe" | "recipe.run" => resolve_recipe_steps(args),
@@ -233,6 +238,7 @@ fn stage_tool(command: &str, step: &str) -> &'static str {
         "assert" if step == "normalize_assert_input" => "yq+jq+mlr",
         "join" if step == "execute_join_with_mlr" => "mlr",
         "aggregate" if step == "execute_aggregate_with_mlr" => "mlr",
+        "transform-sql" if step == "execute_transform_sql_with_duckdb" => "duckdb",
         "doctor" => match step {
             "doctor_probe_jq" => "jq",
             "doctor_probe_yq" => "yq",
@@ -295,6 +301,44 @@ mod tests {
             plan.tools
                 .iter()
                 .any(|tool| tool.name == "mlr" && tool.expected)
+        );
+    }
+
+    #[test]
+    fn resolves_transform_sql_plan_with_duckdb_stage_and_tools() {
+        let plan = resolve(&EmitPlanRequest {
+            command: "transform-sql".to_string(),
+            args: Vec::new(),
+        })
+        .expect("transform-sql plan");
+
+        assert_eq!(
+            plan.stages
+                .iter()
+                .map(|stage| stage.step.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "resolve_transform_sql_input",
+                "execute_transform_sql_with_duckdb",
+                "write_transform_sql_output",
+            ]
+        );
+        assert_eq!(plan.stages[1].tool, "duckdb");
+        assert_eq!(
+            plan.stages[1].depends_on,
+            vec!["resolve_transform_sql_input".to_string()]
+        );
+        assert_eq!(
+            plan.tools
+                .iter()
+                .map(|tool| (tool.name.as_str(), tool.expected))
+                .collect::<Vec<_>>(),
+            vec![
+                ("jq", false),
+                ("yq", false),
+                ("mlr", false),
+                ("duckdb", true),
+            ]
         );
     }
 
