@@ -8,7 +8,7 @@ use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
     aggregate, r#assert, canon, codex, contract, diff, doctor, emit, gate, ingest, ingest_api,
-    ingest_yaml_jobs, join, mcp, merge, profile, recipe, scan, sdiff, transform,
+    ingest_yaml_jobs, join, mcp, merge, profile, recipe, scan, schema, sdiff, transform,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::ingest::IngestYamlJobsMode;
@@ -50,6 +50,8 @@ enum Commands {
     Assert(AssertArgs),
     /// Run deterministic quality gates.
     Gate(GateArgs),
+    /// Infer JSON Schema from tabular input via qsv.
+    Schema(SchemaArgs),
     /// Compare structural differences across two datasets.
     Sdiff(SdiffArgs),
     /// Compare normalized outputs resolved from source presets or files.
@@ -250,6 +252,24 @@ struct GatePolicyArgs {
 
     #[arg(long, value_enum)]
     source: Option<CliGatePolicySource>,
+}
+
+#[derive(Debug, clap::Args)]
+struct SchemaArgs {
+    #[command(subcommand)]
+    command: SchemaSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SchemaSubcommand {
+    /// Infer JSON schema from tabular input via qsv.
+    Infer(SchemaInferArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct SchemaInferArgs {
+    #[arg(long)]
+    input: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -804,6 +824,7 @@ fn run() -> i32 {
         Commands::Ingest(args) => run_ingest(args, emit_pipeline),
         Commands::Assert(args) => run_assert(args, emit_pipeline),
         Commands::Gate(args) => run_gate(args, emit_pipeline),
+        Commands::Schema(args) => run_schema(args, emit_pipeline),
         Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
         Commands::Diff(args) => run_diff(args, emit_pipeline),
         Commands::Profile(args) => run_profile(args, emit_pipeline),
@@ -1502,6 +1523,66 @@ fn run_gate(args: GateArgs, emit_pipeline: bool) -> i32 {
         GateSubcommand::Schema(schema_args) => run_gate_schema(schema_args, emit_pipeline),
         GateSubcommand::Policy(policy_args) => run_gate_policy(policy_args, emit_pipeline),
     }
+}
+
+fn run_schema(args: SchemaArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        SchemaSubcommand::Infer(infer_args) => run_schema_infer(infer_args, emit_pipeline),
+    }
+}
+
+fn run_schema_infer(args: SchemaInferArgs, emit_pipeline: bool) -> i32 {
+    let command_args = schema::SchemaInferCommandArgs {
+        input: args.input.clone(),
+    };
+
+    let stdin = io::stdin();
+    let response = schema::run_infer_with_stdin(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize schema infer response".to_string(),
+                    json!({"command": "schema.infer"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize schema infer error".to_string(),
+                    json!({"command": "schema.infer"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected schema infer exit code: {other}"),
+                json!({"command": "schema.infer"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_schema_infer_pipeline_report(&args);
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
 }
 
 fn run_gate_schema(args: GateSchemaArgs, emit_pipeline: bool) -> i32 {
@@ -3128,6 +3209,25 @@ fn build_ingest_yaml_jobs_pipeline_report(
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
+fn build_schema_infer_pipeline_report(args: &SchemaInferArgs) -> PipelineReport {
+    let source = match args.input.as_deref() {
+        Some(path) if !schema::is_stdin_path(path) => {
+            PipelineInputSource::path("input", path.display().to_string(), Some("csv"))
+        }
+        _ => PipelineInputSource::stdin("input", Some("csv")),
+    };
+
+    ensure_external_tool(
+        PipelineReport::new(
+            "schema.infer",
+            PipelineInput::new(vec![source]),
+            schema::infer_pipeline_steps(),
+            schema::infer_deterministic_guards(),
+        ),
+        "qsv",
+    )
+}
+
 fn build_gate_schema_pipeline_report(
     args: &GateSchemaArgs,
     input_is_stdin: bool,
@@ -4227,6 +4327,12 @@ mod tests {
         );
         assert_eq!(gate_policy_report.command, "gate.policy");
 
+        let schema_infer_args = SchemaInferArgs {
+            input: Some(PathBuf::from("input.csv")),
+        };
+        let schema_infer_report = build_schema_infer_pipeline_report(&schema_infer_args);
+        assert_eq!(schema_infer_report.command, "schema.infer");
+
         let sdiff_args = SdiffArgs {
             left: PathBuf::from("left.json"),
             right: PathBuf::from("right.json"),
@@ -4521,6 +4627,16 @@ mod tests {
         );
 
         assert_eq!(
+            run_schema_infer(
+                SchemaInferArgs {
+                    input: Some(PathBuf::from("/definitely-missing/input.csv")),
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
             run_merge(
                 MergeArgs {
                     base: PathBuf::from("/definitely-missing/base.json"),
@@ -4716,6 +4832,16 @@ mod tests {
             false,
         );
         assert_eq!(gate_exit, 3);
+
+        let schema_exit = run_schema(
+            SchemaArgs {
+                command: SchemaSubcommand::Infer(SchemaInferArgs {
+                    input: Some(PathBuf::from("/definitely-missing/input.csv")),
+                }),
+            },
+            false,
+        );
+        assert_eq!(schema_exit, 3);
 
         let transform_exit = run_transform(
             TransformArgs {
