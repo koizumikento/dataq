@@ -6,12 +6,11 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::adapters::{jc, jq, mdbook, nb};
+use crate::adapters::{csvkit, jc, jq, mdbook, nb};
 use crate::domain::report::{PipelineStageDiagnostic, PipelineStageMetrics};
 pub use crate::engine::ingest::IngestDocInputFormat;
 use crate::engine::ingest::{self, IngestBookOptions, IngestDocError};
 use crate::util::sort::sort_value_keys;
-
 const INGEST_JC_PARSE_STEP: &str = "ingest_jc_parse";
 
 /// Input arguments for `ingest doc` command execution API.
@@ -57,6 +56,19 @@ pub struct IngestJcCommandResponse {
     pub payload: Value,
 }
 
+/// Input arguments for `ingest tabular` command execution API.
+#[derive(Debug, Clone)]
+pub struct IngestTabularCommandArgs {
+    pub input: Option<PathBuf>,
+}
+
+/// Structured command response that carries exit-code mapping and JSON payload.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct IngestTabularCommandResponse {
+    pub exit_code: i32,
+    pub payload: Value,
+}
+
 /// Input arguments for `ingest book` command execution API.
 #[derive(Debug, Clone)]
 pub struct IngestBookCommandArgs {
@@ -80,6 +92,22 @@ pub struct IngestNotesPipelineTrace {
 }
 
 impl IngestNotesPipelineTrace {
+    fn mark_tool_used(&mut self, tool: &'static str) {
+        if self.used_tools.iter().any(|used| used == tool) {
+            return;
+        }
+        self.used_tools.push(tool.to_string());
+    }
+}
+
+/// Trace details used by `--emit-pipeline` for `ingest tabular` stages.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IngestTabularPipelineTrace {
+    pub used_tools: Vec<String>,
+    pub stage_diagnostics: Vec<PipelineStageDiagnostic>,
+}
+
+impl IngestTabularPipelineTrace {
     fn mark_tool_used(&mut self, tool: &'static str) {
         if self.used_tools.iter().any(|used| used == tool) {
             return;
@@ -397,6 +425,250 @@ pub fn run_notes_with_trace(
     )
 }
 
+pub fn run_tabular_with_stdin_and_trace<R: Read>(
+    args: &IngestTabularCommandArgs,
+    stdin: R,
+) -> (IngestTabularCommandResponse, IngestTabularPipelineTrace) {
+    let mut trace = IngestTabularPipelineTrace::default();
+
+    let input_bytes = match load_tabular_input_bytes(args, stdin) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            return (
+                IngestTabularCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": message,
+                    }),
+                },
+                trace,
+            );
+        }
+    };
+
+    trace.mark_tool_used("csvkit");
+    let csv_bytes = match &args.input {
+        Some(path) => match csvkit::in2csv_from_path(path.as_path()) {
+            Ok(bytes) => {
+                trace
+                    .stage_diagnostics
+                    .push(PipelineStageDiagnostic::success_with_metrics(
+                        1,
+                        "ingest_tabular_csvkit_in2csv",
+                        "csvkit",
+                        1,
+                        1,
+                        PipelineStageMetrics {
+                            input_bytes: input_bytes.len(),
+                            output_bytes: bytes.len(),
+                            duration_ms: 0,
+                        },
+                    ));
+                bytes
+            }
+            Err(csvkit::CsvkitError::Unavailable { .. }) => {
+                trace
+                    .stage_diagnostics
+                    .push(PipelineStageDiagnostic::failure_with_metrics(
+                        1,
+                        "ingest_tabular_csvkit_in2csv",
+                        "csvkit",
+                        1,
+                        PipelineStageMetrics {
+                            input_bytes: input_bytes.len(),
+                            output_bytes: 0,
+                            duration_ms: 0,
+                        },
+                    ));
+                return (
+                    IngestTabularCommandResponse {
+                        exit_code: 3,
+                        payload: json!({
+                            "error": "input_usage_error",
+                            "message": "ingest tabular requires `csvkit` in PATH",
+                        }),
+                    },
+                    trace,
+                );
+            }
+            Err(error) => {
+                trace
+                    .stage_diagnostics
+                    .push(PipelineStageDiagnostic::failure_with_metrics(
+                        1,
+                        "ingest_tabular_csvkit_in2csv",
+                        "csvkit",
+                        1,
+                        PipelineStageMetrics {
+                            input_bytes: input_bytes.len(),
+                            output_bytes: 0,
+                            duration_ms: 0,
+                        },
+                    ));
+                return (
+                    IngestTabularCommandResponse {
+                        exit_code: 3,
+                        payload: json!({
+                            "error": "input_usage_error",
+                            "message": format!("failed to convert tabular input with csvkit in2csv: {error}"),
+                        }),
+                    },
+                    trace,
+                );
+            }
+        },
+        None => match csvkit::in2csv_from_stdin(&input_bytes) {
+            Ok(bytes) => {
+                trace
+                    .stage_diagnostics
+                    .push(PipelineStageDiagnostic::success_with_metrics(
+                        1,
+                        "ingest_tabular_csvkit_in2csv",
+                        "csvkit",
+                        1,
+                        1,
+                        PipelineStageMetrics {
+                            input_bytes: input_bytes.len(),
+                            output_bytes: bytes.len(),
+                            duration_ms: 0,
+                        },
+                    ));
+                bytes
+            }
+            Err(csvkit::CsvkitError::Unavailable { .. }) => {
+                trace
+                    .stage_diagnostics
+                    .push(PipelineStageDiagnostic::failure_with_metrics(
+                        1,
+                        "ingest_tabular_csvkit_in2csv",
+                        "csvkit",
+                        1,
+                        PipelineStageMetrics {
+                            input_bytes: input_bytes.len(),
+                            output_bytes: 0,
+                            duration_ms: 0,
+                        },
+                    ));
+                return (
+                    IngestTabularCommandResponse {
+                        exit_code: 3,
+                        payload: json!({
+                            "error": "input_usage_error",
+                            "message": "ingest tabular requires `csvkit` in PATH",
+                        }),
+                    },
+                    trace,
+                );
+            }
+            Err(error) => {
+                trace
+                    .stage_diagnostics
+                    .push(PipelineStageDiagnostic::failure_with_metrics(
+                        1,
+                        "ingest_tabular_csvkit_in2csv",
+                        "csvkit",
+                        1,
+                        PipelineStageMetrics {
+                            input_bytes: input_bytes.len(),
+                            output_bytes: 0,
+                            duration_ms: 0,
+                        },
+                    ));
+                return (
+                    IngestTabularCommandResponse {
+                        exit_code: 3,
+                        payload: json!({
+                            "error": "input_usage_error",
+                            "message": format!("failed to convert tabular input with csvkit in2csv: {error}"),
+                        }),
+                    },
+                    trace,
+                );
+            }
+        },
+    };
+
+    let parsed_rows = match csvkit::csvjson_rows_from_csv_bytes(&csv_bytes) {
+        Ok(rows) => rows,
+        Err(csvkit::CsvkitError::Unavailable { .. }) => {
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure_with_metrics(
+                    2,
+                    "ingest_tabular_csvkit_csvjson",
+                    "csvkit",
+                    1,
+                    PipelineStageMetrics {
+                        input_bytes: csv_bytes.len(),
+                        output_bytes: 0,
+                        duration_ms: 0,
+                    },
+                ));
+            return (
+                IngestTabularCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": "ingest tabular requires `csvkit` in PATH",
+                    }),
+                },
+                trace,
+            );
+        }
+        Err(error) => {
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure_with_metrics(
+                    2,
+                    "ingest_tabular_csvkit_csvjson",
+                    "csvkit",
+                    1,
+                    PipelineStageMetrics {
+                        input_bytes: csv_bytes.len(),
+                        output_bytes: 0,
+                        duration_ms: 0,
+                    },
+                ));
+            return (
+                IngestTabularCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": format!("failed to normalize tabular rows with csvkit csvjson: {error}"),
+                    }),
+                },
+                trace,
+            );
+        }
+    };
+
+    let normalized_rows = normalize_tabular_rows(parsed_rows);
+    let output_bytes = serde_json::to_vec(&normalized_rows).map_or(0, |bytes| bytes.len());
+    trace
+        .stage_diagnostics
+        .push(PipelineStageDiagnostic::success_with_metrics(
+            2,
+            "ingest_tabular_csvkit_csvjson",
+            "csvkit",
+            1,
+            normalized_rows.len(),
+            PipelineStageMetrics {
+                input_bytes: csv_bytes.len(),
+                output_bytes,
+                duration_ms: 0,
+            },
+        ));
+
+    (
+        IngestTabularCommandResponse {
+            exit_code: 0,
+            payload: Value::Array(normalized_rows),
+        },
+        trace,
+    )
+}
+
 pub fn run_book_with_trace(
     args: &IngestBookCommandArgs,
 ) -> (IngestBookCommandResponse, IngestBookPipelineTrace) {
@@ -595,6 +867,26 @@ fn load_jc_input_bytes<R: Read>(
     }
 }
 
+fn load_tabular_input_bytes<R: Read>(
+    args: &IngestTabularCommandArgs,
+    mut stdin: R,
+) -> Result<Vec<u8>, String> {
+    if let Some(path) = &args.input {
+        let mut file = File::open(path)
+            .map_err(|error| format!("failed to open input file `{}`: {error}", path.display()))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|error| format!("failed to read input file `{}`: {error}", path.display()))?;
+        Ok(bytes)
+    } else {
+        let mut bytes = Vec::new();
+        stdin
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("failed to read stdin: {error}"))?;
+        Ok(bytes)
+    }
+}
+
 fn build_jc_output_envelope(parser: &str, payload: Value) -> IngestJcEnvelope {
     let normalized_parser = parser.trim().trim_start_matches('-').to_ascii_lowercase();
     let normalized_payload = sort_value_keys(&payload);
@@ -625,6 +917,10 @@ fn jc_result_type(value: &Value) -> &'static str {
     }
 }
 
+fn normalize_tabular_rows(rows: Vec<Value>) -> Vec<Value> {
+    rows.into_iter().map(|row| sort_value_keys(&row)).collect()
+}
+
 fn map_error(error: IngestDocError) -> IngestDocCommandResponse {
     IngestDocCommandResponse {
         exit_code: 3,
@@ -643,6 +939,24 @@ pub fn pipeline_steps() -> Vec<String> {
 /// Determinism guards planned for `ingest doc` command.
 pub fn deterministic_guards() -> Vec<String> {
     ingest::deterministic_guards()
+}
+
+/// Ordered pipeline-step names used for `ingest tabular` diagnostics.
+pub fn tabular_pipeline_steps() -> Vec<String> {
+    vec![
+        "ingest_tabular_csvkit_in2csv".to_string(),
+        "ingest_tabular_csvkit_csvjson".to_string(),
+    ]
+}
+
+/// Determinism guards planned for `ingest tabular` command.
+pub fn tabular_deterministic_guards() -> Vec<String> {
+    vec![
+        "csvkit_execution_with_explicit_arg_arrays".to_string(),
+        "stdin_and_path_input_supported_without_shell_interpolation".to_string(),
+        "csvjson_no_inference_for_stable_scalar_types".to_string(),
+        "row_object_keys_sorted_recursively".to_string(),
+    ]
 }
 
 /// Ordered pipeline-step names used for `ingest notes` diagnostics.
@@ -717,7 +1031,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notes_book_and_jc_trace_mark_tool_used_deduplicates_entries() {
+    fn notes_tabular_book_and_jc_traces_mark_tool_used_deduplicates_entries() {
         let mut notes_trace = IngestNotesPipelineTrace::default();
         notes_trace.mark_tool_used("jq");
         notes_trace.mark_tool_used("jq");
@@ -736,6 +1050,10 @@ mod tests {
         jc_trace.mark_tool_used("jc");
         jc_trace.mark_tool_used("jc");
         assert_eq!(jc_trace.used_tools, vec!["jc".to_string()]);
+        let mut tabular_trace = IngestTabularPipelineTrace::default();
+        tabular_trace.mark_tool_used("csvkit");
+        tabular_trace.mark_tool_used("csvkit");
+        assert_eq!(tabular_trace.used_tools, vec!["csvkit".to_string()]);
     }
 
     #[test]
@@ -791,6 +1109,24 @@ mod tests {
         let file_bytes =
             load_input_bytes(&file_args, Cursor::new(Vec::<u8>::new())).expect("read file input");
         assert_eq!(file_bytes, b"# Title\n");
+    }
+
+    #[test]
+    fn load_tabular_input_bytes_reads_stdin_and_file_sources() {
+        let stdin_args = IngestTabularCommandArgs { input: None };
+        let stdin_bytes = load_tabular_input_bytes(&stdin_args, Cursor::new(b"id,name\n1,a\n"))
+            .expect("read stdin input");
+        assert_eq!(stdin_bytes, b"id,name\n1,a\n");
+
+        let temp = tempdir().expect("tempdir");
+        let input_path = temp.path().join("rows.csv");
+        fs::write(&input_path, b"id,name\n2,b\n").expect("write file");
+        let file_args = IngestTabularCommandArgs {
+            input: Some(input_path),
+        };
+        let file_bytes = load_tabular_input_bytes(&file_args, Cursor::new(Vec::<u8>::new()))
+            .expect("read file input");
+        assert_eq!(file_bytes, b"id,name\n2,b\n");
     }
 
     #[test]
@@ -862,6 +1198,21 @@ mod tests {
     }
 
     #[test]
+    fn normalize_tabular_rows_sorts_nested_object_keys() {
+        let normalized = normalize_tabular_rows(vec![json!({
+            "z": {"k2": 2, "k1": 1},
+            "a": "x"
+        })]);
+        assert_eq!(
+            normalized,
+            vec![json!({
+                "a": "x",
+                "z": {"k1": 1, "k2": 2}
+            })]
+        );
+    }
+
+    #[test]
     fn map_error_returns_input_usage_shape() {
         let response = map_error(IngestDocError::MissingPandoc);
         assert_eq!(response.exit_code, 3);
@@ -891,6 +1242,18 @@ mod tests {
             jc_deterministic_guards()
                 .iter()
                 .any(|guard| guard == "ingest_jc_output_wrapped_in_stable_envelope")
+        );
+        assert_eq!(
+            tabular_pipeline_steps(),
+            vec![
+                "ingest_tabular_csvkit_in2csv".to_string(),
+                "ingest_tabular_csvkit_csvjson".to_string()
+            ]
+        );
+        assert!(
+            tabular_deterministic_guards()
+                .iter()
+                .any(|guard| guard == "row_object_keys_sorted_recursively")
         );
         assert_eq!(
             pipeline_steps_book(),

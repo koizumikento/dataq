@@ -424,6 +424,7 @@ mod tests {
                 ("yq", false),
                 ("mlr", false),
                 ("duckdb", true),
+                ("check-jsonschema", false),
             ]
         );
     }

@@ -173,6 +173,8 @@ enum IngestSubcommand {
     YamlJobs(IngestYamlJobsArgs),
     /// Parse semi-structured text via `jc` into deterministic JSON envelope.
     Jc(IngestJcArgs),
+    /// Normalize tabular input into deterministic JSON rows via csvkit.
+    Tabular(IngestTabularArgs),
     /// Fetch and normalize `nb` notes into deterministic JSON.
     Notes(IngestNotesArgs),
     /// Extract deterministic schema fields from a document.
@@ -219,6 +221,13 @@ struct IngestJcArgs {
     parser: String,
 
     #[arg(long, default_value = "-")]
+    input: String,
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestTabularArgs {
+    /// Input path or `-` for stdin.
+    #[arg(long)]
     input: String,
 }
 
@@ -1169,6 +1178,9 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         .and_then(|path| dataq_io::resolve_input_format(None, Some(path)).ok());
     let mut steps = r#assert::pipeline_steps(normalize_mode);
     let mut deterministic_guards = r#assert::deterministic_guards(normalize_mode, schema_engine);
+    if let Some(engine) = schema_dispatch.engine {
+        deterministic_guards.push(format!("assert_schema_engine_{}", engine.as_str()));
+    }
     if schema_dispatch.schema_flag.is_some() {
         deterministic_guards.push("assert_schema_flag_explicit".to_string());
     }
@@ -1306,6 +1318,7 @@ fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
         IngestSubcommand::Api(api_args) => run_ingest_api(api_args, emit_pipeline),
         IngestSubcommand::YamlJobs(args) => run_ingest_yaml_jobs(args, emit_pipeline),
         IngestSubcommand::Jc(args) => run_ingest_jc(args, emit_pipeline),
+        IngestSubcommand::Tabular(args) => run_ingest_tabular(args, emit_pipeline),
         IngestSubcommand::Notes(args) => run_ingest_notes(args, emit_pipeline),
         IngestSubcommand::Doc(args) => run_ingest_doc(args, emit_pipeline),
         IngestSubcommand::Book(args) => run_ingest_book(args, emit_pipeline),
@@ -1484,6 +1497,65 @@ fn run_ingest_jc(args: IngestJcArgs, emit_pipeline: bool) -> i32 {
     if emit_pipeline {
         let pipeline_report = build_ingest_jc_pipeline_report(&args, input_path, &trace);
         emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
+}
+
+fn run_ingest_tabular(args: IngestTabularArgs, emit_pipeline: bool) -> i32 {
+    let input_path = if args.input == "-" {
+        None
+    } else {
+        Some(PathBuf::from(&args.input))
+    };
+
+    let command_args = ingest::IngestTabularCommandArgs {
+        input: input_path.clone(),
+    };
+    let stdin = io::stdin();
+    let (response, trace) = ingest::run_tabular_with_stdin_and_trace(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest tabular response".to_string(),
+                    json!({"command": "ingest.tabular"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest tabular error".to_string(),
+                    json!({"command": "ingest.tabular"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected ingest tabular exit code: {other}"),
+                json!({"command": "ingest.tabular"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let report = build_ingest_tabular_pipeline_report(&args, input_path, &trace);
+        emit_pipeline_report(&report);
     }
 
     exit_code
@@ -3587,6 +3659,35 @@ fn build_ingest_jc_pipeline_report(
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
+fn build_ingest_tabular_pipeline_report(
+    args: &IngestTabularArgs,
+    input_path: Option<PathBuf>,
+    trace: &ingest::IngestTabularPipelineTrace,
+) -> PipelineReport {
+    let source = if let Some(path) = input_path {
+        PipelineInputSource::path(
+            "input",
+            path.display().to_string(),
+            Some(Format::Csv.as_str()),
+        )
+    } else if args.input == "-" {
+        PipelineInputSource::stdin("input", Some(Format::Csv.as_str()))
+    } else {
+        PipelineInputSource::path("input", args.input.clone(), Some(Format::Csv.as_str()))
+    };
+
+    let mut report = PipelineReport::new(
+        "ingest.tabular",
+        PipelineInput::new(vec![source]),
+        ingest::tabular_pipeline_steps(),
+        ingest::tabular_deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
 fn build_gate_schema_pipeline_report(
     args: &GateSchemaArgs,
     input_is_stdin: bool,
@@ -4254,6 +4355,22 @@ fn resolve_tool_executable(tool_name: &str) -> String {
         "nb" => Some("DATAQ_NB_BIN"),
         "qsv" => Some("DATAQ_QSV_BIN"),
         "jc" => Some("DATAQ_JC_BIN"),
+        "csvkit" => std::env::var("DATAQ_CSVKIT_BIN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|_| "DATAQ_CSVKIT_BIN")
+            .or_else(|| {
+                std::env::var("DATAQ_CSVKIT_IN2CSV_BIN")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|_| "DATAQ_CSVKIT_IN2CSV_BIN")
+            })
+            .or_else(|| {
+                std::env::var("DATAQ_CSVKIT_CSVJSON_BIN")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|_| "DATAQ_CSVKIT_CSVJSON_BIN")
+            }),
         _ => None,
     };
 
@@ -4801,6 +4918,17 @@ mod tests {
         let ingest_jc_report =
             build_ingest_jc_pipeline_report(&ingest_jc_args, None, &ingest_jc_trace);
         assert_eq!(ingest_jc_report.command, "ingest.jc");
+
+        let ingest_tabular_args = IngestTabularArgs {
+            input: "-".to_string(),
+        };
+        let ingest_tabular_trace = ingest::IngestTabularPipelineTrace {
+            used_tools: vec!["csvkit".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let ingest_tabular_report =
+            build_ingest_tabular_pipeline_report(&ingest_tabular_args, None, &ingest_tabular_trace);
+        assert_eq!(ingest_tabular_report.command, "ingest.tabular");
 
         let gate_schema_args = GateSchemaArgs {
             schema: PathBuf::from("schema.json"),
