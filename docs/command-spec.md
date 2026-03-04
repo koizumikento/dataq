@@ -326,6 +326,8 @@ dataq [--emit-pipeline] <command> [options]
 - `dataq assert --rules-help` で `--rules` 用ルール仕様を機械可読JSONで出力
 - `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
+- `dataq assert --schema <path> --engine <jsonschema|ajv>` で schema 検証エンジンを選択可能（既定: `jsonschema`、`ajv` は `ajv` CLI が必要で `DATAQ_AJV_BIN` で上書き可能）
+- schema mismatch の `mismatches[].expected` には `engine`, `instance_path`, `schema_path`, `keyword`（任意）, `message` を正規化して出力
 - `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義を `yq -> jq -> mlr` の固定3段でジョブ単位レコードへ正規化してから `--rules` 検証可能（`yq`/`jq`/`mlr` 必須）
 - 継続利用向けには `dataq ingest yaml-jobs` で正規化結果を固定してから `dataq assert --rules ...` へ接続する運用を推奨
 

@@ -316,10 +316,12 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 - ルールは `extends` で再利用可能（親相対パス解決、循環/欠損/不正形式は入力不正）
 - `extends` マージ: `required_keys`/`forbid_keys` は和集合、`fields` はパス後勝ち、`count` は最後に定義された値を採用
 - `--schema <path>`: JSON Schema で検証
+- `--engine <jsonschema|ajv>`: `--schema` 時の検証エンジンを選択（既定: `jsonschema`、`ajv` は `ajv` CLI が必要で `DATAQ_AJV_BIN` で上書き可）
 - `--normalize <github-actions-jobs|gitlab-ci-jobs>`: 生のCI定義を `yq -> jq -> mlr` の3段でジョブ単位レコードへ正規化してから検証（`yq`/`jq`/`mlr` 必須）
 - `--rules` と `--schema` は同時指定不可（入力不正として終了コード `3`）
 - `--rules-help`: `--rules` 用ルール仕様を機械可読JSONで出力して終了（終了コード `0`）
 - `--schema-help`: `--schema`（JSON Schema検証）用の使い方と結果契約を機械可読JSONで出力して終了（終了コード `0`）
+- `mismatches[].expected`（schemaモード）には `engine`, `instance_path`, `schema_path`, `keyword`（任意）, `message` を正規化して出力
 
 失敗時は機械可読エラーJSONを返し、終了コード `2`。  
 `mismatches[]` は `path`, `rule_kind`, `reason`, `actual`, `expected` を含みます。

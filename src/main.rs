@@ -121,6 +121,10 @@ struct AssertArgs {
     #[arg(long, value_enum, conflicts_with_all = ["rules_help", "schema_help"])]
     normalize: Option<CliAssertNormalizeMode>,
 
+    /// Schema validation engine used with `--schema`.
+    #[arg(long, value_enum, default_value_t = CliAssertSchemaEngine::Jsonschema)]
+    engine: CliAssertSchemaEngine,
+
     /// Print machine-readable rules help for `--rules` and exit.
     #[arg(long, default_value_t = false)]
     rules_help: bool,
@@ -623,6 +627,12 @@ enum CliAssertNormalizeMode {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliAssertSchemaEngine {
+    Jsonschema,
+    Ajv,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliIngestApiMethod {
     Get,
     Post,
@@ -752,6 +762,15 @@ impl From<CliAssertNormalizeMode> for r#assert::AssertInputNormalizeMode {
         match value {
             CliAssertNormalizeMode::GithubActionsJobs => Self::GithubActionsJobs,
             CliAssertNormalizeMode::GitlabCiJobs => Self::GitlabCiJobs,
+        }
+    }
+}
+
+impl From<CliAssertSchemaEngine> for r#assert::AssertSchemaEngine {
+    fn from(value: CliAssertSchemaEngine) -> Self {
+        match value {
+            CliAssertSchemaEngine::Jsonschema => Self::Jsonschema,
+            CliAssertSchemaEngine::Ajv => Self::Ajv,
         }
     }
 }
@@ -1095,6 +1114,7 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
 fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
     let input = args.input.clone();
     let normalize_mode = args.normalize.map(Into::into);
+    let schema_engine: r#assert::AssertSchemaEngine = args.engine.into();
     let input_format = input
         .as_deref()
         .map(|path| dataq_io::resolve_input_format(None, Some(path)).ok())
@@ -1108,7 +1128,7 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         .as_deref()
         .and_then(|path| dataq_io::resolve_input_format(None, Some(path)).ok());
     let mut steps = r#assert::pipeline_steps(normalize_mode);
-    let mut deterministic_guards = r#assert::deterministic_guards(normalize_mode);
+    let mut deterministic_guards = r#assert::deterministic_guards(normalize_mode, schema_engine);
     let mut trace = r#assert::AssertPipelineTrace::default();
 
     let exit_code = if args.rules_help {
@@ -1138,10 +1158,11 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         };
 
         let stdin = io::stdin();
-        let (response, run_trace) = r#assert::run_with_stdin_and_normalize_with_trace(
+        let (response, run_trace) = r#assert::run_with_stdin_and_normalize_with_trace_and_engine(
             &command_args,
             stdin.lock(),
             normalize_mode,
+            schema_engine,
         );
         trace = run_trace;
 
@@ -4592,6 +4613,7 @@ mod tests {
             schema: None,
             input: Some(PathBuf::from("input.json")),
             normalize: Some(CliAssertNormalizeMode::GithubActionsJobs),
+            engine: CliAssertSchemaEngine::Jsonschema,
             rules_help: false,
             schema_help: false,
         };

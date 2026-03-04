@@ -53,6 +53,10 @@ fn parse_stderr_json_lines(stderr: &[u8]) -> Vec<Value> {
         .collect()
 }
 
+fn parse_stdout_json(stdout: &[u8]) -> Value {
+    serde_json::from_slice(stdout).expect("stdout json")
+}
+
 fn assert_stage_metrics_shape(stage: &Value) {
     assert!(stage["input_bytes"].is_u64());
     assert!(stage["output_bytes"].is_u64());
@@ -107,6 +111,40 @@ fn write_exec_script(path: &PathBuf, body: &str) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod");
     }
+}
+
+fn create_ajv_error_shim() -> (tempfile::TempDir, String) {
+    let dir = tempdir().expect("tempdir");
+    let ajv_path = dir.path().join("fake-ajv");
+    write_exec_script(
+        &ajv_path,
+        r##"#!/bin/sh
+schema=""
+data=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)
+      schema="$2"
+      shift 2
+      ;;
+    -d)
+      data="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [ -z "$schema" ] || [ -z "$data" ]; then
+  echo "missing -s/-d" 1>&2
+  exit 2
+fi
+echo '[{"instancePath":"/id","schemaPath":"#/properties/id/type","keyword":"type","message":"must be integer"}]'
+exit 1
+"##,
+    );
+    (dir, ajv_path.display().to_string())
 }
 
 #[test]
@@ -1087,7 +1125,199 @@ fn assert_api_supports_jsonschema_mode() {
             obj.get("reason"),
             Some(&Value::String("schema_mismatch".to_string()))
         );
+        assert_eq!(
+            obj.get("rule_kind"),
+            Some(&Value::String("schema".to_string()))
+        );
+        assert_eq!(
+            obj["expected"]["engine"],
+            Value::String("jsonschema".to_string())
+        );
+        assert!(obj["expected"]["instance_path"].is_string());
+        assert!(obj["expected"]["schema_path"].is_string());
+        assert!(obj["expected"]["message"].is_string());
     }
+}
+
+#[test]
+fn assert_cli_supports_ajv_schema_engine_with_normalized_shape() {
+    let (tool_dir, ajv_bin) = create_ajv_error_shim();
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    let input_path = dir.path().join("input.json");
+    std::fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+    )
+    .expect("write schema");
+    std::fs::write(&input_path, r#"[{"id":"x"}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_AJV_BIN", &ajv_bin)
+        .args([
+            "assert",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+            "--schema",
+            schema_path.to_str().expect("utf8 path"),
+            "--engine",
+            "ajv",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2));
+    let payload = parse_stdout_json(&output.stdout);
+    assert_eq!(payload["matched"], Value::Bool(false));
+    assert_eq!(payload["mismatch_count"], Value::from(1));
+    assert_eq!(payload["mismatches"][0]["path"], Value::from("$[0].id"));
+    assert_eq!(payload["mismatches"][0]["rule_kind"], Value::from("schema"));
+    assert_eq!(
+        payload["mismatches"][0]["reason"],
+        Value::from("schema_mismatch")
+    );
+    assert_eq!(
+        payload["mismatches"][0]["expected"]["engine"],
+        Value::from("ajv")
+    );
+    assert_eq!(
+        payload["mismatches"][0]["expected"]["instance_path"],
+        Value::from("/id")
+    );
+    assert_eq!(
+        payload["mismatches"][0]["expected"]["schema_path"],
+        Value::from("/properties/id/type")
+    );
+    assert_eq!(
+        payload["mismatches"][0]["expected"]["keyword"],
+        Value::from("type")
+    );
+    drop(tool_dir);
+}
+
+#[test]
+fn assert_cli_ajv_engine_marks_external_tool_in_pipeline() {
+    let (tool_dir, ajv_bin) = create_ajv_error_shim();
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    let input_path = dir.path().join("input.json");
+    std::fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+    )
+    .expect("write schema");
+    std::fs::write(&input_path, r#"[{"id":"x"}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_AJV_BIN", &ajv_bin)
+        .args([
+            "assert",
+            "--emit-pipeline",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+            "--schema",
+            schema_path.to_str().expect("utf8 path"),
+            "--engine",
+            "ajv",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr_json_lines = parse_stderr_json_lines(&output.stderr);
+    let pipeline_json = stderr_json_lines.last().expect("pipeline json");
+    let external_tools = pipeline_json["external_tools"]
+        .as_array()
+        .expect("external_tools array");
+    let ajv_tool = external_tools
+        .iter()
+        .find(|tool| tool["name"] == Value::from("ajv"))
+        .expect("ajv external tool");
+    assert_eq!(ajv_tool["used"], Value::Bool(true));
+    drop(tool_dir);
+}
+
+#[test]
+fn assert_cli_maps_missing_ajv_binary_to_exit_three() {
+    let dir = tempdir().expect("tempdir");
+    let schema_path = dir.path().join("schema.json");
+    let input_path = dir.path().join("input.json");
+    std::fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+    )
+    .expect("write schema");
+    std::fs::write(&input_path, r#"[{"id":"x"}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_AJV_BIN", "/definitely-missing/ajv")
+        .args([
+            "assert",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+            "--schema",
+            schema_path.to_str().expect("utf8 path"),
+            "--engine",
+            "ajv",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_stderr_json_lines(&output.stderr);
+    assert_eq!(
+        stderr_json
+            .first()
+            .expect("error json")
+            .get("error")
+            .expect("error key"),
+        &Value::from("input_usage_error")
+    );
+    assert_eq!(
+        stderr_json
+            .first()
+            .expect("error json")
+            .get("message")
+            .and_then(Value::as_str),
+        Some("schema engine `ajv` requires `ajv` in PATH")
+    );
+}
+
+#[test]
+fn assert_cli_rejects_ajv_engine_without_schema_mode() {
+    let dir = tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.json");
+    let input_path = dir.path().join("input.json");
+    std::fs::write(
+        &rules_path,
+        r#"{"required_keys":["id"],"fields":{"id":{"type":"integer"}},"count":{"min":1}}"#,
+    )
+    .expect("write rules");
+    std::fs::write(&input_path, r#"[{"id":1}]"#).expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "assert",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+            "--rules",
+            rules_path.to_str().expect("utf8 path"),
+            "--engine",
+            "ajv",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_stderr_json_lines(&output.stderr);
+    assert_eq!(
+        stderr_json
+            .first()
+            .expect("error json")
+            .get("message")
+            .and_then(Value::as_str),
+        Some("`--engine` is supported only with `--schema`")
+    );
 }
 
 #[test]
