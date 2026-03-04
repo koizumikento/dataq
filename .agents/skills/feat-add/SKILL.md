@@ -51,7 +51,7 @@ description: Add features to an existing Rust CLI with small, scoped changes. Us
 
 ## Validation
 
-Run after meaningful changes:
+Run after meaningful Rust/code changes (optional for docs-only edits):
 
 ```bash
 cargo fmt --all -- --check

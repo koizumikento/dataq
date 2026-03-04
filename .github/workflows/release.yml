@@ -23,6 +23,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Require release notes file
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+          if [[ ! -s "${notes_file}" ]]; then
+            echo "release notes file is required and must be non-empty: ${notes_file}" >&2
+            exit 1
+          fi
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -145,35 +155,11 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Resolve release notes source
-        id: notes
-        shell: bash
-        run: |
-          set -euo pipefail
-          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
-          if [[ -f "${notes_file}" ]]; then
-            echo "has_notes=true" >> "$GITHUB_OUTPUT"
-            echo "notes_file=${notes_file}" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_notes=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create GitHub Release (docs release notes)
-        if: steps.notes.outputs.has_notes == 'true'
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          body_path: ${{ steps.notes.outputs.notes_file }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            dist/*
-
-      - name: Create GitHub Release (generated notes fallback)
-        if: steps.notes.outputs.has_notes != 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: docs/releases/${{ github.ref_name }}.md
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/*

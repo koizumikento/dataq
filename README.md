@@ -264,6 +264,8 @@ claude plugin validate .
 
 ### 開発（ローカル検証）
 
+Rustコードや挙動に影響する変更時は、次を実行してください（`*.md` のみの更新では任意）。
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -275,7 +277,8 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-reg
 
 - `v*` タグ（例: `v0.1.0`, `v0.1.0-rc.1`）を push すると、GitHub Actions の Release workflow が起動します
 - リリースノートは `docs/releases/` 配下に `vX.Y.Z.md` 形式で記録します
-- `docs/releases/<tag>.md` が存在する場合はその内容を Release 本文に使用し、存在しない場合は GitHub の自動生成ノートへフォールバックします
+- `docs/releases/<tag>.md` は必須です。存在しない、または空ファイルの場合は Release workflow が失敗します
+- GitHub Release 本文には `docs/releases/<tag>.md` の内容をそのまま使用します
 - workflow は `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`、`cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-regions 75` を通過した場合のみ公開処理へ進みます
 - 配布ターゲットは次の4種類です:
   - `x86_64-unknown-linux-gnu`

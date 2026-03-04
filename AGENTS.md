@@ -129,7 +129,9 @@ cargo test --workspace --all-features
 cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-regions 75
 ```
 
-If the workspace is not initialized yet, initialize first, then run the same gates.
+- Apply this requirement when Rust source code or executable behavior changed.
+- For docs-only changes (for example `*.md` only), running Cargo quality gates is optional.
+- If the workspace is not initialized yet, initialize first, then run the same gates when required.
 
 ## Cargo lint policy
 
