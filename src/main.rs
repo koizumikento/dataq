@@ -114,6 +114,31 @@ struct AssertArgs {
     #[arg(long)]
     schema: Option<PathBuf>,
 
+    /// Select schema validation engine for `--schema` mode.
+    #[arg(
+        long,
+        value_enum,
+        requires = "schema",
+        conflicts_with_all = ["rules", "rules_help", "schema_help"]
+    )]
+    schema_engine: Option<CliAssertSchemaEngine>,
+
+    /// Override schema argument flag forwarded to schema-engine integrations.
+    #[arg(
+        long,
+        requires = "schema",
+        conflicts_with_all = ["rules", "rules_help", "schema_help"]
+    )]
+    schema_flag: Option<String>,
+
+    /// Override input argument flag forwarded to schema-engine integrations.
+    #[arg(
+        long,
+        requires = "schema",
+        conflicts_with_all = ["rules", "rules_help", "schema_help"]
+    )]
+    input_flag: Option<String>,
+
     #[arg(long, conflicts_with_all = ["rules_help", "schema_help"])]
     input: Option<PathBuf>,
 
@@ -626,10 +651,21 @@ enum CliAssertNormalizeMode {
     GitlabCiJobs,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum CliAssertSchemaEngine {
     Jsonschema,
     Ajv,
+    Checkjs,
+}
+
+impl CliAssertSchemaEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Jsonschema => "jsonschema",
+            Self::Ajv => "ajv",
+            Self::Checkjs => "checkjs",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -771,6 +807,7 @@ impl From<CliAssertSchemaEngine> for r#assert::AssertSchemaEngine {
         match value {
             CliAssertSchemaEngine::Jsonschema => Self::Jsonschema,
             CliAssertSchemaEngine::Ajv => Self::Ajv,
+            CliAssertSchemaEngine::Checkjs => Self::Jsonschema,
         }
     }
 }
@@ -1114,7 +1151,10 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
 fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
     let input = args.input.clone();
     let normalize_mode = args.normalize.map(Into::into);
-    let schema_engine: r#assert::AssertSchemaEngine = args.engine.into();
+    let schema_dispatch = assert_schema_dispatch_args(&args);
+    let default_cli_engine = args.engine;
+    let effective_cli_engine = schema_dispatch.engine.unwrap_or(default_cli_engine);
+    let schema_engine: r#assert::AssertSchemaEngine = effective_cli_engine.into();
     let input_format = input
         .as_deref()
         .map(|path| dataq_io::resolve_input_format(None, Some(path)).ok())
@@ -1129,6 +1169,12 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         .and_then(|path| dataq_io::resolve_input_format(None, Some(path)).ok());
     let mut steps = r#assert::pipeline_steps(normalize_mode);
     let mut deterministic_guards = r#assert::deterministic_guards(normalize_mode, schema_engine);
+    if schema_dispatch.schema_flag.is_some() {
+        deterministic_guards.push("assert_schema_flag_explicit".to_string());
+    }
+    if schema_dispatch.input_flag.is_some() {
+        deterministic_guards.push("assert_input_flag_explicit".to_string());
+    }
     let mut trace = r#assert::AssertPipelineTrace::default();
 
     let exit_code = if args.rules_help {
@@ -1158,11 +1204,12 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         };
 
         let stdin = io::stdin();
-        let (response, run_trace) = r#assert::run_with_stdin_and_normalize_with_trace_and_engine(
+        let (response, run_trace) = run_assert_with_dispatch(
             &command_args,
             stdin.lock(),
             normalize_mode,
-            schema_engine,
+            &schema_dispatch,
+            default_cli_engine,
         );
         trace = run_trace;
 
@@ -1218,6 +1265,40 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AssertSchemaDispatchArgs {
+    engine: Option<CliAssertSchemaEngine>,
+    schema_flag: Option<String>,
+    input_flag: Option<String>,
+}
+
+fn assert_schema_dispatch_args(args: &AssertArgs) -> AssertSchemaDispatchArgs {
+    AssertSchemaDispatchArgs {
+        engine: args.schema_engine,
+        schema_flag: args.schema_flag.clone(),
+        input_flag: args.input_flag.clone(),
+    }
+}
+
+fn run_assert_with_dispatch<R: Read>(
+    command_args: &r#assert::AssertCommandArgs,
+    stdin: R,
+    normalize_mode: Option<r#assert::AssertInputNormalizeMode>,
+    schema_dispatch: &AssertSchemaDispatchArgs,
+    default_engine: CliAssertSchemaEngine,
+) -> (
+    r#assert::AssertCommandResponse,
+    r#assert::AssertPipelineTrace,
+) {
+    let selected_engine = schema_dispatch.engine.unwrap_or(default_engine);
+    r#assert::run_with_stdin_and_normalize_with_trace_and_engine(
+        command_args,
+        stdin,
+        normalize_mode,
+        selected_engine.into(),
+    )
 }
 
 fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
@@ -4325,6 +4406,8 @@ mod tests {
             r#assert::AssertInputNormalizeMode::from(CliAssertNormalizeMode::GitlabCiJobs),
             r#assert::AssertInputNormalizeMode::GitlabCiJobs
         );
+        assert_eq!(CliAssertSchemaEngine::Jsonschema.as_str(), "jsonschema");
+        assert_eq!(CliAssertSchemaEngine::Checkjs.as_str(), "checkjs");
 
         assert_eq!(
             gate::GatePolicySourcePreset::from(CliGatePolicySource::ScanText),
@@ -4493,6 +4576,46 @@ mod tests {
     }
 
     #[test]
+    fn assert_cli_parses_schema_engine_and_schema_input_flags() {
+        let cli = Cli::try_parse_from([
+            "dataq",
+            "assert",
+            "--schema",
+            "schema.json",
+            "--input",
+            "input.json",
+            "--schema-engine",
+            "checkjs",
+            "--schema-flag=--schemafile",
+            "--input-flag=--instance",
+        ])
+        .expect("cli parse");
+
+        let Commands::Assert(args) = cli.command else {
+            panic!("expected assert command");
+        };
+        assert_eq!(args.schema, Some(PathBuf::from("schema.json")));
+        assert_eq!(args.input, Some(PathBuf::from("input.json")));
+        assert_eq!(args.schema_engine, Some(CliAssertSchemaEngine::Checkjs));
+        assert_eq!(args.schema_flag.as_deref(), Some("--schemafile"));
+        assert_eq!(args.input_flag.as_deref(), Some("--instance"));
+    }
+
+    #[test]
+    fn assert_cli_rejects_schema_engine_with_rules_mode() {
+        let error = Cli::try_parse_from([
+            "dataq",
+            "assert",
+            "--rules",
+            "rules.yaml",
+            "--schema-engine",
+            "checkjs",
+        ])
+        .expect_err("schema-engine should conflict with --rules");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
     fn canon_and_whitespace_helpers_cover_error_mappings() {
         assert_eq!(trim_ascii_whitespace(b"  abc \n"), b"abc");
         assert!(trim_ascii_whitespace(b" \t\r\n").is_empty());
@@ -4611,6 +4734,9 @@ mod tests {
         let assert_args = AssertArgs {
             rules: Some(PathBuf::from("rules.json")),
             schema: None,
+            schema_engine: None,
+            schema_flag: None,
+            input_flag: None,
             input: Some(PathBuf::from("input.json")),
             normalize: Some(CliAssertNormalizeMode::GithubActionsJobs),
             engine: CliAssertSchemaEngine::Jsonschema,
@@ -4962,6 +5088,64 @@ mod tests {
         let (code, label) = map_canon_error(&err);
         assert_eq!(code, 3);
         assert_eq!(label, "input_usage_error");
+    }
+
+    #[test]
+    fn assert_schema_dispatch_args_capture_engine_and_flags() {
+        let args = AssertArgs {
+            rules: None,
+            schema: Some(PathBuf::from("schema.json")),
+            schema_engine: Some(CliAssertSchemaEngine::Checkjs),
+            schema_flag: Some("--schemafile".to_string()),
+            input_flag: Some("--instance".to_string()),
+            input: Some(PathBuf::from("input.json")),
+            normalize: None,
+            engine: CliAssertSchemaEngine::Jsonschema,
+            rules_help: false,
+            schema_help: false,
+        };
+        let dispatch = assert_schema_dispatch_args(&args);
+        assert_eq!(dispatch.engine, Some(CliAssertSchemaEngine::Checkjs));
+        assert_eq!(dispatch.schema_flag.as_deref(), Some("--schemafile"));
+        assert_eq!(dispatch.input_flag.as_deref(), Some("--instance"));
+    }
+
+    #[test]
+    fn run_assert_dispatch_with_schema_engine_flags_preserves_exit_mapping() {
+        let schema_path = PathBuf::from("/definitely-missing/schema.json");
+        let input_path = PathBuf::from("/definitely-missing/input.json");
+        let legacy_exit = run_assert(
+            AssertArgs {
+                rules: None,
+                schema: Some(schema_path.clone()),
+                schema_engine: None,
+                schema_flag: None,
+                input_flag: None,
+                input: Some(input_path.clone()),
+                normalize: None,
+                engine: CliAssertSchemaEngine::Jsonschema,
+                rules_help: false,
+                schema_help: false,
+            },
+            false,
+        );
+        let flagged_exit = run_assert(
+            AssertArgs {
+                rules: None,
+                schema: Some(schema_path),
+                schema_engine: Some(CliAssertSchemaEngine::Checkjs),
+                schema_flag: Some("--schemafile".to_string()),
+                input_flag: Some("--instance".to_string()),
+                input: Some(input_path),
+                normalize: None,
+                engine: CliAssertSchemaEngine::Jsonschema,
+                rules_help: false,
+                schema_help: false,
+            },
+            false,
+        );
+        assert_eq!(legacy_exit, 3);
+        assert_eq!(flagged_exit, legacy_exit);
     }
 
     #[test]
