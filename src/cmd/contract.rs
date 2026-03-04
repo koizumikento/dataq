@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 18] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 19] = [
     ContractCommand::Canon,
     ContractCommand::IngestApi,
     ContractCommand::Ingest,
@@ -17,6 +17,7 @@ pub const ORDERED_COMMANDS: [ContractCommand; 18] = [
     ContractCommand::IngestBook,
     ContractCommand::Scan,
     ContractCommand::TransformRowset,
+    ContractCommand::TransformSql,
     ContractCommand::Merge,
     ContractCommand::Doctor,
     ContractCommand::RecipeRun,
@@ -40,6 +41,7 @@ pub enum ContractCommand {
     IngestBook,
     Scan,
     TransformRowset,
+    TransformSql,
     Merge,
     Doctor,
     RecipeRun,
@@ -93,6 +95,7 @@ const INGEST_NOTES_FIELDS: &[&str] = &[
 ];
 const INGEST_BOOK_FIELDS: &[&str] = &["book", "summary"];
 const SCAN_FIELDS: &[&str] = &["matches", "summary"];
+const TRANSFORM_SQL_FIELDS: &[&str] = &[];
 const DOCTOR_FIELDS: &[&str] = &["tools"];
 const RECIPE_RUN_FIELDS: &[&str] = &["matched", "exit_code", "steps"];
 const RECIPE_LOCK_FIELDS: &[&str] = &[
@@ -158,6 +161,10 @@ const SCAN_NOTES: &[&str] = &[
 const TRANSFORM_ROWSET_NOTES: &[&str] = &[
     "Output is always a JSON array.",
     "`jq` runs first, then `mlr`, with stage-level diagnostics in `--emit-pipeline`.",
+];
+const TRANSFORM_SQL_NOTES: &[&str] = &[
+    "Output is always a JSON array.",
+    "`duckdb` executes the SQL stage with explicit argument-array invocation.",
 ];
 const MERGE_NOTES: &[&str] = &[
     "Output is the merged root JSON value.",
@@ -321,6 +328,13 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: NO_FIXED_ROOT_FIELDS,
             exit_codes: exit_codes("validation mismatch is not used by this command"),
             notes: TRANSFORM_ROWSET_NOTES,
+        },
+        ContractCommand::TransformSql => CommandContract {
+            command: "transform-sql",
+            schema: "dataq.transform.sql.output.v1",
+            output_fields: TRANSFORM_SQL_FIELDS,
+            exit_codes: exit_codes("validation mismatch is not used by this command"),
+            notes: TRANSFORM_SQL_NOTES,
         },
         ContractCommand::Merge => CommandContract {
             command: "merge",

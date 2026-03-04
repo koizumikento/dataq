@@ -64,6 +64,7 @@ fn contract_all_returns_deterministic_order() {
             "ingest-book",
             "scan",
             "transform-rowset",
+            "transform-sql",
             "merge",
             "doctor",
             "recipe-run",
@@ -178,6 +179,30 @@ fn contract_transform_rowset_command_is_available() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
     assert_eq!(payload["command"], json!("transform-rowset"));
     assert_eq!(payload["schema"], json!("dataq.transform.rowset.output.v1"));
+}
+
+#[test]
+fn contract_all_contains_transform_sql_output_contract() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--all"])
+        .output()
+        .expect("run contract all");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    let contracts = payload.as_array().expect("contract array");
+    let transform_sql = contracts
+        .iter()
+        .find(|entry| entry["command"] == json!("transform-sql"))
+        .expect("transform-sql contract");
+
+    assert_eq!(
+        transform_sql["schema"],
+        json!("dataq.transform.sql.output.v1")
+    );
+    assert_eq!(transform_sql["output_fields"], json!([]));
 }
 
 #[test]

@@ -31,6 +31,35 @@ fn emit_plan_known_command_returns_stage_plan() {
 }
 
 #[test]
+fn emit_plan_transform_sql_reports_duckdb_stage_and_tool_expectation() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["emit", "plan", "--command", "transform-sql"])
+        .output()
+        .expect("run emit plan transform-sql");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], Value::from("transform-sql"));
+    assert_eq!(
+        payload["stages"][0]["step"],
+        Value::from("resolve_transform_sql_input")
+    );
+    assert_eq!(
+        payload["stages"][1]["step"],
+        Value::from("execute_transform_sql_with_duckdb")
+    );
+    assert_eq!(payload["stages"][1]["tool"], Value::from("duckdb"));
+    assert_eq!(
+        payload["stages"][2]["step"],
+        Value::from("write_transform_sql_output")
+    );
+    assert_eq!(payload["tools"][3]["name"], Value::from("duckdb"));
+    assert_eq!(payload["tools"][3]["expected"], Value::from(true));
+}
+
+#[test]
 fn emit_plan_unknown_command_returns_exit_three() {
     let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["emit", "plan", "--command", "unknown"])
