@@ -1,3 +1,4 @@
+pub mod duckdb;
 pub mod jq;
 pub mod mdbook;
 pub mod mlr;
