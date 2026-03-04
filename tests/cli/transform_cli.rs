@@ -47,6 +47,8 @@ fn transform_rowset_count_sum_avg_are_deterministic_json_arrays() {
             .args([
                 "transform",
                 "rowset",
+                "--engine",
+                "sqlite",
                 "--input",
                 input.to_str().expect("utf8 input path"),
                 "--jq-filter",
@@ -91,6 +93,8 @@ fn transform_rowset_emit_pipeline_reports_stage_diagnostics_with_record_counts()
             "transform",
             "rowset",
             "--emit-pipeline",
+            "--engine",
+            "sqlite",
             "--input",
             input.to_str().expect("utf8 input path"),
             "--jq-filter",
@@ -127,6 +131,10 @@ fn transform_rowset_emit_pipeline_reports_stage_diagnostics_with_record_counts()
         Value::from("transform_rowset_mlr")
     );
     assert_eq!(
+        stderr_json["stage_diagnostics"][1]["tool"],
+        Value::from("sqlite")
+    );
+    assert_eq!(
         stderr_json["stage_diagnostics"][1]["input_records"],
         Value::from(3)
     );
@@ -151,6 +159,8 @@ fn transform_rowset_preserves_string_values_from_mlr_output() {
         .args([
             "transform",
             "rowset",
+            "--engine",
+            "sqlite",
             "--input",
             input.to_str().expect("utf8 input path"),
             "--jq-filter",
@@ -195,6 +205,8 @@ fn transform_rowset_emit_pipeline_after_mlr_args_is_parsed_as_global_flag() {
         .args([
             "transform",
             "rowset",
+            "--engine",
+            "sqlite",
             "--input",
             input.to_str().expect("utf8 input path"),
             "--jq-filter",
@@ -219,6 +231,10 @@ fn transform_rowset_emit_pipeline_after_mlr_args_is_parsed_as_global_flag() {
         stderr_json["stage_diagnostics"][1]["step"],
         Value::from("transform_rowset_mlr")
     );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][1]["tool"],
+        Value::from("sqlite")
+    );
 }
 
 #[test]
@@ -236,6 +252,8 @@ fn transform_rowset_malformed_commands_return_exit_three() {
         .args([
             "transform",
             "rowset",
+            "--engine",
+            "sqlite",
             "--input",
             input.to_str().expect("utf8 input path"),
             "--jq-filter",
@@ -259,6 +277,8 @@ fn transform_rowset_malformed_commands_return_exit_three() {
         .args([
             "transform",
             "rowset",
+            "--engine",
+            "sqlite",
             "--input",
             input.to_str().expect("utf8 input path"),
             "--jq-filter",
@@ -269,7 +289,7 @@ fn transform_rowset_malformed_commands_return_exit_three() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains(
-            "failed to transform rowset with mlr",
+            "failed to transform rowset with sqlite",
         ));
 }
 
