@@ -233,6 +233,10 @@ fn assert_schema_help_outputs_machine_readable_json() {
         stdout_json["mismatch_shape"]["reason"],
         Value::from("schema_mismatch")
     );
+    assert_eq!(
+        stdout_json["mode"]["available_engines"],
+        Value::Array(vec![Value::from("jsonschema"), Value::from("ajv")])
+    );
     assert!(stdout_json["example_schema"].is_object());
 }
 

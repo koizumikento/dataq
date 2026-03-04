@@ -639,7 +639,7 @@ fn execute_assert(args: &Map<String, Value>) -> ToolExecution {
             schema_source.as_ref(),
         )),
         assert_cmd::pipeline_steps(None),
-        assert_cmd::deterministic_guards(None),
+        assert_cmd::deterministic_guards(None, assert_cmd::AssertSchemaEngine::Jsonschema),
     );
     let pipeline = pipeline_as_value(report).ok();
     ToolExecution { pipeline, ..result }
@@ -713,7 +713,10 @@ fn execute_assert_with_command_api(
                 schema_path.as_deref(),
             )),
             assert_cmd::pipeline_steps(normalize_mode),
-            assert_cmd::deterministic_guards(normalize_mode),
+            assert_cmd::deterministic_guards(
+                normalize_mode,
+                assert_cmd::AssertSchemaEngine::Jsonschema,
+            ),
         );
         for used_tool in &trace.used_tools {
             report = report.mark_external_tool_used(used_tool);
