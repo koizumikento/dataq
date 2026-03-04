@@ -361,6 +361,8 @@ struct TransformArgs {
 enum TransformSubcommand {
     /// Run fixed two-stage rowset transform (`jq` then `mlr`).
     Rowset(TransformRowsetArgs),
+    /// Run SQL transform via an explicitly selected query engine.
+    Sql(TransformSqlArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -376,6 +378,34 @@ struct TransformRowsetArgs {
     /// mlr verb/arguments used in stage 2.
     #[arg(long = "mlr", required = true, num_args = 1.., allow_hyphen_values = true)]
     mlr: Vec<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct TransformSqlArgs {
+    /// SQL engine used for query execution.
+    #[arg(long, value_enum)]
+    engine: CliTransformSqlEngine,
+
+    /// SQL query text to execute.
+    #[arg(long)]
+    query: String,
+
+    /// Input path or `-` for stdin.
+    #[arg(long)]
+    input: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CliTransformSqlEngine {
+    Duckdb,
+}
+
+impl CliTransformSqlEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Duckdb => "duckdb",
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -1848,6 +1878,7 @@ fn run_transform(args: TransformArgs, emit_pipeline: bool) -> i32 {
                 normalize_transform_rowset_global_flags(rowset_args, emit_pipeline);
             run_transform_rowset(rowset_args, emit_pipeline)
         }
+        TransformSubcommand::Sql(sql_args) => run_transform_sql(sql_args, emit_pipeline),
     }
 }
 
@@ -1992,6 +2023,134 @@ fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
+}
+
+fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
+    let (input_format, stdin_input) = if args.input == "-" {
+        let stdin = io::stdin();
+        let mut bytes = Vec::new();
+        if let Err(error) = stdin.lock().read_to_end(&mut bytes) {
+            emit_error(
+                "input_usage_error",
+                format!("failed to read stdin: {error}"),
+                json!({"command": "transform.sql"}),
+                3,
+            );
+            if emit_pipeline {
+                emit_pipeline_report(&build_transform_sql_pipeline_report(
+                    &args, None, true, false,
+                ));
+            }
+            return 3;
+        }
+
+        let format = match dataq_io::autodetect_stdin_input_format(&bytes) {
+            Ok(format) => format,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    error.to_string(),
+                    json!({"command": "transform.sql"}),
+                    3,
+                );
+                if emit_pipeline {
+                    emit_pipeline_report(&build_transform_sql_pipeline_report(
+                        &args, None, true, false,
+                    ));
+                }
+                return 3;
+            }
+        };
+
+        if let Err(error) = dataq_io::reader::read_values(Cursor::new(bytes), format) {
+            emit_error(
+                "input_usage_error",
+                format!("failed to read input: {error}"),
+                json!({"command": "transform.sql"}),
+                3,
+            );
+            if emit_pipeline {
+                emit_pipeline_report(&build_transform_sql_pipeline_report(
+                    &args,
+                    Some(format),
+                    true,
+                    false,
+                ));
+            }
+            return 3;
+        }
+
+        (Some(format), true)
+    } else {
+        let path = PathBuf::from(args.input.clone());
+        let format = dataq_io::resolve_input_format(None, Some(path.as_path())).ok();
+        (format, false)
+    };
+
+    let (response_exit_code, response_payload, used_duckdb) = execute_transform_sql(&args);
+    let exit_code = match response_exit_code {
+        0 => {
+            if emit_json_stdout(&response_payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize transform sql output".to_string(),
+                    json!({"command": "transform.sql"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 => {
+            if emit_json_stderr(&response_payload) {
+                3
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize transform sql error".to_string(),
+                    json!({"command": "transform.sql"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected transform sql exit code: {other}"),
+                json!({"command": "transform.sql"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report =
+            build_transform_sql_pipeline_report(&args, input_format, stdin_input, used_duckdb);
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn execute_transform_sql(args: &TransformSqlArgs) -> (i32, Value, bool) {
+    let engine = args.engine.as_str();
+    (
+        3,
+        json!({
+            "error": "input_usage_error",
+            "message": format!(
+                "`transform sql` is not available in this build for engine `{engine}`"
+            ),
+            "details": {
+                "command": "transform.sql",
+                "engine": engine,
+                "query": args.query,
+            }
+        }),
+        matches!(args.engine, CliTransformSqlEngine::Duckdb),
+    )
 }
 
 fn run_scan_text(args: ScanTextArgs, emit_pipeline: bool) -> i32 {
@@ -3415,6 +3574,39 @@ fn build_transform_rowset_pipeline_report(
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
+fn build_transform_sql_pipeline_report(
+    args: &TransformSqlArgs,
+    input_format: Option<Format>,
+    stdin_input: bool,
+    used_duckdb: bool,
+) -> PipelineReport {
+    let source = if stdin_input {
+        PipelineInputSource::stdin("input", format_label(input_format))
+    } else {
+        PipelineInputSource::path("input", args.input.as_str(), format_label(input_format))
+    };
+    let mut report = ensure_external_tool(
+        PipelineReport::new(
+            "transform.sql",
+            PipelineInput::new(vec![source]),
+            vec![
+                "transform_sql_resolve_input".to_string(),
+                "transform_sql_execute_query".to_string(),
+                "transform_sql_write_output".to_string(),
+            ],
+            vec![
+                "explicit_sql_engine_selection".to_string(),
+                "duckdb_execution_with_explicit_arg_arrays".to_string(),
+            ],
+        ),
+        "duckdb",
+    );
+    if used_duckdb {
+        report = report.mark_external_tool_used("duckdb");
+    }
+    report
+}
+
 fn build_merge_pipeline_report(
     args: &MergeArgs,
     base_format: Option<Format>,
@@ -4025,6 +4217,53 @@ mod tests {
             ingest::IngestDocInputFormat::from(CliIngestDocFormat::Latex),
             ingest::IngestDocInputFormat::Latex
         );
+
+        assert_eq!(CliTransformSqlEngine::Duckdb.as_str(), "duckdb");
+    }
+
+    #[test]
+    fn transform_sql_cli_parses_engine_query_and_input() {
+        let cli = Cli::try_parse_from([
+            "dataq",
+            "--emit-pipeline",
+            "transform",
+            "sql",
+            "--engine",
+            "duckdb",
+            "--query",
+            "select * from input",
+            "--input",
+            "input.json",
+        ])
+        .expect("parse transform sql command");
+
+        assert!(cli.emit_pipeline);
+        match cli.command {
+            Commands::Transform(TransformArgs {
+                command: TransformSubcommand::Sql(args),
+            }) => {
+                assert_eq!(args.engine, CliTransformSqlEngine::Duckdb);
+                assert_eq!(args.query, "select * from input");
+                assert_eq!(args.input, "input.json");
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_sql_cli_requires_input_flag() {
+        let error = Cli::try_parse_from([
+            "dataq",
+            "transform",
+            "sql",
+            "--engine",
+            "duckdb",
+            "--query",
+            "select 1",
+        ])
+        .expect_err("missing --input should fail");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
@@ -4308,6 +4547,25 @@ mod tests {
         );
         assert_eq!(transform_report.command, "transform.rowset");
 
+        let transform_sql_args = TransformSqlArgs {
+            engine: CliTransformSqlEngine::Duckdb,
+            query: "select 1".to_string(),
+            input: "-".to_string(),
+        };
+        let transform_sql_report = build_transform_sql_pipeline_report(
+            &transform_sql_args,
+            Some(Format::Json),
+            true,
+            true,
+        );
+        assert_eq!(transform_sql_report.command, "transform.sql");
+        assert!(
+            transform_sql_report
+                .external_tools
+                .iter()
+                .any(|tool| tool.name == "duckdb" && tool.used)
+        );
+
         let merge_args = MergeArgs {
             base: PathBuf::from("base.json"),
             overlay: vec![PathBuf::from("overlay.json")],
@@ -4587,6 +4845,18 @@ mod tests {
         );
 
         assert_eq!(
+            run_transform_sql(
+                TransformSqlArgs {
+                    engine: CliTransformSqlEngine::Duckdb,
+                    query: "select * from input".to_string(),
+                    input: "/definitely-missing/input.json".to_string(),
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
             run_sdiff(
                 SdiffArgs {
                     left: PathBuf::from("/definitely-missing/left.json"),
@@ -4728,6 +4998,18 @@ mod tests {
             false,
         );
         assert_eq!(transform_exit, 3);
+
+        let transform_sql_exit = run_transform(
+            TransformArgs {
+                command: TransformSubcommand::Sql(TransformSqlArgs {
+                    engine: CliTransformSqlEngine::Duckdb,
+                    query: "select 1".to_string(),
+                    input: "/definitely-missing/input.json".to_string(),
+                }),
+            },
+            false,
+        );
+        assert_eq!(transform_sql_exit, 3);
 
         let scan_exit = run_scan(
             ScanArgs {
