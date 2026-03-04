@@ -140,6 +140,72 @@ fn profile_command_csv_type_distribution_is_stable() {
 }
 
 #[test]
+fn profile_command_normalizes_qsv_csv_rows() {
+    let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
+id,Integer,1,3,4,1,4,2.333333,2,4\n\
+flag,String,2,2,4,,,,,\n";
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "csv"])
+        .write_stdin(qsv_rows)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["record_count"], json!(4));
+    assert_eq!(actual["field_count"], json!(2));
+    assert_eq!(actual["fields"]["$[\"id\"]"]["null_ratio"], json!(0.25));
+    assert_eq!(
+        actual["fields"]["$[\"id\"]"]["type_distribution"]["number"],
+        json!(3)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"id\"]"]["numeric_stats"]["mean"],
+        json!(2.333333)
+    );
+    assert_eq!(actual["fields"]["$[\"flag\"]"]["null_ratio"], json!(0.5));
+    assert_eq!(
+        actual["fields"]["$[\"flag\"]"]["type_distribution"]["string"],
+        json!(2)
+    );
+}
+
+#[test]
+fn profile_command_emit_pipeline_reports_qsv_stage_diagnostics() {
+    let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
+id,Integer,1,3,4,1,4,2.333333,2,4\n\
+flag,String,2,2,4,,,,,\n";
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--emit-pipeline", "--from", "csv"])
+        .write_stdin(qsv_rows)
+        .output()
+        .expect("run profile");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    let qsv_tool = stderr_json["external_tools"]
+        .as_array()
+        .expect("external tools")
+        .iter()
+        .find(|entry| entry["name"] == json!("qsv"))
+        .expect("qsv tool entry");
+    assert_eq!(qsv_tool["used"], json!(true));
+
+    let stage = stderr_json["stage_diagnostics"]
+        .as_array()
+        .expect("stage diagnostics")
+        .first()
+        .expect("qsv stage");
+    assert_eq!(stage["step"], json!("profile_qsv_normalize"));
+    assert_eq!(stage["tool"], json!("qsv"));
+    assert_eq!(stage["status"], json!("ok"));
+}
+
+#[test]
 fn profile_command_invalid_input_returns_exit_three() {
     assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["profile", "--from", "json"])
@@ -147,4 +213,14 @@ fn profile_command_invalid_input_returns_exit_three() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
+}
+
+fn parse_last_stderr_json(stderr: &[u8]) -> serde_json::Value {
+    let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
+    let line = text
+        .lines()
+        .rev()
+        .find(|candidate| !candidate.trim().is_empty())
+        .expect("non-empty stderr line");
+    serde_json::from_str(line).expect("stderr json")
 }

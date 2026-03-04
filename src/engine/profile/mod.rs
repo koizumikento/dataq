@@ -9,6 +9,406 @@ use crate::util::sort::sort_value_keys;
 
 const NUMERIC_STAT_SCALE: f64 = 1_000_000.0;
 
+#[derive(Debug, Clone)]
+struct QsvColumns {
+    field: String,
+    value_type: String,
+    unique_count: String,
+    null_count: Option<String>,
+    null_ratio: Option<String>,
+    record_count: Option<String>,
+    count: Option<String>,
+    n_negative: Option<String>,
+    n_zero: Option<String>,
+    n_positive: Option<String>,
+    min: Option<String>,
+    max: Option<String>,
+    mean: Option<String>,
+    p50: Option<String>,
+    p95: Option<String>,
+    percentiles: Option<String>,
+}
+
+impl QsvColumns {
+    fn detect(header_row: &Map<String, Value>) -> Option<Self> {
+        let header_lookup: BTreeMap<String, String> = header_row
+            .keys()
+            .map(|key| (key.to_ascii_lowercase(), key.clone()))
+            .collect();
+
+        let field = lookup_column(&header_lookup, &["field", "column", "column_name", "name"])?;
+        let value_type = lookup_column(&header_lookup, &["type", "value_type", "inferred_type"])?;
+        let unique_count = lookup_column(
+            &header_lookup,
+            &["cardinality", "unique_count", "distinct_count"],
+        )?;
+
+        let null_count = lookup_column(&header_lookup, &["nullcount", "null_count"]);
+        let null_ratio = lookup_column(&header_lookup, &["null_ratio", "nullratio", "sparsity"]);
+        if null_count.is_none() && null_ratio.is_none() {
+            return None;
+        }
+
+        let record_count = lookup_column(
+            &header_lookup,
+            &["record_count", "records", "rows", "row_count", "total_rows"],
+        );
+        let count = lookup_column(&header_lookup, &["count", "nonnull_count"]);
+        let n_negative = lookup_column(&header_lookup, &["n_negative", "negative_count"]);
+        let n_zero = lookup_column(&header_lookup, &["n_zero", "zero_count"]);
+        let n_positive = lookup_column(&header_lookup, &["n_positive", "positive_count"]);
+        let min = lookup_column(&header_lookup, &["min"]);
+        let max = lookup_column(&header_lookup, &["max"]);
+        let mean = lookup_column(&header_lookup, &["mean"]);
+        let p50 = lookup_column(&header_lookup, &["p50", "q2_median", "median"]);
+        let p95 = lookup_column(&header_lookup, &["p95"]);
+        let percentiles = lookup_column(&header_lookup, &["percentiles", "quantiles"]);
+
+        let has_qsv_marker = [
+            record_count.as_ref(),
+            n_negative.as_ref(),
+            n_zero.as_ref(),
+            n_positive.as_ref(),
+            percentiles.as_ref(),
+            p50.as_ref(),
+            p95.as_ref(),
+        ]
+        .iter()
+        .any(Option::is_some);
+        if !has_qsv_marker {
+            return None;
+        }
+
+        Some(Self {
+            field,
+            value_type,
+            unique_count,
+            null_count,
+            null_ratio,
+            record_count,
+            count,
+            n_negative,
+            n_zero,
+            n_positive,
+            min,
+            max,
+            mean,
+            p50,
+            p95,
+            percentiles,
+        })
+    }
+}
+
+/// Normalize qsv-style CSV profile rows into `ProfileReport`.
+///
+/// Returns `Ok(None)` when rows do not match qsv-profile shape.
+pub fn normalize_qsv_profile_rows(values: &[Value]) -> Result<Option<ProfileReport>, String> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(first_row) = values.first().and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let Some(columns) = QsvColumns::detect(first_row) else {
+        return Ok(None);
+    };
+
+    let mut row_maps = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let Some(map) = value.as_object() else {
+            return Err(format!("qsv profile row {index} must be an object"));
+        };
+        row_maps.push(map);
+    }
+
+    let record_count = derive_qsv_record_count(&row_maps, &columns).ok_or_else(|| {
+        "failed to derive `record_count` from qsv profile rows; include `record_count` or qsv counters".to_string()
+    })?;
+
+    let mut fields = BTreeMap::new();
+    for (index, row) in row_maps.iter().enumerate() {
+        let field_name = required_row_cell(row, &columns.field, index)?;
+        let type_name = required_row_cell(row, &columns.value_type, index)?;
+        let unique_count = parse_required_usize(
+            row_cell(row, &columns.unique_count),
+            &columns.unique_count,
+            index,
+        )?;
+
+        let row_record_count = row_record_count_candidate(row, &columns).unwrap_or(record_count);
+        let mut null_count = parse_optional_usize(row_cell_opt(row, columns.null_count.as_deref()))
+            .map_err(|message| format!("qsv profile row {index} {message}"))?
+            .unwrap_or(0);
+        if null_count == 0 {
+            if let Some(ratio_text) = row_cell_opt(row, columns.null_ratio.as_deref()) {
+                if let Ok(ratio) = parse_float(ratio_text) {
+                    if ratio > 0.0 {
+                        null_count = ((row_record_count as f64) * ratio).round() as usize;
+                    }
+                }
+            }
+        }
+        null_count = null_count.min(row_record_count);
+        let non_null_count = row_record_count.saturating_sub(null_count);
+
+        let mut type_distribution = ProfileTypeDistribution {
+            null: null_count,
+            ..ProfileTypeDistribution::default()
+        };
+        match normalized_type_bucket(type_name) {
+            QsvTypeBucket::Null => {
+                type_distribution.null = row_record_count;
+            }
+            QsvTypeBucket::Boolean => type_distribution.boolean = non_null_count,
+            QsvTypeBucket::Number => type_distribution.number = non_null_count,
+            QsvTypeBucket::String => type_distribution.string = non_null_count,
+        }
+
+        let numeric_stats = if matches!(normalized_type_bucket(type_name), QsvTypeBucket::Number) {
+            parse_qsv_numeric_stats(row, &columns, non_null_count)
+        } else {
+            None
+        };
+
+        let field_path = append_object_key_path("$", field_name);
+        let null_ratio = if row_record_count == 0 {
+            0.0
+        } else {
+            null_count as f64 / row_record_count as f64
+        };
+        fields.insert(
+            field_path,
+            ProfileFieldReport {
+                null_ratio,
+                unique_count,
+                type_distribution,
+                numeric_stats,
+            },
+        );
+    }
+
+    Ok(Some(ProfileReport {
+        record_count,
+        field_count: fields.len(),
+        fields,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QsvTypeBucket {
+    Null,
+    Boolean,
+    Number,
+    String,
+}
+
+fn normalized_type_bucket(type_name: &str) -> QsvTypeBucket {
+    let normalized = type_name.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return QsvTypeBucket::String;
+    }
+    if matches!(normalized.as_str(), "null") {
+        return QsvTypeBucket::Null;
+    }
+    if matches!(
+        normalized.as_str(),
+        "bool" | "boolean" | "logical" | "binary"
+    ) {
+        return QsvTypeBucket::Boolean;
+    }
+    if matches!(
+        normalized.as_str(),
+        "int" | "integer" | "float" | "double" | "number" | "numeric" | "decimal" | "currency"
+    ) {
+        return QsvTypeBucket::Number;
+    }
+    QsvTypeBucket::String
+}
+
+fn parse_qsv_numeric_stats(
+    row: &Map<String, Value>,
+    columns: &QsvColumns,
+    non_null_count: usize,
+) -> Option<ProfileNumericStats> {
+    if non_null_count == 0 {
+        return None;
+    }
+
+    let min = parse_float(row_cell_opt(row, columns.min.as_deref())?).ok()?;
+    let max = parse_float(row_cell_opt(row, columns.max.as_deref())?).ok()?;
+    let mean = parse_float(row_cell_opt(row, columns.mean.as_deref())?).ok()?;
+    let p50 = if let Some(value) = row_cell_opt(row, columns.p50.as_deref()) {
+        parse_float(value).ok()?
+    } else {
+        let percentiles = row_cell_opt(row, columns.percentiles.as_deref())?;
+        parse_percentile_value(percentiles, 50)?
+    };
+    let p95 = if let Some(value) = row_cell_opt(row, columns.p95.as_deref()) {
+        parse_float(value).ok()?
+    } else {
+        let percentiles = row_cell_opt(row, columns.percentiles.as_deref())?;
+        parse_percentile_value(percentiles, 95)?
+    };
+
+    Some(ProfileNumericStats {
+        count: non_null_count,
+        min: round_numeric_stat(min),
+        max: round_numeric_stat(max),
+        mean: round_numeric_stat(mean),
+        p50: round_numeric_stat(p50),
+        p95: round_numeric_stat(p95),
+    })
+}
+
+fn parse_percentile_value(text: &str, percentile: usize) -> Option<f64> {
+    for chunk in text.split('|') {
+        let Some((label, raw_value)) = chunk.split_once(':') else {
+            continue;
+        };
+        let Ok(parsed_label) = label.trim().trim_end_matches('%').parse::<usize>() else {
+            continue;
+        };
+        if parsed_label == percentile {
+            return parse_float(raw_value.trim()).ok();
+        }
+    }
+    None
+}
+
+fn derive_qsv_record_count(rows: &[&Map<String, Value>], columns: &QsvColumns) -> Option<usize> {
+    let mut max_candidate = 0usize;
+    let mut has_candidate = false;
+    for row in rows {
+        if let Some(candidate) = row_record_count_candidate(row, columns) {
+            max_candidate = max_candidate.max(candidate);
+            has_candidate = true;
+        }
+    }
+    has_candidate.then_some(max_candidate)
+}
+
+fn row_record_count_candidate(row: &Map<String, Value>, columns: &QsvColumns) -> Option<usize> {
+    if let Some(record_count) = columns
+        .record_count
+        .as_deref()
+        .and_then(|column| parse_optional_usize(row_cell(row, column)).ok().flatten())
+    {
+        return Some(record_count);
+    }
+
+    let null_count = columns
+        .null_count
+        .as_deref()
+        .and_then(|column| parse_optional_usize(row_cell(row, column)).ok().flatten())
+        .unwrap_or(0);
+
+    let mut signed_count_total = 0usize;
+    let mut has_signed_counters = false;
+    for column in [
+        columns.n_negative.as_deref(),
+        columns.n_zero.as_deref(),
+        columns.n_positive.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        has_signed_counters = true;
+        let count = parse_optional_usize(row_cell(row, column))
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        signed_count_total = signed_count_total.saturating_add(count);
+    }
+    if has_signed_counters {
+        return Some(null_count.saturating_add(signed_count_total));
+    }
+
+    if let Some(ratio_column) = columns.null_ratio.as_deref() {
+        if let Some(ratio_text) = row_cell(row, ratio_column) {
+            if let Ok(ratio) = parse_float(ratio_text) {
+                if ratio > 0.0 && null_count > 0 {
+                    let estimated = (null_count as f64 / ratio).round();
+                    if estimated.is_finite() && estimated >= null_count as f64 {
+                        return Some(estimated as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(column) = columns.count.as_deref() {
+        if let Some(count) = parse_optional_usize(row_cell(row, column)).ok().flatten() {
+            return Some(count.max(null_count));
+        }
+    }
+
+    None
+}
+
+fn lookup_column(header_lookup: &BTreeMap<String, String>, candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find_map(|candidate| header_lookup.get(*candidate))
+        .cloned()
+}
+
+fn row_cell<'a>(row: &'a Map<String, Value>, column: &str) -> Option<&'a str> {
+    row.get(column).and_then(Value::as_str).map(str::trim)
+}
+
+fn row_cell_opt<'a>(row: &'a Map<String, Value>, column: Option<&str>) -> Option<&'a str> {
+    column.and_then(|column| row_cell(row, column))
+}
+
+fn required_row_cell<'a>(
+    row: &'a Map<String, Value>,
+    column: &str,
+    index: usize,
+) -> Result<&'a str, String> {
+    let value = row_cell(row, column)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("qsv profile row {index} missing `{column}`"))?;
+    Ok(value)
+}
+
+fn parse_required_usize(value: Option<&str>, column: &str, index: usize) -> Result<usize, String> {
+    parse_optional_usize(value)
+        .map_err(|message| format!("qsv profile row {index} {message}"))?
+        .ok_or_else(|| format!("qsv profile row {index} missing `{column}`"))
+}
+
+fn parse_optional_usize(value: Option<&str>) -> Result<Option<usize>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+
+    if let Ok(parsed) = value.parse::<usize>() {
+        return Ok(Some(parsed));
+    }
+    if let Ok(parsed) = value.parse::<f64>() {
+        if parsed.is_finite() && parsed >= 0.0 {
+            let rounded = parsed.round();
+            if (parsed - rounded).abs() < f64::EPSILON {
+                return Ok(Some(rounded as usize));
+            }
+        }
+    }
+
+    Err(format!("has invalid integer value `{value}`"))
+}
+
+fn parse_float(value: &str) -> Result<f64, String> {
+    value
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("has invalid number value `{value}`"))
+}
+
 /// Builds deterministic profile statistics for a dataset.
 pub fn profile_values(values: &[Value]) -> ProfileReport {
     let mut per_record_samples = Vec::with_capacity(values.len());
@@ -190,7 +590,7 @@ fn append_object_key_path(path: &str, key: &str) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::profile_values;
+    use super::{normalize_qsv_profile_rows, profile_values};
 
     #[test]
     fn profiles_flat_fields_with_deterministic_counts() {
@@ -278,5 +678,87 @@ mod tests {
         assert_eq!(numeric.mean, 26.583333);
         assert_eq!(numeric.p50, 2.0);
         assert_eq!(numeric.p95, 100.0);
+    }
+
+    #[test]
+    fn normalizes_qsv_profile_rows_to_profile_report() {
+        let values = vec![
+            json!({
+                "field": "id",
+                "type": "Integer",
+                "nullcount": "1",
+                "cardinality": "3",
+                "record_count": "4",
+                "min": "1",
+                "max": "4",
+                "mean": "2.3333333",
+                "q2_median": "2",
+                "p95": "4"
+            }),
+            json!({
+                "field": "flag",
+                "type": "String",
+                "nullcount": "2",
+                "cardinality": "2",
+                "record_count": "4",
+                "min": "",
+                "max": "",
+                "mean": "",
+                "q2_median": "",
+                "p95": ""
+            }),
+        ];
+
+        let report = normalize_qsv_profile_rows(&values)
+            .expect("qsv normalization")
+            .expect("qsv profile rows should be detected");
+        assert_eq!(report.record_count, 4);
+        assert_eq!(report.field_count, 2);
+
+        let id = report.fields.get("$[\"id\"]").expect("id field");
+        assert_eq!(id.null_ratio, 0.25);
+        assert_eq!(id.unique_count, 3);
+        assert_eq!(id.type_distribution.null, 1);
+        assert_eq!(id.type_distribution.number, 3);
+        let numeric = id.numeric_stats.as_ref().expect("numeric stats");
+        assert_eq!(numeric.count, 3);
+        assert_eq!(numeric.min, 1.0);
+        assert_eq!(numeric.max, 4.0);
+        assert_eq!(numeric.mean, 2.333333);
+        assert_eq!(numeric.p50, 2.0);
+        assert_eq!(numeric.p95, 4.0);
+
+        let flag = report.fields.get("$[\"flag\"]").expect("flag field");
+        assert_eq!(flag.null_ratio, 0.5);
+        assert_eq!(flag.unique_count, 2);
+        assert_eq!(flag.type_distribution.null, 2);
+        assert_eq!(flag.type_distribution.string, 2);
+        assert!(flag.numeric_stats.is_none());
+    }
+
+    #[test]
+    fn qsv_normalization_ignores_non_qsv_rows() {
+        let values = vec![json!({"id": "1", "flag": "true"})];
+        let normalized = normalize_qsv_profile_rows(&values).expect("normalization result");
+        assert!(normalized.is_none());
+    }
+
+    #[test]
+    fn qsv_normalization_reports_invalid_count_cells() {
+        let values = vec![json!({
+            "field": "id",
+            "type": "Integer",
+            "nullcount": "0",
+            "cardinality": "x",
+            "record_count": "2",
+            "min": "1",
+            "max": "2",
+            "mean": "1.5",
+            "q2_median": "1.5",
+            "p95": "2"
+        })];
+
+        let error = normalize_qsv_profile_rows(&values).expect_err("invalid qsv rows");
+        assert!(error.contains("invalid integer value"));
     }
 }

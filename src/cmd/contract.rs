@@ -138,6 +138,7 @@ const DIFF_SOURCE_NOTES: &[&str] = &[
 const PROFILE_NOTES: &[&str] = &[
     "`fields` keys are canonical JSON paths in deterministic order.",
     "`numeric_stats` is omitted when no numeric samples exist.",
+    "`--from csv` can normalize qsv adapter profile/stats CSV rows into the same output schema.",
 ];
 const INGEST_DOC_NOTES: &[&str] = &[
     "Extraction runs as `pandoc -t json` followed by jq projection.",

@@ -107,7 +107,7 @@ dataq [--emit-pipeline] <command> [options]
 グローバルオプション:
 
 - `--emit-pipeline`: stderr に pipeline JSON を1行追加出力（`fingerprint` を含む）
-  - `fingerprint.tool_versions` は実際に呼び出す外部ツール実体を対象に採取（`DATAQ_JQ_BIN` / `DATAQ_YQ_BIN` / `DATAQ_MLR_BIN` / `DATAQ_PANDOC_BIN` を尊重）
+  - `fingerprint.tool_versions` は実際に呼び出す外部ツール実体を対象に採取（`DATAQ_JQ_BIN` / `DATAQ_YQ_BIN` / `DATAQ_MLR_BIN` / `DATAQ_PANDOC_BIN` / `DATAQ_QSV_BIN` を尊重）
 - `-h, --help`: ヘルプ
 - `-V, --version`: バージョン
 
@@ -463,6 +463,8 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
   - `type_distribution`（`null|boolean|number|string|array|object`）
   - `numeric_stats`（数値サンプルが1件以上ある場合のみ）
     - `count`, `min`, `max`, `mean`, `p50`, `p95`
+- `--from csv` では通常CSV行の集計に加えて、qsv adapter の profile/stats CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` など）も受け取り、同一スキーマへ正規化
+- qsv adapter CSV 正規化パスが使われた場合、`--emit-pipeline` の `stage_diagnostics` に `profile_qsv_normalize` を出力し、`external_tools` に `qsv` を `used=true` で記録
 
 `numeric_stats` の決定性ルール:
 

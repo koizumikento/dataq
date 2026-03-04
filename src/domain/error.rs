@@ -48,6 +48,10 @@ pub enum ProfileError {
         source: IoError,
     },
 
+    /// qsv profile rows could not be normalized into profile output.
+    #[error("failed to normalize qsv profile rows: {message}")]
+    QsvNormalize { message: String },
+
     /// Structured report could not be serialized.
     #[error("failed to serialize profile report: {source}")]
     SerializeReport {

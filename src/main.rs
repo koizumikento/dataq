@@ -2308,15 +2308,14 @@ fn run_diff_source(args: DiffSourceArgs, emit_pipeline: bool) -> i32 {
 
 fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     let input_format = Some(args.from.into());
-    let pipeline_report = build_profile_pipeline_report(&args, input_format);
 
     let command_args = profile::ProfileCommandArgs {
-        input: args.input,
+        input: args.input.clone(),
         from: input_format,
     };
 
     let stdin = io::stdin();
-    let response = profile::run_with_stdin(&command_args, stdin.lock());
+    let (response, trace) = profile::run_with_stdin_and_trace(&command_args, stdin.lock());
 
     let exit_code = match response.exit_code {
         0 => {
@@ -2357,6 +2356,7 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     };
 
     if emit_pipeline {
+        let pipeline_report = build_profile_pipeline_report(&args, input_format, &trace);
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
@@ -3277,6 +3277,7 @@ fn build_diff_source_pipeline_report(
 fn build_profile_pipeline_report(
     args: &ProfileArgs,
     input_format: Option<Format>,
+    trace: &profile::ProfilePipelineTrace,
 ) -> PipelineReport {
     let source = if let Some(path) = &args.input {
         PipelineInputSource::path(
@@ -3288,12 +3289,16 @@ fn build_profile_pipeline_report(
         PipelineInputSource::stdin("input", format_label(input_format))
     };
 
-    PipelineReport::new(
+    let mut report = PipelineReport::new(
         "profile",
         PipelineInput::new(vec![source]),
         profile::pipeline_steps(),
         profile::deterministic_guards(),
-    )
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
 fn build_ingest_notes_pipeline_report(trace: &ingest::IngestNotesPipelineTrace) -> PipelineReport {
@@ -3755,6 +3760,7 @@ fn resolve_tool_executable(tool_name: &str) -> String {
         "mdbook" => Some("DATAQ_MDBOOK_BIN"),
         "rg" => Some("DATAQ_RG_BIN"),
         "nb" => Some("DATAQ_NB_BIN"),
+        "qsv" => Some("DATAQ_QSV_BIN"),
         _ => None,
     };
 
@@ -4252,7 +4258,9 @@ mod tests {
             input: Some(PathBuf::from("input.json")),
             from: CliInputFormat::Json,
         };
-        let profile_report = build_profile_pipeline_report(&profile_args, Some(Format::Json));
+        let profile_trace = profile::ProfilePipelineTrace::default();
+        let profile_report =
+            build_profile_pipeline_report(&profile_args, Some(Format::Json), &profile_trace);
         assert_eq!(profile_report.command, "profile");
 
         let ingest_doc_args = IngestDocArgs {
