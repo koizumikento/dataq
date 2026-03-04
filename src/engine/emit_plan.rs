@@ -9,7 +9,7 @@ use crate::cmd::{
     canon, contract, doctor, join, merge, profile, sdiff,
 };
 
-const TOOL_ORDER: [&str; 4] = ["jq", "yq", "mlr", "duckdb"];
+const TOOL_ORDER: [&str; 5] = ["jq", "yq", "mlr", "duckdb", "check-jsonschema"];
 
 /// Request shape for static plan resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +139,12 @@ fn resolve_assert_steps(args: &[String]) -> Result<Vec<String>, EmitPlanError> {
     if schema_help {
         return Ok(vec!["emit_assert_schema_help".to_string()]);
     }
-    Ok(assert_cmd::pipeline_steps(normalize_mode))
+
+    let validation_mode = parse_assert_validation_mode(args)?;
+    Ok(assert_cmd::pipeline_steps_for_mode(
+        validation_mode,
+        normalize_mode,
+    ))
 }
 
 fn resolve_recipe_steps(args: &[String]) -> Result<Vec<String>, EmitPlanError> {
@@ -202,8 +207,30 @@ fn parse_assert_normalize_mode(
     }
 }
 
+fn parse_assert_validation_mode(
+    args: &[String],
+) -> Result<assert_cmd::AssertValidationMode, EmitPlanError> {
+    let has_rules = has_option(args, "--rules");
+    let has_schema = has_option(args, "--schema");
+    if has_rules && has_schema {
+        return Err(EmitPlanError::InvalidArguments(
+            "`--rules` and `--schema` are mutually exclusive".to_string(),
+        ));
+    }
+    if has_schema {
+        return Ok(assert_cmd::AssertValidationMode::Schema);
+    }
+    Ok(assert_cmd::AssertValidationMode::Rules)
+}
+
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
+}
+
+fn has_option(args: &[String], flag: &str) -> bool {
+    let prefix = format!("{flag}=");
+    args.iter()
+        .any(|arg| arg == flag || arg.starts_with(prefix.as_str()))
 }
 
 fn reject_assigned_assert_help_value(args: &[String], flag: &str) -> Result<(), EmitPlanError> {
@@ -236,6 +263,7 @@ fn build_stages(command: &str, steps: &[String]) -> Vec<EmitPlanStage> {
 fn stage_tool(command: &str, step: &str) -> &'static str {
     match command {
         "assert" if step == "normalize_assert_input" => "yq+jq+mlr",
+        "assert" if step == "validate_assert_schema" => "check-jsonschema",
         "join" if step == "execute_join_with_mlr" => "mlr",
         "aggregate" if step == "execute_aggregate_with_mlr" => "mlr",
         "transform-sql" if step == "execute_transform_sql_with_duckdb" => "duckdb",

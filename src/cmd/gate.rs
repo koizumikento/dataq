@@ -85,7 +85,7 @@ pub fn schema_pipeline_steps() -> Vec<String> {
 /// Determinism guards applied by `gate schema`.
 pub fn schema_deterministic_guards() -> Vec<String> {
     vec![
-        "rust_native_schema_validation".to_string(),
+        "check_jsonschema_adapter_validation".to_string(),
         "gate_schema_exit_mapping_0_2_3_1".to_string(),
         "gate_schema_mismatch_order_stable".to_string(),
         "gate_schema_error_path_format_stable".to_string(),

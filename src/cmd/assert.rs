@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::adapters::{jq, mlr, yq};
 use crate::cmd::stage_trace;
-use crate::domain::report::PipelineStageDiagnostic;
+use crate::domain::report::{PipelineStageDiagnostic, PipelineStageMetrics};
 use crate::domain::rules::{AssertReport, AssertRules};
 use crate::engine::r#assert::{self, AssertValidationError};
 use crate::io::{self, Format, IoError};
@@ -61,14 +61,37 @@ impl AssertPipelineTrace {
     }
 }
 
+/// Validation source mode used for stage planning and deterministic guard selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertValidationMode {
+    Rules,
+    Schema,
+}
+
 /// Ordered pipeline-step names used for `--emit-pipeline` diagnostics.
 pub fn pipeline_steps(normalize: Option<AssertInputNormalizeMode>) -> Vec<String> {
-    let mut steps = vec![
-        "load_rules".to_string(),
-        "resolve_input_format".to_string(),
-        "read_input_values".to_string(),
-        "validate_assert_rules".to_string(),
-    ];
+    pipeline_steps_for_mode(AssertValidationMode::Rules, normalize)
+}
+
+/// Ordered pipeline-step names for a selected assert validation mode.
+pub fn pipeline_steps_for_mode(
+    mode: AssertValidationMode,
+    normalize: Option<AssertInputNormalizeMode>,
+) -> Vec<String> {
+    let mut steps = match mode {
+        AssertValidationMode::Rules => vec![
+            "load_rules".to_string(),
+            "resolve_input_format".to_string(),
+            "read_input_values".to_string(),
+            "validate_assert_rules".to_string(),
+        ],
+        AssertValidationMode::Schema => vec![
+            "load_schema".to_string(),
+            "resolve_input_format".to_string(),
+            "read_input_values".to_string(),
+            "validate_assert_schema".to_string(),
+        ],
+    };
     if normalize.is_some() {
         steps.insert(3, "normalize_assert_input".to_string());
     }
@@ -77,11 +100,25 @@ pub fn pipeline_steps(normalize: Option<AssertInputNormalizeMode>) -> Vec<String
 
 /// Determinism guards applied by the `assert` command.
 pub fn deterministic_guards(normalize: Option<AssertInputNormalizeMode>) -> Vec<String> {
-    let mut guards = vec![
-        "rust_native_execution".to_string(),
-        "no_shell_interpolation_for_user_input".to_string(),
-        "rules_schema_deny_unknown_fields".to_string(),
-    ];
+    deterministic_guards_for_mode(AssertValidationMode::Rules, normalize)
+}
+
+/// Determinism guards applied by `assert` for a selected validation mode.
+pub fn deterministic_guards_for_mode(
+    mode: AssertValidationMode,
+    normalize: Option<AssertInputNormalizeMode>,
+) -> Vec<String> {
+    let mut guards = vec!["no_shell_interpolation_for_user_input".to_string()];
+    match mode {
+        AssertValidationMode::Rules => {
+            guards.push("rust_native_execution".to_string());
+            guards.push("rules_schema_deny_unknown_fields".to_string());
+        }
+        AssertValidationMode::Schema => {
+            guards.push("schema_validation_check_jsonschema_adapter".to_string());
+            guards.push("schema_validation_stage_output_deterministic".to_string());
+        }
+    }
     if let Some(mode) = normalize {
         guards.push("normalize_pipeline_stage_order_yq_jq_mlr".to_string());
         guards.push("normalize_pipeline_deterministic_sort_mlr".to_string());
@@ -164,7 +201,7 @@ pub fn schema_help_payload() -> Value {
         "schema": "dataq.assert.schema_help.v1",
         "description": "JSON Schema validation help for `dataq assert --schema`",
         "mode": {
-            "validator": "jsonschema crate (Rust native)",
+            "validator": "check-jsonschema adapter output (CLI integration)",
             "input_contract": "schema file must contain exactly one JSON/YAML value",
             "source_selection": "`--schema` and `--rules` are mutually exclusive"
         },
@@ -183,8 +220,9 @@ pub fn schema_help_payload() -> Value {
             "reason": "schema_mismatch",
             "actual": "actual value at instance path",
             "expected": {
-                "schema_path": "JSON Pointer into schema",
-                "message": "validator error message"
+                "schema_path": "JSON Pointer into schema (null when adapter omits schema pointer)",
+                "message": "validator error message",
+                "check_jsonschema_path": "raw path emitted by check-jsonschema"
             }
         },
         "example_schema": {
@@ -261,12 +299,14 @@ fn execute<R: Read>(
     let input_format = io::resolve_input_format(args.from, args.input.as_deref())
         .map_err(map_io_as_input_usage)?;
     let values = load_input_values(args, stdin, input_format)?;
-    let (values, trace) = normalize_input_values(values, normalize)?;
+    let (values, mut trace) = normalize_input_values(values, normalize)?;
     let report = match source {
-        ValidationSource::Rules(rules) => assert::execute_assert(&values, &rules),
-        ValidationSource::Schema(schema) => assert::execute_assert_with_schema(&values, &schema),
-    }
-    .map_err(map_engine_error)?;
+        ValidationSource::Rules(rules) => assert::execute_assert(&values, &rules)
+            .map_err(|error| map_engine_error_with_trace(error, trace.clone()))?,
+        ValidationSource::Schema(schema) => {
+            execute_schema_validation_stage(values.as_slice(), &schema, &mut trace)?
+        }
+    };
     Ok(ExecuteResult { report, trace })
 }
 
@@ -487,11 +527,78 @@ fn map_io_as_input_usage(error: IoError) -> CommandError {
     CommandError::input_usage(error.to_string())
 }
 
-fn map_engine_error(error: AssertValidationError) -> CommandError {
+fn map_engine_error_with_trace(
+    error: AssertValidationError,
+    trace: AssertPipelineTrace,
+) -> CommandError {
     match error {
-        AssertValidationError::InputUsage(message) => CommandError::input_usage(message),
-        AssertValidationError::Internal(message) => CommandError::internal(message),
+        AssertValidationError::InputUsage(message) => {
+            CommandError::input_usage_with_trace(message, trace)
+        }
+        AssertValidationError::Internal(message) => CommandError {
+            kind: CommandErrorKind::Internal(message),
+            trace,
+        },
     }
+}
+
+fn execute_schema_validation_stage(
+    values: &[Value],
+    schema: &Value,
+    trace: &mut AssertPipelineTrace,
+) -> Result<AssertReport, CommandError> {
+    let order = trace.stage_diagnostics.len() + 1;
+    let input_records = values.len();
+    let input_bytes = value_array_json_bytes(values) + value_json_bytes(schema);
+    let result = assert::execute_assert_with_schema(values, schema);
+    let tool_used = !matches!(
+        &result,
+        Err(AssertValidationError::InputUsage(message)) if message.starts_with("invalid schema:")
+    );
+    if tool_used {
+        trace.mark_tool_used("check-jsonschema");
+    }
+
+    let diagnostic = match &result {
+        Ok(report) => PipelineStageDiagnostic::success_with_metrics(
+            order,
+            "validate_assert_schema",
+            "check-jsonschema",
+            input_records,
+            report.mismatch_count,
+            PipelineStageMetrics {
+                input_bytes,
+                output_bytes: report_json_bytes(report),
+                duration_ms: 0,
+            },
+        ),
+        Err(_) => PipelineStageDiagnostic::failure_with_metrics(
+            order,
+            "validate_assert_schema",
+            "check-jsonschema",
+            input_records,
+            PipelineStageMetrics {
+                input_bytes,
+                output_bytes: 0,
+                duration_ms: 0,
+            },
+        ),
+    };
+    trace.stage_diagnostics.push(diagnostic);
+
+    result.map_err(|error| map_engine_error_with_trace(error, trace.clone()))
+}
+
+fn value_array_json_bytes(values: &[Value]) -> usize {
+    serde_json::to_vec(values).map_or(0, |bytes| bytes.len())
+}
+
+fn value_json_bytes(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
+
+fn report_json_bytes(report: &AssertReport) -> usize {
+    serde_json::to_vec(report).map_or(0, |bytes| bytes.len())
 }
 
 fn report_response(report: AssertReport) -> AssertCommandResponse {
@@ -535,13 +642,6 @@ impl CommandError {
         Self {
             kind: CommandErrorKind::InputUsage(message),
             trace,
-        }
-    }
-
-    fn internal(message: String) -> Self {
-        Self {
-            kind: CommandErrorKind::Internal(message),
-            trace: AssertPipelineTrace::default(),
         }
     }
 }
@@ -728,6 +828,9 @@ mod tests {
 
     #[test]
     fn maps_schema_mismatch_to_exit_two() {
+        if !check_jsonschema_available() {
+            return;
+        }
         let dir = tempdir().expect("tempdir");
         let schema_path = dir.path().join("schema.json");
         std::fs::write(
@@ -871,5 +974,12 @@ build:
         Command::new("jq").arg("--version").output().is_ok()
             && Command::new("yq").arg("--version").output().is_ok()
             && Command::new("mlr").arg("--version").output().is_ok()
+    }
+
+    fn check_jsonschema_available() -> bool {
+        Command::new("check-jsonschema")
+            .arg("--help")
+            .output()
+            .is_ok()
     }
 }
