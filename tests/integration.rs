@@ -22,6 +22,8 @@ mod ingest_api_flow;
 mod ingest_book_flow;
 #[path = "integration/ingest_doc_roundtrip.rs"]
 mod ingest_doc_roundtrip;
+#[path = "integration/ingest_jc_flow.rs"]
+mod ingest_jc_flow;
 #[path = "integration/ingest_notes_flow.rs"]
 mod ingest_notes_flow;
 #[path = "integration/ingest_yaml_jobs_flow.rs"]

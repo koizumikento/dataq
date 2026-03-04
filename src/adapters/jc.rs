@@ -8,89 +8,85 @@ use thiserror::Error;
 pub enum JcError {
     #[error("jc parser cannot be empty")]
     InvalidParser,
-    #[error("jc argument at index {index} cannot be empty")]
-    InvalidArgument { index: usize },
+    #[error("jc parser `{0}` may contain only ASCII letters, digits, `_`, and `-`")]
+    InvalidParserName(String),
     #[error("`jc` is not available in PATH")]
     Unavailable,
     #[error("failed to spawn jc: {0}")]
     Spawn(std::io::Error),
     #[error("failed to write jc stdin: {0}")]
     Stdin(std::io::Error),
-    #[error("jc execution failed (exit code: {code:?}): {stderr}")]
-    Execution { code: Option<i32>, stderr: String },
+    #[error("jc execution failed: {0}")]
+    Execution(String),
     #[error("jc output is not valid JSON: {0}")]
     Parse(serde_json::Error),
 }
 
-/// Converts raw command output into JSON using a jc parser.
-///
-/// `parser` is passed via `jc --parser <parser>`, and `parser_args` are appended
-/// as distinct argv entries in order.
-pub fn parse_with_parser(
-    input: &[u8],
-    parser: &str,
-    parser_args: &[String],
-) -> Result<Value, JcError> {
+pub fn parse_with_parser(parser: &str, input: &[u8]) -> Result<Value, JcError> {
     let jc_bin = std::env::var("DATAQ_JC_BIN").unwrap_or_else(|_| "jc".to_string());
-    parse_with_parser_and_bin(input, parser, parser_args, &jc_bin)
+    parse_with_parser_and_bin(parser, input, &jc_bin)
 }
 
-fn parse_with_parser_and_bin(
-    input: &[u8],
-    parser: &str,
-    parser_args: &[String],
-    bin: &str,
-) -> Result<Value, JcError> {
-    if parser.trim().is_empty() {
-        return Err(JcError::InvalidParser);
-    }
-
-    if let Some((index, _)) = parser_args
-        .iter()
-        .enumerate()
-        .find(|(_, argument)| argument.trim().is_empty())
-    {
-        return Err(JcError::InvalidArgument { index });
-    }
+fn parse_with_parser_and_bin(parser: &str, input: &[u8], bin: &str) -> Result<Value, JcError> {
+    let parser = normalize_parser(parser)?;
+    let parser_arg = format!("--{parser}");
 
     let mut child = match Command::new(bin)
-        .arg("--parser")
-        .arg(parser)
-        .args(parser_args)
+        .arg("--quiet")
+        .arg(parser_arg)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
     {
         Ok(child) => child,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Err(JcError::Unavailable),
-        Err(err) => return Err(JcError::Spawn(err)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(JcError::Unavailable);
+        }
+        Err(error) => return Err(JcError::Spawn(error)),
     };
 
     if let Some(stdin) = child.stdin.as_mut() {
-        if let Err(err) = stdin.write_all(input) {
-            if err.kind() != std::io::ErrorKind::BrokenPipe {
-                return Err(JcError::Stdin(err));
-            }
+        if let Err(error) = stdin.write_all(input)
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(JcError::Stdin(error));
         }
     } else {
-        return Err(JcError::Execution {
-            code: None,
-            stderr: "jc stdin was not piped as expected".to_string(),
-        });
+        return Err(JcError::Execution(
+            "jc stdin was not piped as expected".to_string(),
+        ));
     }
 
     let output = child.wait_with_output().map_err(JcError::Spawn)?;
     if !output.status.success() {
         let stderr = String::from_utf8(output.stderr)
             .unwrap_or_else(|_| "failed to decode jc stderr".to_string());
-        return Err(JcError::Execution {
-            code: output.status.code(),
-            stderr: stderr.trim().to_string(),
-        });
+        return Err(JcError::Execution(stderr.trim().to_string()));
     }
 
     serde_json::from_slice(&output.stdout).map_err(JcError::Parse)
+}
+
+fn normalize_parser(parser: &str) -> Result<String, JcError> {
+    let trimmed = parser.trim();
+    if trimmed.is_empty() {
+        return Err(JcError::InvalidParser);
+    }
+
+    let stripped = trimmed.trim_start_matches('-');
+    if stripped.is_empty() {
+        return Err(JcError::InvalidParser);
+    }
+
+    if stripped
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Ok(stripped.to_ascii_lowercase());
+    }
+
+    Err(JcError::InvalidParserName(trimmed.to_string()))
 }
 
 #[cfg(test)]
@@ -98,74 +94,121 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use serde_json::json;
+    use super::{JcError, normalize_parser, parse_with_parser_and_bin};
 
-    use super::{JcError, parse_with_parser_and_bin};
+    #[test]
+    fn parser_name_normalization_accepts_trimmed_and_prefixed_values() {
+        assert_eq!(
+            normalize_parser("ifconfig").expect("valid parser"),
+            "ifconfig"
+        );
+        assert_eq!(
+            normalize_parser(" --IFCONFIG ").expect("valid parser"),
+            "ifconfig"
+        );
+    }
+
+    #[test]
+    fn parser_name_normalization_rejects_invalid_values() {
+        assert!(matches!(normalize_parser(""), Err(JcError::InvalidParser)));
+        assert!(matches!(
+            normalize_parser("--"),
+            Err(JcError::InvalidParser)
+        ));
+        assert!(matches!(
+            normalize_parser("if config"),
+            Err(JcError::InvalidParserName(_))
+        ));
+    }
 
     #[test]
     fn maps_unavailable_binary_to_unavailable_error() {
-        let err = parse_with_parser_and_bin(b"", "ifconfig", &[], "/definitely-missing/jc")
+        let error = parse_with_parser_and_bin("ifconfig", b"{}", "/definitely-missing/jc")
             .expect_err("missing binary should fail");
-        assert!(matches!(err, JcError::Unavailable));
+        assert!(matches!(error, JcError::Unavailable));
+    }
+
+    #[test]
+    fn parses_json_output_when_command_succeeds() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin = write_test_script(
+            temp.path().join("fake-jc"),
+            r#"
+parser=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --quiet)
+      shift
+      ;;
+    --*)
+      parser="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+cat >/dev/null
+if [ "$parser" = "--ifconfig" ]; then
+  printf '{"b":2,"a":1}\n'
+  exit 0
+fi
+echo "unexpected parser: $parser" 1>&2
+exit 9
+"#,
+        );
+
+        let payload =
+            parse_with_parser_and_bin("ifconfig", b"raw-input", bin.to_str().expect("utf8 path"))
+                .expect("parse payload");
+        assert_eq!(payload["a"], 1);
+        assert_eq!(payload["b"], 2);
     }
 
     #[test]
     fn maps_non_zero_exit_to_execution_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let temp = tempfile::tempdir().expect("tempdir");
         let bin = write_test_script(
-            dir.path().join("fake-jc"),
-            "cat >/dev/null\necho 'jc failed in test' 1>&2\nexit 7",
+            temp.path().join("fake-jc"),
+            r#"
+cat >/dev/null
+echo "jc failed in test" 1>&2
+exit 4
+"#,
         );
 
-        let err = parse_with_parser_and_bin(b"raw", "ifconfig", &[], bin.to_str().expect("utf8"))
-            .expect_err("non-zero exit should fail");
-
-        match err {
-            JcError::Execution { code, stderr } => {
-                assert_eq!(code, Some(7));
-                assert_eq!(stderr, "jc failed in test");
-            }
-            JcError::Stdin(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {}
-            other => panic!("expected execution-like failure, got {other:?}"),
-        }
+        let error =
+            parse_with_parser_and_bin("ifconfig", b"raw-input", bin.to_str().expect("utf8 path"))
+                .expect_err("non-zero exit should fail");
+        assert!(matches!(error, JcError::Execution(_)));
     }
 
     #[test]
-    fn passes_parser_and_args_as_distinct_argv_entries() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn maps_invalid_json_output_to_parse_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
         let bin = write_test_script(
-            dir.path().join("fake-jc"),
-            r#"cat >/dev/null
-if [ "$1" != "--parser" ] || [ "$2" != "ifconfig" ] || [ "$3" != "--raw" ] || [ "$4" != "--quiet" ]; then
-  echo "unexpected args: $*" 1>&2
-  exit 9
-fi
-printf '{"ok":true}'"#,
+            temp.path().join("fake-jc"),
+            r#"
+cat >/dev/null
+echo "not-json"
+"#,
         );
-        let parser_args = vec!["--raw".to_string(), "--quiet".to_string()];
 
-        let value = parse_with_parser_and_bin(
-            b"eth0 ...",
-            "ifconfig",
-            &parser_args,
-            bin.to_str().expect("utf8"),
-        )
-        .expect("parser should succeed");
-
-        assert_eq!(value, json!({ "ok": true }));
+        let error =
+            parse_with_parser_and_bin("ifconfig", b"raw-input", bin.to_str().expect("utf8 path"))
+                .expect_err("invalid json should fail");
+        assert!(matches!(error, JcError::Parse(_)));
     }
 
     fn write_test_script(path: PathBuf, body: &str) -> PathBuf {
-        let tmp_path = path.with_extension("tmp");
         let script = format!("#!/bin/sh\n{body}\n");
-        fs::write(&tmp_path, script).expect("write script");
+        fs::write(&path, script).expect("write script");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let permissions = fs::Permissions::from_mode(0o755);
-            fs::set_permissions(&tmp_path, permissions).expect("chmod");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
         }
-        fs::rename(&tmp_path, &path).expect("rename script");
         path
     }
 }
