@@ -1,3 +1,4 @@
+pub mod ajv;
 pub mod csvkit;
 pub mod check_jsonschema;
 pub mod duckdb;
