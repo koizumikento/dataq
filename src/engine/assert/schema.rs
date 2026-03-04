@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
+use crate::adapters::check_jsonschema::{self, CheckJsonSchemaMismatch, CheckJsonSchemaValidation};
 use crate::domain::rules::{AssertReport, MismatchEntry};
 
 use super::AssertValidationError;
@@ -15,6 +16,7 @@ pub enum SchemaValidationEngine {
     #[default]
     Jsonschema,
     Ajv,
+    Checkjs,
 }
 
 impl SchemaValidationEngine {
@@ -22,6 +24,7 @@ impl SchemaValidationEngine {
         match self {
             Self::Jsonschema => "jsonschema",
             Self::Ajv => "ajv",
+            Self::Checkjs => "checkjs",
         }
     }
 }
@@ -35,9 +38,22 @@ pub fn validate_with_engine(
     schema: &Value,
     engine: SchemaValidationEngine,
 ) -> Result<AssertReport, AssertValidationError> {
+    validate_with_engine_and_flags(values, schema, engine, None, None)
+}
+
+pub fn validate_with_engine_and_flags(
+    values: &[Value],
+    schema: &Value,
+    engine: SchemaValidationEngine,
+    schema_flag: Option<&str>,
+    input_flag: Option<&str>,
+) -> Result<AssertReport, AssertValidationError> {
     match engine {
         SchemaValidationEngine::Jsonschema => validate_with_jsonschema(values, schema),
         SchemaValidationEngine::Ajv => validate_with_ajv(values, schema),
+        SchemaValidationEngine::Checkjs => {
+            validate_with_check_jsonschema(values, schema, schema_flag, input_flag)
+        }
     }
 }
 
@@ -94,6 +110,53 @@ fn validate_with_ajv(
     build_report(mismatches)
 }
 
+fn validate_with_check_jsonschema(
+    values: &[Value],
+    schema: &Value,
+    schema_flag: Option<&str>,
+    input_flag: Option<&str>,
+) -> Result<AssertReport, AssertValidationError> {
+    validator_for(schema)
+        .map_err(|error| AssertValidationError::InputUsage(format!("invalid schema: {error}")))?;
+
+    match check_jsonschema::validate_rows_with_overrides(values, schema, schema_flag, input_flag) {
+        Ok(CheckJsonSchemaValidation::Matched) => Ok(AssertReport {
+            matched: true,
+            mismatch_count: 0,
+            mismatches: Vec::new(),
+        }),
+        Ok(CheckJsonSchemaValidation::Mismatched(errors)) => {
+            let mut mismatches = errors
+                .into_iter()
+                .map(|error| mismatch_from_check_jsonschema(values, error))
+                .collect::<Vec<_>>();
+            sort_mismatches(&mut mismatches);
+            Ok(AssertReport {
+                matched: mismatches.is_empty(),
+                mismatch_count: mismatches.len(),
+                mismatches,
+            })
+        }
+        Err(error) => Err(AssertValidationError::InputUsage(error.to_string())),
+    }
+}
+
+fn mismatch_from_check_jsonschema(
+    values: &[Value],
+    error: CheckJsonSchemaMismatch,
+) -> MismatchEntry {
+    let row_value = values.get(error.row_index).cloned().unwrap_or(Value::Null);
+    let tokens = parse_json_path(error.path.as_str());
+
+    MismatchEntry {
+        path: row_path_from_json_path(error.row_index, tokens.as_deref()),
+        rule_kind: "schema".to_string(),
+        reason: "schema_mismatch".to_string(),
+        actual: value_at_json_path(&row_value, error.path.as_str(), tokens.as_deref()),
+        expected: checkjsonschema_expected_payload(error.path.as_str(), error.message.as_str()),
+    }
+}
+
 fn build_report(mut mismatches: Vec<MismatchEntry>) -> Result<AssertReport, AssertValidationError> {
     sort_mismatches(&mut mismatches);
     Ok(AssertReport {
@@ -145,6 +208,25 @@ fn schema_expected_payload(
         payload.insert("keyword".to_string(), Value::String(keyword.to_string()));
     }
     payload.insert("message".to_string(), Value::String(message.to_string()));
+    Value::Object(payload)
+}
+
+fn checkjsonschema_expected_payload(instance_path: &str, message: &str) -> Value {
+    let mut payload = Map::new();
+    payload.insert(
+        "engine".to_string(),
+        Value::String(SchemaValidationEngine::Checkjs.as_str().to_string()),
+    );
+    payload.insert(
+        "instance_path".to_string(),
+        Value::String(instance_path.to_string()),
+    );
+    payload.insert("schema_path".to_string(), Value::Null);
+    payload.insert("message".to_string(), Value::String(message.to_string()));
+    payload.insert(
+        "check_jsonschema_path".to_string(),
+        Value::String(instance_path.to_string()),
+    );
     Value::Object(payload)
 }
 
@@ -352,6 +434,142 @@ fn schema_keyword_from_path(path: &str) -> Option<String> {
 fn first_non_empty_line(bytes: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(bytes).ok()?;
     text.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JsonPathToken {
+    Key(String),
+    Index(usize),
+}
+
+fn value_at_json_path(root: &Value, path: &str, tokens: Option<&[JsonPathToken]>) -> Value {
+    let Some(tokens) = tokens else {
+        if path == "$" {
+            return root.clone();
+        }
+        return Value::Null;
+    };
+
+    let mut current = root;
+    for token in tokens {
+        match token {
+            JsonPathToken::Key(key) => match current {
+                Value::Object(map) => {
+                    let Some(next) = map.get(key) else {
+                        return Value::Null;
+                    };
+                    current = next;
+                }
+                _ => return Value::Null,
+            },
+            JsonPathToken::Index(index) => match current {
+                Value::Array(items) => {
+                    let Some(next) = items.get(*index) else {
+                        return Value::Null;
+                    };
+                    current = next;
+                }
+                _ => return Value::Null,
+            },
+        }
+    }
+    current.clone()
+}
+
+fn row_path_from_json_path(row_index: usize, tokens: Option<&[JsonPathToken]>) -> String {
+    let mut path = format!("$[{row_index}]");
+    let Some(tokens) = tokens else {
+        return path;
+    };
+    for token in tokens {
+        match token {
+            JsonPathToken::Key(key) => push_object_key_segment(&mut path, key),
+            JsonPathToken::Index(index) => {
+                path.push('[');
+                path.push_str(&index.to_string());
+                path.push(']');
+            }
+        }
+    }
+    path
+}
+
+fn parse_json_path(path: &str) -> Option<Vec<JsonPathToken>> {
+    if !path.starts_with('$') {
+        return None;
+    }
+
+    let bytes = path.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 1usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'.' => {
+                index += 1;
+                let start = index;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                if start == index {
+                    return None;
+                }
+                tokens.push(JsonPathToken::Key(path[start..index].to_string()));
+            }
+            b'[' => {
+                index += 1;
+                if index >= bytes.len() {
+                    return None;
+                }
+                if bytes[index] == b'\'' || bytes[index] == b'"' {
+                    let quote = bytes[index];
+                    index += 1;
+                    let mut segment = String::new();
+                    while index < bytes.len() {
+                        let current = bytes[index];
+                        if current == b'\\' {
+                            index += 1;
+                            if index >= bytes.len() {
+                                return None;
+                            }
+                            segment.push(bytes[index] as char);
+                            index += 1;
+                            continue;
+                        }
+                        if current == quote {
+                            break;
+                        }
+                        segment.push(current as char);
+                        index += 1;
+                    }
+                    if index >= bytes.len() || bytes[index] != quote {
+                        return None;
+                    }
+                    index += 1;
+                    if index >= bytes.len() || bytes[index] != b']' {
+                        return None;
+                    }
+                    index += 1;
+                    tokens.push(JsonPathToken::Key(segment));
+                } else {
+                    let start = index;
+                    while index < bytes.len() && bytes[index].is_ascii_digit() {
+                        index += 1;
+                    }
+                    if start == index || index >= bytes.len() || bytes[index] != b']' {
+                        return None;
+                    }
+                    let parsed = path[start..index].parse::<usize>().ok()?;
+                    index += 1;
+                    tokens.push(JsonPathToken::Index(parsed));
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    Some(tokens)
 }
 
 fn value_at_pointer(root: &Value, pointer: &str) -> Value {

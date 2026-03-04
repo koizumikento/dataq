@@ -64,7 +64,7 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 | `ingest notes` | `nb`, `jq` |
 | `ingest book` | `jq`（`DATAQ_INGEST_BOOK_VERIFY_MDBOOK` 有効時は `mdbook` も必要） |
 | `scan text` | `rg`（`--jq-project` を使う場合は `jq` も必要） |
-| `transform rowset` | `jq`, `mlr`（`--emit-pipeline` の stage2 tool label は `sqlite`） |
+| `transform rowset` | `jq`, `mlr`（`--emit-pipeline` の stage2 tool label は `mlr`） |
 | `transform sql` | `duckdb` |
 
 補足:
@@ -96,8 +96,8 @@ dataq [--emit-pipeline] <command> [options]
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
 | `scan text` | テキストを正規表現で走査し構造化結果を出力 | `--pattern <regex>` |
-| `transform rowset` | `jq -> sql(sqlite)` の2段でrowsetを変換しJSON配列を出力 | `--input <path|->` `--engine <sqlite>` `--jq-filter <filter>` `--mlr <verb...>` |
-| `transform sql` | `duckdb` でSQL変換しJSON配列を出力 | `--input <path|->` `--query <sql>` `--duckdb-path <path>` |
+| `transform rowset` | `jq -> mlr` の2段でrowsetを変換しJSON配列を出力 | `--input <path|->` `--engine <sqlite>` `--jq-filter <filter>` `--mlr <verb...>` |
+| `transform sql` | `duckdb` でSQL変換しJSON配列を出力 | `--input <path|->` `--query <sql>` `--engine <duckdb>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
 | `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
@@ -165,13 +165,13 @@ dataq aggregate --input orders.json --group-by team --metric avg --target price
 # テキスト走査（policy mode ではヒット時に終了コード2）
 dataq scan text --pattern 'TODO|FIXME' --path . --glob '*.rs' --policy-mode
 
-# rowset変換（stage1: jq, stage2: sql(sqlite)）
+# rowset変換（stage1: jq, stage2: mlr）
 dataq transform rowset --input orders.json --engine sqlite --jq-filter '.' --mlr stats1 -a mean -f price -g team
 
 # SQL変換（DuckDB）
 dataq transform sql --input orders.json \
-  --query 'SELECT team, AVG(price) AS avg_price FROM input GROUP BY team ORDER BY team' \
-  --duckdb-path .dataq/tmp/orders.duckdb
+  --engine duckdb \
+  --query 'SELECT team, AVG(price) AS avg_price FROM input GROUP BY team ORDER BY team'
 
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
@@ -321,7 +321,7 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 - ルールは `extends` で再利用可能（親相対パス解決、循環/欠損/不正形式は入力不正）
 - `extends` マージ: `required_keys`/`forbid_keys` は和集合、`fields` はパス後勝ち、`count` は最後に定義された値を採用
 - `--schema <path>`: JSON Schema で検証
-- `--engine <jsonschema|ajv>`: `--schema` 時の検証エンジンを選択（既定: `jsonschema`、`ajv` は `ajv` CLI が必要で `DATAQ_AJV_BIN` で上書き可）
+- `--engine <jsonschema|ajv|checkjs>`: `--schema` 時の検証エンジンを選択（既定: `jsonschema`。`ajv` は `ajv` CLI と `DATAQ_AJV_BIN`、`checkjs` は `check-jsonschema` CLI と `DATAQ_CHECK_JSONSCHEMA_BIN` で上書き可）
 - `--normalize <github-actions-jobs|gitlab-ci-jobs>`: 生のCI定義を `yq -> jq -> mlr` の3段でジョブ単位レコードへ正規化してから検証（`yq`/`jq`/`mlr` 必須）
 - `--rules` と `--schema` は同時指定不可（入力不正として終了コード `3`）
 - `--rules-help`: `--rules` 用ルール仕様を機械可読JSONで出力して終了（終了コード `0`）
@@ -552,15 +552,15 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 
 ### 10. `transform rowset`
 
-固定2段 (`jq -> sql`) で rowset を変換し、JSON配列で返す（現状の SQL engine は `sqlite`）。
+固定2段 (`jq -> mlr`) で rowset を変換し、JSON配列で返す（CLI 互換のため `--engine sqlite` を受け付け）。
 
 - `--input <path|->`: 入力（`-` は stdin）
-- `--engine <sqlite>`: stage2 の SQL engine（既定値 `sqlite`）
+- `--engine <sqlite>`: stage2 engine セレクタ（既定値 `sqlite`）
 - `--jq-filter <filter>`: stage1 の jq filter
-- `--mlr <verb...>`: stage2 アダプタ引数列（sqlite path で使用）
+- `--mlr <verb...>`: stage2 (`mlr`) アダプタ引数列
 - 出力は JSON 配列固定
-- `jq`/`sqlite` 実行や filter/args 不正は終了コード `3`
-- `--emit-pipeline` では `transform_rowset_jq`, `transform_rowset_mlr` を stage 診断として出力（stage2 `tool` は `sqlite`）
+- `jq`/`mlr` 実行や filter/args 不正は終了コード `3`
+- `--emit-pipeline` では `transform_rowset_jq`, `transform_rowset_mlr` を stage 診断として出力（stage2 `tool` は `mlr`）
 
 ### 11. `transform sql`
 
@@ -568,7 +568,7 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 
 - `--input <path|->`: 入力（`-` は stdin）
 - `--query <sql>`: 実行する SQL（決定性が必要な場合は `ORDER BY` を明示）
-- `--duckdb-path <path>`: 実行に使う DuckDB ファイルパス
+- `--engine <duckdb>`: SQL 実行エンジン（現状は `duckdb` 固定）
 - 出力は JSON 配列固定
 - `duckdb` 不在・`--query` 不正・SQL実行失敗・入力不正は終了コード `3`
 - 終了コード:
@@ -683,15 +683,15 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock>`
+- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|ingest-notes|ingest-book|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
   - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `ingest.notes`, `ingest-book`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
-  - `assert` の `notes` には `--schema` 経路の `check-jsonschema` 契約メタデータを含む
+  - `assert` の `notes` には `--schema` 経路の既定エンジン（`jsonschema`）と任意エンジン（`ajv`/`checkjs`）を含む
 
 ### 18. `emit plan`
 
@@ -703,11 +703,12 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
   - `command`: 対象サブコマンド
   - `args`: 解決に使った引数配列
   - `stages`: `order`, `step`, `tool`, `depends_on` を含む段情報
-  - `tools`: `jq|yq|mlr|check-jsonschema` の期待利用有無（`expected`）
+  - `tools`: `jq|yq|mlr|ajv|duckdb|check-jsonschema` の期待利用有無（`expected`）
 - `--args` は JSON 文字列で渡す（例: `'["--normalize","github-actions-jobs"]'`）
-- `assert --schema` を解決した場合、`stages` には
-  `validate_assert_schema_with_check_jsonschema` が入り、`tools` で
-  `check-jsonschema.expected=true` になる
+- `assert --schema` の既定 `stages` は `validate_assert_schema_with_jsonschema`
+  - `--engine=ajv` で `validate_assert_schema_with_ajv`
+  - `--engine=checkjs` で `validate_assert_schema_with_check_jsonschema`
+- `assert` 向け `--args` では runtime と同様に、`--engine/--schema-engine` は `--schema` と併用時のみ有効
 - 終了コード:
   - `0`: 計画生成成功
   - `3`: 未対応サブコマンドまたは `--args` 形式不正

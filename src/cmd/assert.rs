@@ -76,6 +76,28 @@ pub fn pipeline_steps(normalize: Option<AssertInputNormalizeMode>) -> Vec<String
     steps
 }
 
+/// Ordered pipeline-step names used for `assert --schema` diagnostics.
+pub fn schema_pipeline_steps(
+    normalize: Option<AssertInputNormalizeMode>,
+    schema_engine: AssertSchemaEngine,
+) -> Vec<String> {
+    let validate_step = match schema_engine {
+        AssertSchemaEngine::Jsonschema => "validate_assert_schema_with_jsonschema",
+        AssertSchemaEngine::Ajv => "validate_assert_schema_with_ajv",
+        AssertSchemaEngine::Checkjs => "validate_assert_schema_with_check_jsonschema",
+    };
+    let mut steps = vec![
+        "load_schema".to_string(),
+        "resolve_input_format".to_string(),
+        "read_input_values".to_string(),
+        validate_step.to_string(),
+    ];
+    if normalize.is_some() {
+        steps.insert(3, "normalize_assert_input".to_string());
+    }
+    steps
+}
+
 /// Determinism guards applied by the `assert` command.
 pub fn deterministic_guards(
     normalize: Option<AssertInputNormalizeMode>,
@@ -173,15 +195,17 @@ pub fn schema_help_payload() -> Value {
         "description": "JSON Schema validation help for `dataq assert --schema`",
         "mode": {
             "default_engine": "jsonschema",
-            "available_engines": ["jsonschema", "ajv"],
+            "available_engines": ["jsonschema", "ajv", "checkjs"],
             "ajv_engine": "requires `ajv` CLI (override binary with `DATAQ_AJV_BIN`)",
+            "checkjs_engine": "requires `check-jsonschema` CLI (override binary with `DATAQ_CHECK_JSONSCHEMA_BIN`)",
             "input_contract": "schema file must contain exactly one JSON/YAML value",
             "source_selection": "`--schema` and `--rules` are mutually exclusive"
         },
         "usage": [
             "dataq assert --schema schema.json < input.json",
             "dataq assert --input input.json --schema schema.json",
-            "dataq assert --input input.json --schema schema.json --engine ajv"
+            "dataq assert --input input.json --schema schema.json --engine ajv",
+            "dataq assert --input input.json --schema schema.json --engine checkjs"
         ],
         "result_contract": {
             "exit_code_0": "all rows matched schema",
@@ -192,9 +216,9 @@ pub fn schema_help_payload() -> Value {
             "path": "$[row].<field> (canonicalized from JSON Pointer)",
             "rule_kind": "schema",
             "reason": "schema_mismatch",
-            "actual": "actual value at instance path",
-            "expected": {
-                "engine": "schema engine ID (`jsonschema` | `ajv`)",
+                "actual": "actual value at instance path",
+                "expected": {
+                "engine": "schema engine ID (`jsonschema` | `ajv` | `checkjs`)",
                 "instance_path": "JSON Pointer instance path",
                 "schema_path": "JSON Pointer into schema",
                 "keyword": "validator keyword (optional)",
@@ -234,6 +258,8 @@ pub fn run_with_stdin_and_normalize_with_trace<R: Read>(
         stdin,
         normalize,
         AssertSchemaEngine::Jsonschema,
+        None,
+        None,
     )
 }
 
@@ -242,8 +268,17 @@ pub fn run_with_stdin_and_normalize_with_trace_and_engine<R: Read>(
     stdin: R,
     normalize: Option<AssertInputNormalizeMode>,
     schema_engine: AssertSchemaEngine,
+    schema_flag: Option<&str>,
+    input_flag: Option<&str>,
 ) -> (AssertCommandResponse, AssertPipelineTrace) {
-    match execute(args, stdin, normalize, schema_engine) {
+    match execute(
+        args,
+        stdin,
+        normalize,
+        schema_engine,
+        schema_flag,
+        input_flag,
+    ) {
         Ok(result) => (report_response(result.report), result.trace),
         Err(error) => {
             let response = match error.kind {
@@ -285,6 +320,8 @@ fn execute<R: Read>(
     stdin: R,
     normalize: Option<AssertInputNormalizeMode>,
     schema_engine: AssertSchemaEngine,
+    schema_flag: Option<&str>,
+    input_flag: Option<&str>,
 ) -> Result<ExecuteResult, CommandError> {
     let source = resolve_validation_source(args)?;
     if matches!(source, ValidationSource::Rules(_))
@@ -294,6 +331,14 @@ fn execute<R: Read>(
             "`--engine` is supported only with `--schema`".to_string(),
         ));
     }
+    if (schema_flag.is_some() || input_flag.is_some())
+        && !matches!(schema_engine, AssertSchemaEngine::Checkjs)
+    {
+        return Err(CommandError::input_usage(
+            "`--schema-flag` and `--input-flag` are supported only with schema engine `checkjs`"
+                .to_string(),
+        ));
+    }
     let input_format = io::resolve_input_format(args.from, args.input.as_deref())
         .map_err(map_io_as_input_usage)?;
     let values = load_input_values(args, stdin, input_format)?;
@@ -301,10 +346,18 @@ fn execute<R: Read>(
     let report = match source {
         ValidationSource::Rules(rules) => assert::execute_assert(&values, &rules),
         ValidationSource::Schema(schema) => {
-            if matches!(schema_engine, AssertSchemaEngine::Ajv) {
-                trace.mark_tool_used("ajv");
+            match schema_engine {
+                AssertSchemaEngine::Ajv => trace.mark_tool_used("ajv"),
+                AssertSchemaEngine::Checkjs => trace.mark_tool_used("check-jsonschema"),
+                AssertSchemaEngine::Jsonschema => {}
             }
-            assert::execute_assert_with_schema_and_engine(&values, &schema, schema_engine)
+            assert::execute_assert_with_schema_and_engine_and_flags(
+                &values,
+                &schema,
+                schema_engine,
+                schema_flag,
+                input_flag,
+            )
         }
     }
     .map_err(map_engine_error)?;

@@ -39,19 +39,19 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock>`
+  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|ingest-notes|ingest-book|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
   - `--command recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `ingest.notes`, `ingest-book`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
   - `output_fields`
   - `exit_codes`
   - `notes`
-  - `assert` の `notes` には `--schema` 経路の `check-jsonschema` 契約メタデータを含む
+  - `assert` の `notes` には `--schema` 既定エンジン（`jsonschema`）と任意エンジン（`ajv`/`checkjs`）を含む
 - 終了コード:
   - `0`: 成功
   - `3`: 入力不正（例: `--command` に未知値）
@@ -70,10 +70,11 @@ dataq [--emit-pipeline] <command> [options]
   - `command`: 対象サブコマンド名
   - `args`: 計画解決に使った引数配列
   - `stages`: 段情報配列（`order`, `step`, `tool`, `depends_on`）
-  - `tools`: `jq|yq|mlr|check-jsonschema` の期待利用有無（`expected`）
-- `assert --schema` を解決した場合:
-  - `stages` に `validate_assert_schema_with_check_jsonschema`
-  - `tools` に `check-jsonschema.expected=true`
+  - `tools`: `jq|yq|mlr|ajv|duckdb|check-jsonschema` の期待利用有無（`expected`）
+- `assert --schema` の既定 stage は `validate_assert_schema_with_jsonschema`
+  - `--engine=ajv` で `validate_assert_schema_with_ajv`
+  - `--engine=checkjs` で `validate_assert_schema_with_check_jsonschema`
+- `assert` 向け `--args` では runtime と同様に、`--engine/--schema-engine` は `--schema` と併用時のみ有効
 - 終了コード:
   - `0`: 成功
   - `3`: 未対応サブコマンドまたは `--args` 形式不正
@@ -254,25 +255,25 @@ dataq [--emit-pipeline] <command> [options]
 - 出力: JSON 配列（stdout）
 - ステージ:
   - stage1 `jq`: enrichment/type shaping
-  - stage2 `sql(sqlite)`: aggregation/join/statistics
+  - stage2 `mlr`: aggregation/join/statistics
 - 異常時契約:
   - tool 実行失敗または filter/args 不正は exit `3`
 - 実行方式:
-  - `jq` / sqlite path を明示的引数配列で実行（シェル展開なし）
-  - `--emit-pipeline` で `stage_diagnostics` に `transform_rowset_jq`, `transform_rowset_mlr` を出力（stage2 `tool` は `sqlite`）
+  - `jq` / `mlr` を明示的引数配列で実行（シェル展開なし）
+  - `--emit-pipeline` で `stage_diagnostics` に `transform_rowset_jq`, `transform_rowset_mlr` を出力（stage2 `tool` は `mlr`）
   - stage ごとに `input_records` / `output_records` を出力
 
 ## `transform sql` コマンド契約（MVP）
 
 - コマンド:
-  - `dataq transform sql --input <path|-> --query <sql> --duckdb-path <path>`
+  - `dataq transform sql --input <path|-> --query <sql> --engine <duckdb>`
 - 出力: JSON 配列（stdout）
 - 実行方式:
   - 入力 rowset を DuckDB へロードし、`--query` を実行
   - 決定的な行順が必要なクエリは `ORDER BY` を明示
   - `duckdb` は明示的引数配列で実行（シェル展開なし）
 - 例:
-  - `dataq transform sql --input orders.json --query 'SELECT team, AVG(price) AS avg_price FROM input GROUP BY team ORDER BY team' --duckdb-path .dataq/tmp/orders.duckdb`
+  - `dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, AVG(price) AS avg_price FROM input GROUP BY team ORDER BY team'`
 - 終了コード:
   - `0`: SQL 実行成功
   - `3`: 入力/使用エラー（`duckdb` 不在、`--query` 不正、SQL実行失敗、入力不正）
@@ -331,7 +332,7 @@ dataq [--emit-pipeline] <command> [options]
 - `dataq assert --rules-help` で `--rules` 用ルール仕様を機械可読JSONで出力
 - `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
-- `dataq assert --schema <path> --engine <jsonschema|ajv>` で schema 検証エンジンを選択可能（既定: `jsonschema`、`ajv` は `ajv` CLI が必要で `DATAQ_AJV_BIN` で上書き可能）
+- `dataq assert --schema <path> --engine <jsonschema|ajv|checkjs>` で schema 検証エンジンを選択可能（既定: `jsonschema`。`ajv` は `ajv` CLI と `DATAQ_AJV_BIN`、`checkjs` は `check-jsonschema` CLI と `DATAQ_CHECK_JSONSCHEMA_BIN` で上書き可能）
 - schema mismatch の `mismatches[].expected` には `engine`, `instance_path`, `schema_path`, `keyword`（任意）, `message` を正規化して出力
 - `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義を `yq -> jq -> mlr` の固定3段でジョブ単位レコードへ正規化してから `--rules` 検証可能（`yq`/`jq`/`mlr` 必須）
 - 継続利用向けには `dataq ingest yaml-jobs` で正規化結果を固定してから `dataq assert --rules ...` へ接続する運用を推奨

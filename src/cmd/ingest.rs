@@ -693,6 +693,7 @@ pub fn run_book_with_trace(
     };
 
     if args.verify_mdbook_meta {
+        trace.mark_tool_used("mdbook");
         let diagnostic = match mdbook::verify_book_metadata(args.root.as_path()) {
             Ok(()) => {
                 PipelineStageDiagnostic::success(2, "ingest_book_mdbook_meta", "mdbook", 1, 1)
@@ -1087,6 +1088,38 @@ mod tests {
         assert_eq!(response.exit_code, 3);
         assert_eq!(response.payload["error"], json!("input_usage_error"));
         assert!(trace.used_tools.is_empty());
+    }
+
+    #[test]
+    fn run_book_with_verify_mdbook_meta_tracks_mdbook_tool_usage() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            root.join("book.toml"),
+            r#"[book]
+title = "Sample Book"
+authors = ["alice"]
+language = "en"
+src = "src"
+"#,
+        )
+        .expect("write book.toml");
+        fs::write(src.join("SUMMARY.md"), "- [Intro](intro.md)\n").expect("write summary");
+        fs::write(src.join("intro.md"), "# Intro\n").expect("write intro");
+
+        let args = IngestBookCommandArgs {
+            root: root.to_path_buf(),
+            include_files: false,
+            verify_mdbook_meta: true,
+        };
+
+        let (_response, trace) = run_book_with_trace(&args);
+        assert!(
+            trace.used_tools.iter().any(|tool| tool == "mdbook"),
+            "expected mdbook to be tracked when verify_mdbook_meta=true"
+        );
     }
 
     #[test]

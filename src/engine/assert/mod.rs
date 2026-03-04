@@ -31,5 +31,18 @@ pub fn execute_assert_with_schema_and_engine(
     schema: &Value,
     engine: SchemaValidationEngine,
 ) -> Result<AssertReport, AssertValidationError> {
-    self::schema::validate_with_engine(values, schema, engine)
+    self::schema::validate_with_engine_and_flags(values, schema, engine, None, None)
+}
+
+/// Executes assert validation against loaded input values and JSON Schema
+/// with an explicit schema-validation engine and optional external flag
+/// overrides.
+pub fn execute_assert_with_schema_and_engine_and_flags(
+    values: &[Value],
+    schema: &Value,
+    engine: SchemaValidationEngine,
+    schema_flag: Option<&str>,
+    input_flag: Option<&str>,
+) -> Result<AssertReport, AssertValidationError> {
+    self::schema::validate_with_engine_and_flags(values, schema, engine, schema_flag, input_flag)
 }
