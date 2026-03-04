@@ -630,10 +630,6 @@ fn execute_assert(args: &Map<String, Value>) -> ToolExecution {
         return result;
     }
 
-    let validation_mode = match (&rules_source, &schema_source) {
-        (None, Some(_)) => assert_cmd::AssertValidationMode::Schema,
-        _ => assert_cmd::AssertValidationMode::Rules,
-    };
     let report = PipelineReport::new(
         "assert",
         PipelineInput::new(assert_pipeline_sources(
@@ -642,8 +638,8 @@ fn execute_assert(args: &Map<String, Value>) -> ToolExecution {
             rules_source.as_ref(),
             schema_source.as_ref(),
         )),
-        assert_cmd::pipeline_steps_for_mode(validation_mode, None),
-        assert_cmd::deterministic_guards_for_mode(validation_mode, None),
+        assert_cmd::pipeline_steps(None),
+        assert_cmd::deterministic_guards(None),
     );
     let pipeline = pipeline_as_value(report).ok();
     ToolExecution { pipeline, ..result }
@@ -708,10 +704,6 @@ fn execute_assert_with_command_api(
     };
 
     if emit_pipeline {
-        let validation_mode = match (&rules_path, &schema_path) {
-            (None, Some(_)) => assert_cmd::AssertValidationMode::Schema,
-            _ => assert_cmd::AssertValidationMode::Rules,
-        };
         let mut report = PipelineReport::new(
             "assert",
             PipelineInput::new(assert_pipeline_sources_for_paths(
@@ -720,8 +712,8 @@ fn execute_assert_with_command_api(
                 rules_path.as_deref(),
                 schema_path.as_deref(),
             )),
-            assert_cmd::pipeline_steps_for_mode(validation_mode, normalize_mode),
-            assert_cmd::deterministic_guards_for_mode(validation_mode, normalize_mode),
+            assert_cmd::pipeline_steps(normalize_mode),
+            assert_cmd::deterministic_guards(normalize_mode),
         );
         for used_tool in &trace.used_tools {
             report = report.mark_external_tool_used(used_tool);

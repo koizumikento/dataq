@@ -100,30 +100,6 @@ exec jq -c --arg key "$key" 'sort_by(.[$key] // "")'
     ))
 }
 
-fn check_jsonschema_available() -> bool {
-    Command::new("check-jsonschema")
-        .arg("--help")
-        .output()
-        .is_ok()
-}
-
-fn create_check_jsonschema_mismatch_shim() -> (tempfile::TempDir, String) {
-    let dir = tempdir().expect("tempdir");
-    let checkjs_path = dir.path().join("fake-check-jsonschema");
-    write_exec_script(
-        &checkjs_path,
-        r#"#!/bin/sh
-target=""
-for arg in "$@"; do
-  target="$arg"
-done
-printf '{"status":"fail","errors":[{"filename":"%s","path":"$.id","message":"is not of type integer"}],"parse_errors":[]}\n' "$target"
-exit 1
-"#,
-    );
-    (dir, checkjs_path.display().to_string())
-}
-
 fn write_exec_script(path: &PathBuf, body: &str) {
     fs::write(path, body).expect("write script");
     #[cfg(unix)]
@@ -448,146 +424,6 @@ jobs:
     assert_eq!(tools[2]["name"], Value::from("mlr"));
     assert_eq!(tools[2]["used"], Value::Bool(true));
     drop(tool_dir);
-}
-
-#[test]
-fn assert_schema_emit_pipeline_reports_check_jsonschema_stage_and_tool_usage() {
-    let (tool_dir, check_jsonschema_bin) = create_check_jsonschema_mismatch_shim();
-    let dir = tempdir().expect("tempdir");
-    let input_path = dir.path().join("input.json");
-    let schema_path = dir.path().join("schema.json");
-
-    std::fs::write(&input_path, r#"[{"id":"oops"}]"#).expect("write input");
-    std::fs::write(
-        &schema_path,
-        r#"{
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "integer"}
-            }
-        }"#,
-    )
-    .expect("write schema");
-
-    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
-        .env("DATAQ_CHECK_JSONSCHEMA_BIN", &check_jsonschema_bin)
-        .args([
-            "assert",
-            "--emit-pipeline",
-            "--input",
-            input_path.to_str().expect("utf8 path"),
-            "--schema",
-            schema_path.to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("run command");
-
-    assert_eq!(output.status.code(), Some(2));
-    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
-    assert_eq!(stdout_json["matched"], Value::Bool(false));
-    assert_eq!(stdout_json["mismatch_count"], Value::from(1));
-    assert_eq!(
-        stdout_json["mismatches"][0]["reason"],
-        Value::from("schema_mismatch")
-    );
-
-    let stderr_json_lines = parse_stderr_json_lines(&output.stderr);
-    let pipeline_json = stderr_json_lines.last().expect("pipeline json");
-    assert_eq!(
-        pipeline_json["steps"][0],
-        Value::from("load_schema"),
-        "schema mode should emit load_schema stage in steps"
-    );
-    assert_eq!(
-        pipeline_json["stage_diagnostics"][0]["step"],
-        Value::from("validate_assert_schema")
-    );
-    assert_eq!(
-        pipeline_json["stage_diagnostics"][0]["tool"],
-        Value::from("check-jsonschema")
-    );
-    assert_eq!(
-        pipeline_json["stage_diagnostics"][0]["status"],
-        Value::from("ok")
-    );
-    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][0]);
-
-    let tools = pipeline_json["external_tools"]
-        .as_array()
-        .expect("external_tools array");
-    assert!(tools.iter().any(|tool| {
-        tool["name"] == Value::from("check-jsonschema") && tool["used"] == Value::Bool(true)
-    }));
-    drop(tool_dir);
-}
-
-#[test]
-fn assert_schema_missing_check_jsonschema_maps_to_exit_three() {
-    let dir = tempdir().expect("tempdir");
-    let input_path = dir.path().join("input.json");
-    let schema_path = dir.path().join("schema.json");
-
-    std::fs::write(&input_path, r#"[{"id":1}]"#).expect("write input");
-    std::fs::write(
-        &schema_path,
-        r#"{
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-                "id": {"type": "integer"}
-            }
-        }"#,
-    )
-    .expect("write schema");
-
-    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
-        .env(
-            "DATAQ_CHECK_JSONSCHEMA_BIN",
-            "/definitely-missing/check-jsonschema",
-        )
-        .args([
-            "assert",
-            "--emit-pipeline",
-            "--input",
-            input_path.to_str().expect("utf8 path"),
-            "--schema",
-            schema_path.to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("run command");
-
-    assert_eq!(output.status.code(), Some(3));
-    let stderr_json_lines = parse_stderr_json_lines(&output.stderr);
-    let error_json = stderr_json_lines.first().expect("error json");
-    assert_eq!(error_json["error"], Value::from("input_usage_error"));
-    assert!(
-        error_json["message"]
-            .as_str()
-            .expect("message")
-            .contains("check-jsonschema")
-    );
-
-    let pipeline_json = stderr_json_lines.last().expect("pipeline json");
-    assert_eq!(
-        pipeline_json["stage_diagnostics"][0]["step"],
-        Value::from("validate_assert_schema")
-    );
-    assert_eq!(
-        pipeline_json["stage_diagnostics"][0]["tool"],
-        Value::from("check-jsonschema")
-    );
-    assert_eq!(
-        pipeline_json["stage_diagnostics"][0]["status"],
-        Value::from("error")
-    );
-    assert_stage_metrics_shape(&pipeline_json["stage_diagnostics"][0]);
-    let tools = pipeline_json["external_tools"]
-        .as_array()
-        .expect("external_tools array");
-    assert!(tools.iter().any(|tool| {
-        tool["name"] == Value::from("check-jsonschema") && tool["used"] == Value::Bool(true)
-    }));
 }
 
 #[test]
@@ -1210,9 +1046,6 @@ fn assert_api_rejects_invalid_pattern_rules() {
 
 #[test]
 fn assert_api_supports_jsonschema_mode() {
-    if !check_jsonschema_available() {
-        return;
-    }
     let dir = tempdir().expect("tempdir");
     let schema_path = dir.path().join("schema.json");
     std::fs::write(
@@ -1282,9 +1115,6 @@ fn assert_api_rejects_rules_and_schema_together() {
 
 #[test]
 fn assert_api_maps_schema_parse_errors_to_exit_three() {
-    if !check_jsonschema_available() {
-        return;
-    }
     let dir = tempdir().expect("tempdir");
     let schema_path = dir.path().join("schema.json");
     std::fs::write(&schema_path, r#"{"type":"object","properties":{"id":}"#)
@@ -1307,9 +1137,6 @@ fn assert_api_maps_schema_parse_errors_to_exit_three() {
 
 #[test]
 fn assert_api_schema_mode_keeps_numeric_object_key_paths_unambiguous() {
-    if !check_jsonschema_available() {
-        return;
-    }
     let dir = tempdir().expect("tempdir");
     let schema_path = dir.path().join("schema.json");
     std::fs::write(

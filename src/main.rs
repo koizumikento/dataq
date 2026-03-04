@@ -1107,13 +1107,8 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         .schema
         .as_deref()
         .and_then(|path| dataq_io::resolve_input_format(None, Some(path)).ok());
-    let validation_mode = match (&args.rules, &args.schema) {
-        (None, Some(_)) => r#assert::AssertValidationMode::Schema,
-        _ => r#assert::AssertValidationMode::Rules,
-    };
-    let mut steps = r#assert::pipeline_steps_for_mode(validation_mode, normalize_mode);
-    let mut deterministic_guards =
-        r#assert::deterministic_guards_for_mode(validation_mode, normalize_mode);
+    let mut steps = r#assert::pipeline_steps(normalize_mode);
+    let mut deterministic_guards = r#assert::deterministic_guards(normalize_mode);
     let mut trace = r#assert::AssertPipelineTrace::default();
 
     let exit_code = if args.rules_help {

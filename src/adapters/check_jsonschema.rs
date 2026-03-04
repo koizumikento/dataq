@@ -1,321 +1,142 @@
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
 
-use serde::Deserialize;
 use serde_json::Value;
-use tempfile::TempDir;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckJsonschemaMismatch {
-    pub row_index: usize,
-    pub path: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckJsonschemaValidation {
-    Matched,
-    Mismatched(Vec<CheckJsonschemaMismatch>),
-}
-
+/// Error shape produced by the `check-jsonschema` adapter.
 #[derive(Debug, Error)]
-pub enum CheckJsonschemaError {
+pub enum CheckJsonSchemaError {
     #[error("`check-jsonschema` is not available in PATH")]
     Unavailable,
     #[error("failed to spawn check-jsonschema: {0}")]
     Spawn(std::io::Error),
-    #[error("failed to write temporary schema/instance file: {0}")]
-    TempFile(std::io::Error),
-    #[error("failed to serialize schema: {0}")]
-    SerializeSchema(serde_json::Error),
-    #[error("failed to serialize row {row_index} for schema validation: {source}")]
-    SerializeRow {
-        row_index: usize,
-        source: serde_json::Error,
-    },
+    #[error("failed to write check-jsonschema stdin: {0}")]
+    Stdin(std::io::Error),
+    #[error("check-jsonschema exited with status {status}: {stderr}")]
+    Exit { status: ExitStatus, stderr: String },
     #[error("check-jsonschema output is not valid JSON: {0}")]
-    ParseOutput(serde_json::Error),
-    #[error("check-jsonschema output is missing required fields: {0}")]
-    OutputShape(String),
-    #[error("check-jsonschema input parse errors: {0}")]
-    InputParse(String),
-    #[error("check-jsonschema execution failed: {0}")]
-    Execution(String),
+    Parse(serde_json::Error),
 }
 
-pub fn validate_rows(
-    values: &[Value],
-    schema: &Value,
-) -> Result<CheckJsonschemaValidation, CheckJsonschemaError> {
+/// Runs `check-jsonschema` with stdin JSON input and returns parsed JSON output.
+///
+/// The adapter honors `DATAQ_CHECK_JSONSCHEMA_BIN` and defaults to
+/// `check-jsonschema` when the variable is unset.
+pub fn validate_stdin_json(
+    schema_path: &Path,
+    input_json: &[u8],
+) -> Result<Value, CheckJsonSchemaError> {
     let check_jsonschema_bin =
         std::env::var("DATAQ_CHECK_JSONSCHEMA_BIN").unwrap_or_else(|_| "check-jsonschema".into());
-    validate_rows_with_bin(values, schema, check_jsonschema_bin.as_str())
+    validate_stdin_json_with_bin(schema_path, input_json, &check_jsonschema_bin)
 }
 
-fn validate_rows_with_bin(
-    values: &[Value],
-    schema: &Value,
+fn validate_stdin_json_with_bin(
+    schema_path: &Path,
+    input_json: &[u8],
     bin: &str,
-) -> Result<CheckJsonschemaValidation, CheckJsonschemaError> {
-    if values.is_empty() {
-        return Ok(CheckJsonschemaValidation::Matched);
-    }
-
-    let tempdir = TempDir::new().map_err(CheckJsonschemaError::TempFile)?;
-    let schema_path = tempdir.path().join("schema.json");
-    write_json_file(schema_path.as_path(), schema)
-        .map_err(CheckJsonschemaError::SerializeSchema)?;
-
-    let mut instance_paths = Vec::with_capacity(values.len());
-    let mut row_by_filename = BTreeMap::new();
-    for (index, value) in values.iter().enumerate() {
-        let path = tempdir.path().join(format!("row-{index:06}.json"));
-        write_json_file(path.as_path(), value).map_err(|source| {
-            CheckJsonschemaError::SerializeRow {
-                row_index: index,
-                source,
-            }
-        })?;
-        row_by_filename.insert(path.display().to_string(), index);
-        instance_paths.push(path);
-    }
-
-    let output = run_check_jsonschema(bin, schema_path.as_path(), &instance_paths)?;
-    let stderr_text = decode_text(output.stderr.as_slice());
-    let report: JsonReport = match serde_json::from_slice(output.stdout.as_slice()) {
-        Ok(report) => report,
-        Err(error) => {
-            if output.status.success() {
-                return Err(CheckJsonschemaError::ParseOutput(error));
-            }
-            let message = if stderr_text.is_empty() {
-                format!("check-jsonschema failed and did not emit JSON output: {error}")
-            } else {
-                stderr_text
-            };
-            return Err(CheckJsonschemaError::Execution(message));
+) -> Result<Value, CheckJsonSchemaError> {
+    let args = build_check_jsonschema_args(schema_path);
+    let mut child = match Command::new(bin)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CheckJsonSchemaError::Unavailable);
         }
+        Err(error) => return Err(CheckJsonSchemaError::Spawn(error)),
     };
 
-    let parse_error_messages = collect_parse_error_messages(report.parse_errors.as_slice());
-    if !parse_error_messages.is_empty() {
-        return Err(CheckJsonschemaError::InputParse(
-            parse_error_messages.join("; "),
-        ));
+    if let Some(stdin) = child.stdin.as_mut() {
+        if let Err(error) = stdin.write_all(input_json) {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(CheckJsonSchemaError::Stdin(error));
+            }
+        }
+    } else {
+        return Err(CheckJsonSchemaError::Stdin(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "check-jsonschema stdin was not piped as expected",
+        )));
     }
 
-    let mut mismatches = normalize_mismatches(report.errors, &row_by_filename)?;
-    mismatches.sort_by(|left, right| {
-        (left.row_index, left.path.clone(), left.message.clone()).cmp(&(
-            right.row_index,
-            right.path.clone(),
-            right.message.clone(),
-        ))
-    });
-
-    if mismatches.is_empty() {
-        if output.status.success() {
-            return Ok(CheckJsonschemaValidation::Matched);
-        }
-        let message = if stderr_text.is_empty() {
-            "unknown check-jsonschema failure".to_string()
+    let output = child
+        .wait_with_output()
+        .map_err(CheckJsonSchemaError::Spawn)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8(output.stderr)
+            .unwrap_or_else(|_| "failed to decode check-jsonschema stderr".to_string());
+        let stderr = if stderr.trim().is_empty() {
+            "check-jsonschema exited with an empty stderr stream".to_string()
         } else {
-            stderr_text
+            stderr.trim().to_string()
         };
-        return Err(CheckJsonschemaError::Execution(message));
-    }
-
-    if output.status.success() {
-        return Ok(CheckJsonschemaValidation::Mismatched(mismatches));
-    }
-
-    Ok(CheckJsonschemaValidation::Mismatched(mismatches))
-}
-
-fn write_json_file(path: &Path, value: &Value) -> Result<(), serde_json::Error> {
-    let file = File::create(path).map_err(serde_json::Error::io)?;
-    serde_json::to_writer(file, value)
-}
-
-fn run_check_jsonschema(
-    bin: &str,
-    schema_path: &Path,
-    instance_paths: &[PathBuf],
-) -> Result<std::process::Output, CheckJsonschemaError> {
-    let mut command = Command::new(bin);
-    command
-        .arg("--output-format")
-        .arg("JSON")
-        .arg("--schemafile")
-        .arg(schema_path);
-    for path in instance_paths {
-        command.arg(path);
-    }
-
-    match command.output() {
-        Ok(output) => Ok(output),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Err(CheckJsonschemaError::Unavailable)
-        }
-        Err(error) => Err(CheckJsonschemaError::Spawn(error)),
-    }
-}
-
-fn normalize_mismatches(
-    errors: Vec<JsonValidationError>,
-    row_by_filename: &BTreeMap<String, usize>,
-) -> Result<Vec<CheckJsonschemaMismatch>, CheckJsonschemaError> {
-    let mut mismatches = Vec::with_capacity(errors.len());
-    for error in errors {
-        let row_index =
-            resolve_row_index(error.filename.as_str(), row_by_filename).ok_or_else(|| {
-                CheckJsonschemaError::OutputShape(format!(
-                    "unable to map validation filename `{}` to input row",
-                    error.filename
-                ))
-            })?;
-
-        mismatches.push(CheckJsonschemaMismatch {
-            row_index,
-            path: error.path.unwrap_or_else(|| "$".to_string()),
-            message: error
-                .message
-                .unwrap_or_else(|| "validation failed".to_string()),
+        return Err(CheckJsonSchemaError::Exit {
+            status: output.status,
+            stderr,
         });
     }
-    Ok(mismatches)
+
+    serde_json::from_slice(&output.stdout).map_err(CheckJsonSchemaError::Parse)
 }
 
-fn resolve_row_index(filename: &str, row_by_filename: &BTreeMap<String, usize>) -> Option<usize> {
-    if let Some(index) = row_by_filename.get(filename) {
-        return Some(*index);
-    }
-
-    let basename = Path::new(filename)
-        .file_name()
-        .and_then(|entry| entry.to_str())?;
-    if !basename.starts_with("row-") || !basename.ends_with(".json") {
-        return None;
-    }
-    let digits = basename
-        .trim_start_matches("row-")
-        .trim_end_matches(".json");
-    digits.parse::<usize>().ok()
-}
-
-fn collect_parse_error_messages(parse_errors: &[JsonParseError]) -> Vec<String> {
-    let mut messages: Vec<String> = parse_errors
-        .iter()
-        .map(|entry| match (&entry.filename, &entry.message) {
-            (Some(filename), Some(message)) => format!("{filename}: {message}"),
-            (Some(filename), None) => filename.clone(),
-            (None, Some(message)) => message.clone(),
-            (None, None) => "unknown parse error".to_string(),
-        })
-        .collect();
-    messages.sort();
-    messages
-}
-
-fn decode_text(bytes: &[u8]) -> String {
-    String::from_utf8(bytes.to_vec())
-        .unwrap_or_else(|_| "failed to decode check-jsonschema stderr".to_string())
-        .trim()
-        .to_string()
-}
-
-#[derive(Debug, Deserialize)]
-struct JsonReport {
-    #[allow(dead_code)]
-    status: Option<String>,
-    #[serde(default)]
-    errors: Vec<JsonValidationError>,
-    #[serde(default)]
-    parse_errors: Vec<JsonParseError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JsonValidationError {
-    filename: String,
-    path: Option<String>,
-    message: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JsonParseError {
-    filename: Option<String>,
-    message: Option<String>,
+fn build_check_jsonschema_args(schema_path: &Path) -> Vec<String> {
+    let schema_path = schema_path.to_string_lossy().into_owned();
+    vec![
+        "--output-format".to_string(),
+        "json".to_string(),
+        "--schemafile".to_string(),
+        schema_path,
+        "-".to_string(),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    use serde_json::json;
-
-    use super::{CheckJsonschemaError, CheckJsonschemaValidation, validate_rows_with_bin};
+    use super::{CheckJsonSchemaError, validate_stdin_json_with_bin};
 
     #[test]
     fn maps_unavailable_binary_to_unavailable_error() {
-        let error = validate_rows_with_bin(
-            &[json!({"id": 1})],
-            &json!({"type":"object"}),
-            "/missing/check-jsonschema",
+        let err = validate_stdin_json_with_bin(
+            Path::new("/tmp/schema.json"),
+            br#"{"id":1}"#,
+            "/definitely-missing/check-jsonschema",
         )
         .expect_err("missing binary should fail");
-        assert!(matches!(error, CheckJsonschemaError::Unavailable));
+        assert!(matches!(err, CheckJsonSchemaError::Unavailable));
     }
 
     #[test]
-    fn maps_nonzero_json_report_to_mismatches() {
+    fn maps_non_zero_exit_to_exit_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let bin = write_test_script(
             dir.path().join("fake-check-jsonschema"),
-            r#"
-target=""
-for arg in "$@"; do
-  target="$arg"
-done
-printf '{"status":"fail","errors":[{"filename":"%s","path":"$.id","message":"bad type"}],"parse_errors":[]}\n' "$target"
-exit 1
-"#,
+            "cat >/dev/null\necho 'schema mismatch in test' 1>&2\nexit 7",
         );
-        let values = vec![json!({"id":"x"})];
-        let schema = json!({"type":"object","properties":{"id":{"type":"integer"}}});
 
-        let result = validate_rows_with_bin(&values, &schema, bin.to_str().expect("utf8 path"))
-            .expect("schema validation result");
-        match result {
-            CheckJsonschemaValidation::Matched => panic!("expected mismatch"),
-            CheckJsonschemaValidation::Mismatched(mismatches) => {
-                assert_eq!(mismatches.len(), 1);
-                assert_eq!(mismatches[0].row_index, 0);
-                assert_eq!(mismatches[0].path, "$.id");
-                assert_eq!(mismatches[0].message, "bad type");
+        let err = validate_stdin_json_with_bin(
+            Path::new("/tmp/schema.json"),
+            br#"{"id":1}"#,
+            bin.to_str().expect("utf8 path"),
+        )
+        .expect_err("non-zero exit should fail");
+
+        match err {
+            CheckJsonSchemaError::Exit { status, stderr } => {
+                assert_eq!(status.code(), Some(7));
+                assert!(stderr.contains("schema mismatch in test"));
             }
+            other => panic!("expected exit error, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn maps_parse_errors_to_input_parse_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let bin = write_test_script(
-            dir.path().join("fake-check-jsonschema"),
-            r#"
-printf '{"status":"fail","errors":[],"parse_errors":[{"filename":"row-000000.json","message":"invalid json"}]}\n'
-exit 1
-"#,
-        );
-        let values = vec![json!({"id": 1})];
-        let schema = json!({"type":"object"});
-
-        let error = validate_rows_with_bin(&values, &schema, bin.to_str().expect("utf8 path"))
-            .expect_err("parse error should fail");
-        assert!(matches!(error, CheckJsonschemaError::InputParse(_)));
     }
 
     fn write_test_script(path: PathBuf, body: &str) -> PathBuf {
@@ -325,7 +146,8 @@ exit 1
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755)).expect("chmod");
+            let permissions = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&tmp_path, permissions).expect("chmod");
         }
         fs::rename(&tmp_path, &path).expect("rename script");
         path

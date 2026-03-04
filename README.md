@@ -360,8 +360,6 @@ JSON Schemaモード仕様をCLIから取得:
 dataq assert --schema-help
 ```
 
-`assert --schema` は `check-jsonschema` アダプタのJSON出力を使用して mismatch を生成します（`check-jsonschema` 必須）。
-
 サービス定義向けのサンプルルール:
 
 - 配置先: `examples/assert-rules/`
