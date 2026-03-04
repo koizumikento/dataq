@@ -62,7 +62,7 @@ enum Commands {
     Join(JoinArgs),
     /// Aggregate grouped metrics with deterministic JSON output.
     Aggregate(AggregateArgs),
-    /// Transform rowsets with fixed `jq -> sql` stages.
+    /// Transform rowsets with fixed `jq -> mlr` stages.
     Transform(TransformArgs),
     /// Scan repository text with deterministic structured match output.
     Scan(ScanArgs),

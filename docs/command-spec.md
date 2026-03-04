@@ -14,9 +14,13 @@ dataq [--emit-pipeline] <command> [options]
 - `ingest api`: HTTP API 応答を `xh -> jq` で決定的JSONへ正規化
 - `ingest yaml-jobs`: YAMLのCIジョブ定義を正規化JSON配列へ変換
 - `ingest tabular`: 表形式入力を `csvkit` (`in2csv -> csvjson`) で決定的JSON配列へ変換
+- `ingest jc`: 半構造テキストを `jc` で決定的JSONエンベロープへ変換
+- `ingest notes`: `nb` ノートをフィルタ・正規化して JSON/JSONL で出力
+- `ingest book`: mdBook `SUMMARY.md` と book メタデータを決定的JSONへ変換
 - `assert`: ルールまたはJSON Schemaで検証
 - `gate schema`: JSON Schemaで品質ゲートを実行（`assert --schema` ラッパー）
 - `gate policy`: ルールベース品質ゲートを実行（`matched/violations/details`）
+- `schema infer`: 表形式入力から `qsv` で JSON Schema を推定
 - `sdiff`: 2データセットの構造差分を出力
 - `diff source`: 2ソース（preset/path）を解決して構造差分を出力
 - `profile`: フィールド統計を決定的JSONで出力
@@ -24,7 +28,7 @@ dataq [--emit-pipeline] <command> [options]
 - `join`: 2入力をキー結合してJSON配列を出力
 - `aggregate`: グループ集計をJSON配列で出力
 - `scan text`: 正規表現でテキストを走査して構造化マッチを出力
-- `transform rowset`: 固定2段 (`jq -> sql`) でrowset変換してJSON配列を出力
+- `transform rowset`: 固定2段 (`jq -> mlr`) でrowset変換してJSON配列を出力
 - `transform sql`: `duckdb` でSQL変換してJSON配列を出力
 - `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
 - `doctor`: 依存ツール診断（`--profile` 指定でワークフロー別要件評価）
@@ -320,6 +324,68 @@ dataq [--emit-pipeline] <command> [options]
 - `--emit-pipeline` 指定時の `steps`:
   - `ingest_doc_pandoc_ast`
   - `ingest_doc_jq_project`
+
+## `ingest jc` コマンド仕様（MVP）
+
+- コマンド:
+  - `dataq ingest jc --parser <name> [--input <path|->]`
+- 出力: JSON object（stdout）
+  - `source`
+  - `parser`
+  - `result_type`
+  - `record_count`
+  - `records`
+- 実行方式:
+  - `jc --<parser>` を明示的引数配列で実行（シェル展開なし）
+  - 出力は安定エンベロープへ正規化
+  - `--emit-pipeline` の `steps`: `ingest_jc_parse`
+- 異常時契約:
+  - `jc` 不在、`--parser` 不正、入力不正は exit `3`
+
+## `ingest notes` コマンド仕様（MVP）
+
+- コマンド:
+  - `dataq ingest notes [--tag <tag>...] [--since <rfc3339>] [--until <rfc3339>] [--to <json|jsonl>]`
+- 出力:
+  - `--to json`: JSON array
+  - `--to jsonl`: JSONL（1行1オブジェクト）
+- 実行方式:
+  - stage1: `nb` でノート一覧を取得
+  - stage2: `jq` で投影・正規化
+  - 境界含み (`since <= created_at <= until`) で時刻フィルタ
+  - 結果行は `created_at` -> `id` の順で決定的ソート
+  - `--emit-pipeline` の `steps`: `ingest_notes_nb_export`, `ingest_notes_jq_normalize`
+- 異常時契約:
+  - `nb`/`jq` 不在、空 `--tag`、時刻フィルタ不正は exit `3`
+
+## `ingest book` コマンド仕様（MVP）
+
+- コマンド:
+  - `dataq ingest book --root <path> [--include-files]`
+- 出力: JSON object（stdout）
+  - `book`
+  - `summary`
+- 実行方式:
+  - stage1: `SUMMARY.md` を決定的順で解析
+  - stage2: `DATAQ_INGEST_BOOK_VERIFY_MDBOOK=1` 時に `mdbook` 補助検証
+  - stage3: `jq` で固定スキーマ投影
+  - `--include-files` 指定時は章ファイルメタデータを追加
+  - `--emit-pipeline` の `steps`: `ingest_book_summary_parse`, `ingest_book_mdbook_meta`, `ingest_book_jq_project`
+- 異常時契約:
+  - 章ファイル欠損、`SUMMARY.md` 不正、`jq`/`mdbook` 不在は exit `3`
+
+## `schema infer` コマンド仕様（MVP）
+
+- コマンド:
+  - `dataq schema infer [--input <path|->]`
+- 出力:
+  - `qsv schema` が返す JSON Schema を stdout に出力
+- 実行方式:
+  - 入力省略時または `-` 指定時は stdin を使用
+  - `qsv schema` を明示的引数配列で実行（シェル展開なし）
+  - `--emit-pipeline` の `steps`: `schema_infer_qsv`, `schema_infer_parse_json`
+- 異常時契約:
+  - `qsv` 不在、入力ファイル不正、推定失敗は exit `3`
 
 ## このCLIの位置づけ
 

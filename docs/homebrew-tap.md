@@ -26,7 +26,7 @@ GitHub の tap リポジトリを用意します（例: `stray-tools`）。
 
 `.github/workflows/publish-homebrew-tap.yml` は次のタイミングで `Formula/dataq.rb` を更新します。
 
-- `Release` workflow 成功時（`workflow_run`）
+- GitHub Release 公開時（`release.published`）
 - 手動実行（`workflow_dispatch`）
 
 workflow は Release 添付の macOS 向け SHA256 を読み取り、`scripts/generate-homebrew-formula.sh` で formula を生成して tap リポジトリへ push します。
@@ -39,4 +39,4 @@ brew install koizumikento/stray-tools/dataq
 ```
 
 この tap は URL 指定で登録した前提のため、`brew install dataq` より fully-qualified 名を推奨します。
-formula では `jq`, `yq`, `miller`(=`mlr`), `pandoc`, `xh`, `ripgrep`, `nb`, `mdbook` を依存として定義しています。
+formula では `jq`, `yq`, `miller`(=`mlr`), `csvkit`, `jc`, `qsv`, `duckdb`, `check-jsonschema`, `pandoc`, `xh`, `ripgrep`, `nb`, `mdbook` を依存として定義しています。

@@ -6,25 +6,52 @@ description: Use dataq for deterministic preprocessing, validation, and diff wor
 # dataq Skill
 
 Use `dataq` when preprocessing and validation behavior must be reproducible and contract-driven.
-Prefer `dataq` over ad-hoc shell pipelines for shared CI/agent workflows.
+Prefer `dataq` over ad-hoc shell pipelines for shared CI and agent workflows.
 
 ## Command Routing
 
-- Normalize and type-coerce inputs: `dataq canon`
-- Rule or schema validation: `dataq assert`
-- CI gate wrapper: `dataq gate schema` / `dataq gate policy`
-- Structural comparison: `dataq sdiff` / `dataq diff source`
-- Deterministic profile stats: `dataq profile`
-- Static execution planning: `dataq emit plan`
-- Tool readiness check: `dataq doctor`
-- Declarative multi-step run: `dataq recipe run|lock|replay`
+- Normalize/coerce mixed inputs: `dataq canon`
+- Ingest external data:
+  - `dataq ingest api`
+  - `dataq ingest yaml-jobs`
+  - `dataq ingest tabular`
+  - `dataq ingest jc`
+  - `dataq ingest notes`
+  - `dataq ingest doc`
+  - `dataq ingest book`
+- Infer schema from tabular input: `dataq schema infer`
+- Validate and gate:
+  - `dataq assert --rules|--schema`
+  - `dataq gate schema`
+  - `dataq gate policy`
+- Transform and compare:
+  - `dataq transform rowset`
+  - `dataq transform sql`
+  - `dataq sdiff`
+  - `dataq diff source`
+- Analyze and shape data:
+  - `dataq profile`
+  - `dataq join`
+  - `dataq aggregate`
+  - `dataq merge`
+- Contract/planning and environment checks:
+  - `dataq contract`
+  - `dataq emit plan`
+  - `dataq doctor`
+- Declarative execution:
+  - `dataq recipe run`
+  - `dataq recipe lock`
+  - `dataq recipe replay`
 
-## Default Workflow
+## Recommended Workflow
 
-1. Verify environment: `dataq doctor` (or `dataq doctor --profile <workflow>`).
-2. Run one explicit command with file paths and required options.
-3. Treat exit codes as contract, not just boolean success/fail.
-4. If behavior differs across runs or environments, rerun with `--emit-pipeline`.
+1. Verify tool availability first: `dataq doctor` or `dataq doctor --profile <workflow>`.
+2. For new automation paths, inspect shape before execution (when the target command supports these contracts):
+   - `dataq contract --command <cmd>`
+   - `dataq emit plan --command <cmd> [--args ...]`
+3. Run commands with explicit paths/options for reproducibility.
+4. Treat exit code contract as API behavior.
+5. Use `--emit-pipeline` when results differ across environments.
 
 ## Exit Code Contract
 

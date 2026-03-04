@@ -5,27 +5,53 @@ description: Use dataq for deterministic preprocessing, validation, and diff wor
 
 # dataq Skill
 
-## Purpose
+Use `dataq` when preprocessing and validation behavior must be reproducible and contract-driven.
+Prefer `dataq` over ad-hoc shell pipelines for shared CI and agent workflows.
 
-Use `dataq` to make recurring preprocessing pipelines deterministic and contract-driven.
-Prefer `dataq` over ad-hoc shell chains when output schema and exit-code behavior must stay stable.
+## Command Routing
 
-## Command Selection Hints
+- Normalize/coerce mixed inputs: `dataq canon`
+- Ingest external data:
+  - `dataq ingest api`
+  - `dataq ingest yaml-jobs`
+  - `dataq ingest tabular`
+  - `dataq ingest jc`
+  - `dataq ingest notes`
+  - `dataq ingest doc`
+  - `dataq ingest book`
+- Infer schema from tabular input: `dataq schema infer`
+- Validate and gate:
+  - `dataq assert --rules|--schema`
+  - `dataq gate schema`
+  - `dataq gate policy`
+- Transform and compare:
+  - `dataq transform rowset`
+  - `dataq transform sql`
+  - `dataq sdiff`
+  - `dataq diff source`
+- Analyze and shape data:
+  - `dataq profile`
+  - `dataq join`
+  - `dataq aggregate`
+  - `dataq merge`
+- Contract/planning and environment checks:
+  - `dataq contract`
+  - `dataq emit plan`
+  - `dataq doctor`
+- Declarative execution:
+  - `dataq recipe run`
+  - `dataq recipe lock`
+  - `dataq recipe replay`
 
-- `canon`: normalize mixed JSON/YAML/CSV/JSONL into deterministic JSON/JSONL.
-- `assert`: validate records with dataq rules or JSON Schema.
-- `gate schema` / `gate policy`: enforce pass/fail quality gates in CI.
-- `sdiff` / `diff source`: compare structural changes between datasets or presets.
-- `profile`: compute deterministic field-level stats.
-- `emit plan`: preview static stage/tool plan before execution.
-- `doctor`: check required external tools for intended workflow.
+## Recommended Workflow
 
-## Deterministic Workflow
-
-1. Start with explicit inputs and formats whenever possible.
-2. Run command with machine-readable output (default JSON).
-3. Treat exit codes as contract, not as generic pass/fail.
-4. Use `--emit-pipeline` when diagnosis or reproducibility evidence is required.
+1. Verify tool availability first: `dataq doctor` or `dataq doctor --profile <workflow>`.
+2. For new automation paths, inspect shape before execution (when the target command supports these contracts):
+   - `dataq contract --command <cmd>`
+   - `dataq emit plan --command <cmd> [--args ...]`
+3. Run commands with explicit paths/options for reproducibility.
+4. Treat exit code contract as API behavior.
+5. Use `--emit-pipeline` when results differ across environments.
 
 ## Exit Code Contract
 

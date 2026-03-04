@@ -61,8 +61,10 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 | `ingest api` | `xh`, `jq` |
 | `ingest doc` | `pandoc`, `jq` |
 | `ingest tabular` | `csvkit`（`in2csv`, `csvjson`） |
+| `ingest jc` | `jc` |
 | `ingest notes` | `nb`, `jq` |
 | `ingest book` | `jq`（`DATAQ_INGEST_BOOK_VERIFY_MDBOOK` 有効時は `mdbook` も必要） |
+| `schema infer` | `qsv` |
 | `scan text` | `rg`（`--jq-project` を使う場合は `jq` も必要） |
 | `transform rowset` | `jq`, `mlr`（`--emit-pipeline` の stage2 tool label は `mlr`） |
 | `transform sql` | `duckdb` |
@@ -86,9 +88,13 @@ dataq [--emit-pipeline] <command> [options]
 | `ingest api` | HTTP API 応答を `xh -> jq` で決定的JSONへ正規化 | `--url <http(s)://...>` |
 | `ingest yaml-jobs` | YAMLのCIジョブ定義を正規化JSON配列へ変換 | `--input <path|->` `--mode <github-actions|gitlab-ci|generic-map>` |
 | `ingest tabular` | 表形式入力を `csvkit` で決定的JSON配列へ正規化 | `--input <path|->` |
+| `ingest jc` | 半構造テキストを `jc` で決定的JSONエンベロープへ変換 | `--parser <name>` |
+| `ingest notes` | `nb` ノートをフィルタ・正規化してJSON/JSONLで出力 | なし（`--tag`/`--since`/`--until`/`--to` は任意） |
+| `ingest book` | mdBook `SUMMARY.md` とメタ情報を決定的JSONへ変換 | `--root <path>` |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
 | `gate schema` | JSON Schema で品質ゲートを実行（`assert --schema` の専用ラッパー） | `--schema <path>` |
 | `gate policy` | ルールベース品質ゲートを実行（違反詳細を決定的順序で出力） | `--rules <path>` |
+| `schema infer` | 表形式入力から `qsv` で JSON Schema を推定 | なし（`--input <path|->` は任意） |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `diff source` | 2ソース（preset/path）を解決して構造差分を出力 | `--left <preset-or-path>` `--right <preset-or-path>` |
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <json|yaml|csv|jsonl>` |
@@ -231,7 +237,7 @@ brew tap koizumikento/stray-tools https://github.com/koizumikento/stray-tools.gi
 brew install koizumikento/stray-tools/dataq
 ```
 
-上記 formula は連携ツール依存（`jq`, `yq`, `miller`(=`mlr`), `pandoc`, `xh`, `ripgrep`, `nb`, `mdbook`）も併せて導入します。
+上記 formula は連携ツール依存（`jq`, `yq`, `miller`(=`mlr`), `csvkit`, `jc`, `qsv`, `duckdb`, `check-jsonschema`, `pandoc`, `xh`, `ripgrep`, `nb`, `mdbook`）も併せて導入します。
 
 詳細な設定手順は `docs/homebrew-tap.md` を参照してください。
 
@@ -269,6 +275,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-reg
 
 - `v*` タグ（例: `v0.1.0`, `v0.1.0-rc.1`）を push すると、GitHub Actions の Release workflow が起動します
 - リリースノートは `docs/releases/` 配下に `vX.Y.Z.md` 形式で記録します
+- `docs/releases/<tag>.md` が存在する場合はその内容を Release 本文に使用し、存在しない場合は GitHub の自動生成ノートへフォールバックします
 - workflow は `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`、`cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-regions 75` を通過した場合のみ公開処理へ進みます
 - 配布ターゲットは次の4種類です:
   - `x86_64-unknown-linux-gnu`
@@ -437,6 +444,49 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 - `--mode generic-map`: `job_name`, `field_count`, `has_stage`, `has_script`
 - `--emit-pipeline` の `steps`: `ingest_yaml_jobs_yq_extract`, `ingest_yaml_jobs_jq_normalize`, `ingest_yaml_jobs_mlr_shape`
 - malformed YAML、未知 mode、`jq`/`yq`/`mlr` 不足は終了コード `3`
+
+### 2.4 `ingest jc`
+
+半構造テキスト入力を `jc` でパースし、決定的な JSON エンベロープで返します。
+
+- コマンド: `dataq ingest jc --parser <name> [--input <path|->]`
+- `--parser` は必須。`--input` の既定値は `-`（stdin）
+- 成功時の出力キー: `source`, `parser`, `result_type`, `record_count`, `records`
+- `jc` 不在・`--parser` 不正・入力不正は終了コード `3`
+- `--emit-pipeline` の `steps`: `ingest_jc_parse`
+
+### 2.5 `ingest notes`
+
+`nb` ノートを `nb -> jq` の固定2段で正規化し、決定的順序で出力します。
+
+- コマンド: `dataq ingest notes [--tag <tag>...] [--since <rfc3339>] [--until <rfc3339>] [--to <json|jsonl>]`
+- `--tag` は複数指定可（空文字は禁止）
+- `--since` / `--until` は境界を含む時刻フィルタ
+- 出力は `--to json` で JSON 配列、`--to jsonl` で JSONL
+- 正規化行は `created_at` -> `id` の順で安定ソートし、時刻は可能な限り UTC 正規化
+- `nb` / `jq` 不在、時刻フィルタ不正、正規化失敗は終了コード `3`
+- `--emit-pipeline` の `steps`: `ingest_notes_nb_export`, `ingest_notes_jq_normalize`
+
+### 2.6 `ingest book`
+
+mdBook ルートを解析し、`SUMMARY.md` と book メタデータを決定的JSONへ変換します。
+
+- コマンド: `dataq ingest book --root <path> [--include-files]`
+- 出力キー: `book`, `summary`
+- `--include-files` を有効化すると章ファイルの `size_bytes` / `content_hash` などを追加
+- `DATAQ_INGEST_BOOK_VERIFY_MDBOOK=1` の場合は `mdbook` による補助検証を有効化
+- `SUMMARY.md` 不正、参照章ファイル欠損、`jq`/`mdbook` 不在は終了コード `3`
+- `--emit-pipeline` の `steps`: `ingest_book_summary_parse`, `ingest_book_mdbook_meta`, `ingest_book_jq_project`
+
+### 2.7 `schema infer`
+
+表形式入力から `qsv` を使って JSON Schema を推定します。
+
+- コマンド: `dataq schema infer [--input <path|->]`
+- `--input` 省略時または `-` 指定時は stdin から読み込み
+- 成功時は `qsv schema` の JSON を stdout へそのまま返す
+- `qsv` 不在・入力ファイル不正・推定失敗は終了コード `3`
+- `--emit-pipeline` の `steps`: `schema_infer_qsv`, `schema_infer_parse_json`
 
 ### 3. `sdiff`
 
