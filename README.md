@@ -60,10 +60,12 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 | コア（canon/assert/gate/sdiff/profile/join/aggregate など） | `jq`, `yq`, `mlr` |
 | `ingest api` | `xh`, `jq` |
 | `ingest doc` | `pandoc`, `jq` |
+| `ingest tabular` | `csvkit`（`in2csv`, `csvjson`） |
 | `ingest notes` | `nb`, `jq` |
 | `ingest book` | `jq`（`DATAQ_INGEST_BOOK_VERIFY_MDBOOK` 有効時は `mdbook` も必要） |
 | `scan text` | `rg`（`--jq-project` を使う場合は `jq` も必要） |
-| `transform rowset` | `jq`, `mlr` |
+| `transform rowset` | `jq`, `mlr`（`--emit-pipeline` の stage2 tool label は `mlr`） |
+| `transform sql` | `duckdb` |
 
 補足:
 - `doctor --profile` でワークフロー別に必要ツールの充足を診断できます（`doc` / `api` / `notes` / `book` / `scan` など）。
@@ -83,6 +85,7 @@ dataq [--emit-pipeline] <command> [options]
 | `canon` | 入力を決定的に正規化し、JSON/JSONLへ変換 | `--from <json|yaml|csv|jsonl>`（stdin時は省略可） |
 | `ingest api` | HTTP API 応答を `xh -> jq` で決定的JSONへ正規化 | `--url <http(s)://...>` |
 | `ingest yaml-jobs` | YAMLのCIジョブ定義を正規化JSON配列へ変換 | `--input <path|->` `--mode <github-actions|gitlab-ci|generic-map>` |
+| `ingest tabular` | 表形式入力を `csvkit` で決定的JSON配列へ正規化 | `--input <path|->` |
 | `assert` | ルール or JSON Schema で検証 | `--rules <path>` または `--schema <path>` |
 | `gate schema` | JSON Schema で品質ゲートを実行（`assert --schema` の専用ラッパー） | `--schema <path>` |
 | `gate policy` | ルールベース品質ゲートを実行（違反詳細を決定的順序で出力） | `--rules <path>` |
@@ -93,7 +96,8 @@ dataq [--emit-pipeline] <command> [options]
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
 | `scan text` | テキストを正規表現で走査し構造化結果を出力 | `--pattern <regex>` |
-| `transform rowset` | `jq -> mlr` の2段でrowsetを変換しJSON配列を出力 | `--input <path|->` `--jq-filter <filter>` `--mlr <verb...>` |
+| `transform rowset` | `jq -> mlr` の2段でrowsetを変換しJSON配列を出力 | `--input <path|->` `--engine <sqlite>` `--jq-filter <filter>` `--mlr <verb...>` |
+| `transform sql` | `duckdb` でSQL変換しJSON配列を出力 | `--input <path|->` `--query <sql>` `--engine <duckdb>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
 | `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
@@ -107,7 +111,7 @@ dataq [--emit-pipeline] <command> [options]
 グローバルオプション:
 
 - `--emit-pipeline`: stderr に pipeline JSON を1行追加出力（`fingerprint` を含む）
-  - `fingerprint.tool_versions` は実際に呼び出す外部ツール実体を対象に採取（`DATAQ_JQ_BIN` / `DATAQ_YQ_BIN` / `DATAQ_MLR_BIN` / `DATAQ_PANDOC_BIN` を尊重）
+  - `fingerprint.tool_versions` は実際に呼び出す外部ツール実体を対象に採取（`DATAQ_JQ_BIN` / `DATAQ_YQ_BIN` / `DATAQ_MLR_BIN` / `DATAQ_PANDOC_BIN` / `DATAQ_DUCKDB_BIN` / `DATAQ_QSV_BIN` を尊重）
 - `-h, --help`: ヘルプ
 - `-V, --version`: バージョン
 
@@ -130,6 +134,9 @@ dataq ingest api --url https://example.test/items --header 'accept:application/j
 # YAMLのCIジョブ定義を正規化
 dataq ingest yaml-jobs --input .github/workflows/ci.yml --mode github-actions > jobs.json
 dataq assert --input jobs.json --rules examples/assert-rules/github-actions/jobs.rules.yaml
+
+# 表形式データをcsvkit経由で正規化
+dataq ingest tabular --input orders.csv > rows.json
 
 # JSON Schema 検証
 dataq assert --input out.jsonl --schema schema.json
@@ -159,7 +166,12 @@ dataq aggregate --input orders.json --group-by team --metric avg --target price
 dataq scan text --pattern 'TODO|FIXME' --path . --glob '*.rs' --policy-mode
 
 # rowset変換（stage1: jq, stage2: mlr）
-dataq transform rowset --input orders.json --jq-filter '.' --mlr stats1 -a mean -f price -g team
+dataq transform rowset --input orders.json --engine sqlite --jq-filter '.' --mlr stats1 -a mean -f price -g team
+
+# SQL変換（DuckDB）
+dataq transform sql --input orders.json \
+  --engine duckdb \
+  --query 'SELECT team, AVG(price) AS avg_price FROM input GROUP BY team ORDER BY team'
 
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
@@ -309,10 +321,12 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 - ルールは `extends` で再利用可能（親相対パス解決、循環/欠損/不正形式は入力不正）
 - `extends` マージ: `required_keys`/`forbid_keys` は和集合、`fields` はパス後勝ち、`count` は最後に定義された値を採用
 - `--schema <path>`: JSON Schema で検証
+- `--engine <jsonschema|ajv|checkjs>`: `--schema` 時の検証エンジンを選択（既定: `jsonschema`。`ajv` は `ajv` CLI と `DATAQ_AJV_BIN`、`checkjs` は `check-jsonschema` CLI と `DATAQ_CHECK_JSONSCHEMA_BIN` で上書き可）
 - `--normalize <github-actions-jobs|gitlab-ci-jobs>`: 生のCI定義を `yq -> jq -> mlr` の3段でジョブ単位レコードへ正規化してから検証（`yq`/`jq`/`mlr` 必須）
 - `--rules` と `--schema` は同時指定不可（入力不正として終了コード `3`）
 - `--rules-help`: `--rules` 用ルール仕様を機械可読JSONで出力して終了（終了コード `0`）
 - `--schema-help`: `--schema`（JSON Schema検証）用の使い方と結果契約を機械可読JSONで出力して終了（終了コード `0`）
+- `mismatches[].expected`（schemaモード）には `engine`, `instance_path`, `schema_path`, `keyword`（任意）, `message` を正規化して出力
 
 失敗時は機械可読エラーJSONを返し、終了コード `2`。  
 `mismatches[]` は `path`, `rule_kind`, `reason`, `actual`, `expected` を含みます。
@@ -463,6 +477,8 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
   - `type_distribution`（`null|boolean|number|string|array|object`）
   - `numeric_stats`（数値サンプルが1件以上ある場合のみ）
     - `count`, `min`, `max`, `mean`, `p50`, `p95`
+- `--from csv` では通常CSV行の集計に加えて、qsv adapter の profile/stats CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` など）も受け取り、同一スキーマへ正規化
+- qsv adapter CSV 正規化パスが使われた場合、`--emit-pipeline` の `stage_diagnostics` に `profile_qsv_normalize` を出力し、`external_tools` に `qsv` を `used=true` で記録
 
 `numeric_stats` の決定性ルール:
 
@@ -495,6 +511,19 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 - 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
 - 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
+### `ingest tabular`
+
+表形式入力（CSVなど）を `csvkit` (`in2csv -> csvjson`) で JSON 配列へ変換します。
+
+- `--input <path|->`: 入力ファイルまたは stdin（`-`）
+- stage1: `in2csv` で CSV へ正規化
+- stage2: `csvjson --no-inference` で JSON 配列化
+- 行オブジェクトはキー順を再帰的に固定し、同一入力で同一出力を保証
+- `csvkit` 不在・変換失敗・不正入力は終了コード `3`
+- `--emit-pipeline` ステップ:
+  - `ingest_tabular_csvkit_in2csv`
+  - `ingest_tabular_csvkit_csvjson`
+
 ### 8. `ingest doc`
 
 ドキュメント入力（Markdown/HTML/DOCX/reStructuredText/LaTeX）を、固定スキーマ JSON へ抽出します。
@@ -523,16 +552,32 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 
 ### 10. `transform rowset`
 
-固定2段 (`jq -> mlr`) で rowset を変換し、JSON配列で返す。
+固定2段 (`jq -> mlr`) で rowset を変換し、JSON配列で返す（CLI 互換のため `--engine sqlite` を受け付け）。
 
 - `--input <path|->`: 入力（`-` は stdin）
+- `--engine <sqlite>`: stage2 engine セレクタ（既定値 `sqlite`）
 - `--jq-filter <filter>`: stage1 の jq filter
-- `--mlr <verb...>`: stage2 の mlr 引数列
+- `--mlr <verb...>`: stage2 (`mlr`) アダプタ引数列
 - 出力は JSON 配列固定
 - `jq`/`mlr` 実行や filter/args 不正は終了コード `3`
-- `--emit-pipeline` では `transform_rowset_jq`, `transform_rowset_mlr` を stage 診断として出力
+- `--emit-pipeline` では `transform_rowset_jq`, `transform_rowset_mlr` を stage 診断として出力（stage2 `tool` は `mlr`）
 
-### 11. `merge`
+### 11. `transform sql`
+
+`duckdb` に入力 rowset をロードして SQL を実行し、JSON 配列で返す。
+
+- `--input <path|->`: 入力（`-` は stdin）
+- `--query <sql>`: 実行する SQL（決定性が必要な場合は `ORDER BY` を明示）
+- `--engine <duckdb>`: SQL 実行エンジン（現状は `duckdb` 固定）
+- 出力は JSON 配列固定
+- `duckdb` 不在・`--query` 不正・SQL実行失敗・入力不正は終了コード `3`
+- 終了コード:
+  - `0`: SQL 実行成功
+  - `3`: 入力/使用エラー（上記）
+  - `1`: 予期しない内部エラー
+  - `2`: 本コマンドでは未使用（検証系コマンドで利用）
+
+### 12. `merge`
 
 複数の JSON/YAML 入力をポリシー指定で決定的にマージ。
 
@@ -545,7 +590,7 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
   - 解決順: 最長一致する `--policy-path` を優先し、同一深さの一致は後ろに指定した定義を優先。一致なしは `--policy` を適用
 - 出力は JSON 固定（キー順は決定的にソート）
 
-### 12. `doctor`
+### 13. `doctor`
 
 実行環境の依存を診断。`--capabilities` と `--profile` に対応。
 
@@ -566,7 +611,7 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
   - `--profile` 未指定: `doctor_probe_tools`, `doctor_probe_capabilities`
   - `--profile` 指定: `doctor_profile_probe`, `doctor_profile_evaluate`
 
-### 13. `recipe run`
+### 14. `recipe run`
 
 レシピファイル（YAML/JSON）を読み込み、`steps` を定義順で実行します。
 
@@ -597,7 +642,7 @@ steps:
             type: integer
 ```
 
-### 14. `recipe lock`
+### 15. `recipe lock`
 
 レシピファイル（YAML/JSON）から、再現実行のためのロック情報を生成します。
 
@@ -615,7 +660,7 @@ steps:
   - レシピ不正 / step引数不正 / ツール解決失敗は exit `3`
 - `--emit-pipeline` 有効時は `recipe_lock_parse`, `recipe_lock_probe_tools`, `recipe_lock_fingerprint` を stderr JSON へ出力
 
-### 15. `recipe replay`
+### 16. `recipe replay`
 
 lock ファイルを検証したうえで `recipe run` と同じレシピ実行を行います。
 
@@ -634,20 +679,21 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
   - 実行された step の検証不一致は従来どおり exit `2`
 - `--emit-pipeline` 有効時は `recipe_replay_parse`, `recipe_replay_verify_lock`, `recipe_replay_execute` を stderr JSON へ出力
 
-### 16. `contract`
+### 17. `contract`
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|scan|transform-rowset|merge|doctor|recipe-run|recipe-lock>`
+- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|ingest-notes|ingest-book|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock>`
   - 単一コマンドの契約を1オブジェクトで返す
   - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `transform-rowset`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `ingest.notes`, `ingest-book`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
+  - `assert` の `notes` には `--schema` 経路の既定エンジン（`jsonschema`）と任意エンジン（`ajv`/`checkjs`）を含む
 
-### 17. `emit plan`
+### 18. `emit plan`
 
 サブコマンドの静的実行計画を、実行せずに機械可読JSONで取得します（read-only）。
 
@@ -657,8 +703,12 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
   - `command`: 対象サブコマンド
   - `args`: 解決に使った引数配列
   - `stages`: `order`, `step`, `tool`, `depends_on` を含む段情報
-  - `tools`: `jq|yq|mlr` の期待利用有無（`expected`）
+  - `tools`: `jq|yq|mlr|ajv|duckdb|check-jsonschema` の期待利用有無（`expected`）
 - `--args` は JSON 文字列で渡す（例: `'["--normalize","github-actions-jobs"]'`）
+- `assert --schema` の既定 `stages` は `validate_assert_schema_with_jsonschema`
+  - `--engine=ajv` で `validate_assert_schema_with_ajv`
+  - `--engine=checkjs` で `validate_assert_schema_with_check_jsonschema`
+- `assert` 向け `--args` では runtime と同様に、`--engine/--schema-engine` は `--schema` と併用時のみ有効
 - 終了コード:
   - `0`: 計画生成成功
   - `3`: 未対応サブコマンドまたは `--args` 形式不正
@@ -667,7 +717,7 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
   - `emit plan`: 実行前の静的計画（外部ツール実行なし）
   - `--emit-pipeline`: 実行時に観測した診断（stderr）
 
-### 18. `mcp`
+### 19. `mcp`
 
 MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理します。
 
@@ -696,6 +746,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.aggregate`
   - `dataq.scan.text`
   - `dataq.transform.rowset`
+  - `dataq.transform.sql`
   - `dataq.merge`
   - `dataq.doctor`
   - `dataq.contract`
@@ -738,7 +789,7 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - レスポンスを書き出せた場合は、ツール実行結果に関係なく `0`
   - レスポンス出力不能な致命的I/O時のみ `3`
 
-### 19. `codex install-skill`
+### 20. `codex install-skill`
 
 Codex で再利用できる dataq skill を、CLIに埋め込まれた固定資産からインストールします。
 

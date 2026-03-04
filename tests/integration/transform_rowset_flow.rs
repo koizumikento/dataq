@@ -18,6 +18,8 @@ fn transform_rowset_stdin_flow_is_deterministic() {
         .args([
             "transform",
             "rowset",
+            "--engine",
+            "sqlite",
             "--input",
             "-",
             "--jq-filter",
@@ -44,6 +46,8 @@ fn transform_rowset_stdin_flow_is_deterministic() {
         .args([
             "transform",
             "rowset",
+            "--engine",
+            "sqlite",
             "--input",
             "-",
             "--jq-filter",

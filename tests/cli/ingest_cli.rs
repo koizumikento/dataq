@@ -111,6 +111,83 @@ fn ingest_doc_unsupported_format_is_cli_input_error() {
 }
 
 #[test]
+fn ingest_jc_emits_deterministic_envelope_and_pipeline_stage() {
+    let dir = tempdir().expect("tempdir");
+    let jc_bin = write_fake_jc_script(dir.path().join("fake-jc"));
+    let input_path = dir.path().join("ifconfig.txt");
+    fs::write(&input_path, "eth0: up\n").expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JC_BIN", &jc_bin)
+        .args([
+            "--emit-pipeline",
+            "ingest",
+            "jc",
+            "--parser",
+            "ifconfig",
+            "--input",
+            input_path.to_str().expect("utf8 input"),
+        ])
+        .output()
+        .expect("run ingest jc");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(stdout_json["source"], json!("jc"));
+    assert_eq!(stdout_json["parser"], json!("ifconfig"));
+    assert_eq!(stdout_json["result_type"], json!("array"));
+    assert_eq!(stdout_json["record_count"], json!(2));
+    assert_eq!(
+        stdout_json["records"],
+        json!([
+            {"a": 1, "b": 2},
+            {"nested": {"c": 3, "d": 4}}
+        ])
+    );
+
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], json!("ingest.jc"));
+    assert_eq!(stderr_json["steps"], json!(["ingest_jc_parse"]));
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["step"],
+        json!("ingest_jc_parse")
+    );
+    assert_eq!(stderr_json["stage_diagnostics"][0]["tool"], json!("jc"));
+    assert_eq!(stderr_json["stage_diagnostics"][0]["status"], json!("ok"));
+
+    let tools = stderr_json["external_tools"]
+        .as_array()
+        .expect("external_tools");
+    let jc_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == json!("jc"))
+        .expect("jc entry");
+    assert_eq!(jc_entry["used"], json!(true));
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"]["jc"],
+        json!("fake-jc 1.2.3")
+    );
+}
+
+#[test]
+fn ingest_jc_invalid_parser_returns_exit_three() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["ingest", "jc", "--parser", "bad parser", "--input", "-"])
+        .output()
+        .expect("run ingest jc");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["error"], json!("input_usage_error"));
+    assert!(
+        stderr_json["message"]
+            .as_str()
+            .expect("message")
+            .contains("invalid `--parser`")
+    );
+}
+
+#[test]
 fn ingest_book_outputs_nested_tree_and_optional_file_metadata() {
     let dir = tempdir().expect("tempdir");
     let jq_bin = write_passthrough_jq_script(dir.path().join("jq-pass"));
@@ -224,6 +301,152 @@ fn ingest_book_emit_pipeline_reports_expected_steps() {
     assert_eq!(jq_entry["used"], json!(true));
 }
 
+#[test]
+fn ingest_book_emit_pipeline_marks_mdbook_used_when_verify_enabled() {
+    let dir = tempdir().expect("tempdir");
+    let jq_bin = write_passthrough_jq_script(dir.path().join("jq-pass"));
+    let mdbook_bin = write_fake_mdbook_script(dir.path().join("mdbook-pass"));
+    let book_root = dir.path().join("book");
+    let src_dir = book_root.join("src");
+    fs::create_dir_all(&src_dir).expect("create src");
+    fs::write(book_root.join("book.toml"), "[book]\nsrc = \"src\"\n").expect("write book.toml");
+    fs::write(src_dir.join("SUMMARY.md"), "- [Intro](intro.md)\n").expect("write summary");
+    fs::write(src_dir.join("intro.md"), "# Intro\n").expect("write intro");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JQ_BIN", &jq_bin)
+        .env("DATAQ_MDBOOK_BIN", &mdbook_bin)
+        .env("DATAQ_INGEST_BOOK_VERIFY_MDBOOK", "1")
+        .args([
+            "--emit-pipeline",
+            "ingest",
+            "book",
+            "--root",
+            book_root.to_str().expect("utf8 root"),
+        ])
+        .output()
+        .expect("run ingest book with mdbook verify");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], json!("ingest.book"));
+
+    let tools = stderr_json["external_tools"]
+        .as_array()
+        .expect("external_tools");
+    let mdbook_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == json!("mdbook"))
+        .expect("mdbook entry");
+    assert_eq!(mdbook_entry["used"], json!(true));
+}
+
+#[test]
+fn ingest_tabular_path_emits_deterministic_rows_and_pipeline_stages() {
+    let dir = tempdir().expect("tempdir");
+    let input_path = dir.path().join("rows.csv");
+    fs::write(&input_path, "id,name\n1,alice\n2,bob\n").expect("write csv");
+    let (_tool_dir, in2csv_bin, csvjson_bin) = create_fake_csvkit_shims();
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_CSVKIT_IN2CSV_BIN", &in2csv_bin)
+        .env("DATAQ_CSVKIT_CSVJSON_BIN", &csvjson_bin)
+        .env("DATAQ_CSVKIT_BIN", &in2csv_bin)
+        .args([
+            "--emit-pipeline",
+            "ingest",
+            "tabular",
+            "--input",
+            input_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run ingest tabular");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(
+        stdout_json,
+        json!([
+            {"id": "1", "name": "alice"},
+            {"id": "2", "name": "bob"}
+        ])
+    );
+
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], json!("ingest.tabular"));
+    assert_eq!(
+        stderr_json["steps"],
+        json!([
+            "ingest_tabular_csvkit_in2csv",
+            "ingest_tabular_csvkit_csvjson"
+        ])
+    );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["step"],
+        json!("ingest_tabular_csvkit_in2csv")
+    );
+    assert_eq!(
+        stderr_json["stage_diagnostics"][1]["step"],
+        json!("ingest_tabular_csvkit_csvjson")
+    );
+    assert_eq!(stderr_json["stage_diagnostics"][0]["status"], json!("ok"));
+    assert_eq!(stderr_json["stage_diagnostics"][1]["status"], json!("ok"));
+
+    let tools = stderr_json["external_tools"]
+        .as_array()
+        .expect("external_tools array");
+    let csvkit_entry = tools
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some("csvkit"))
+        .expect("csvkit entry");
+    assert_eq!(csvkit_entry["used"], json!(true));
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"]["csvkit"],
+        json!("csvkit 2.1.0")
+    );
+}
+
+#[test]
+fn ingest_tabular_stdin_marker_routes_stdin_to_stdout_json() {
+    let (_tool_dir, in2csv_bin, csvjson_bin) = create_fake_csvkit_shims();
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_CSVKIT_IN2CSV_BIN", &in2csv_bin)
+        .env("DATAQ_CSVKIT_CSVJSON_BIN", &csvjson_bin)
+        .args(["ingest", "tabular", "--input", "-"])
+        .write_stdin("id,name\n1,alice\n2,bob\n")
+        .output()
+        .expect("run ingest tabular via stdin");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(
+        stdout_json,
+        json!([
+            {"id": "1", "name": "alice"},
+            {"id": "2", "name": "bob"}
+        ])
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn ingest_tabular_missing_csvkit_returns_exit_three() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_CSVKIT_IN2CSV_BIN", "/definitely-missing/in2csv")
+        .args(["ingest", "tabular", "--input", "-"])
+        .write_stdin("id,name\n1,alice\n")
+        .output()
+        .expect("run ingest tabular");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["error"], json!("input_usage_error"));
+    assert_eq!(
+        stderr_json["message"],
+        json!("ingest tabular requires `csvkit` in PATH")
+    );
+}
+
 fn parse_last_stderr_json(stderr: &[u8]) -> Value {
     let text = String::from_utf8(stderr.to_vec()).expect("stderr utf8");
     let line = text
@@ -280,8 +503,109 @@ esac
     (dir, path.display().to_string())
 }
 
+fn create_fake_csvkit_shims() -> (tempfile::TempDir, String, String) {
+    let dir = tempdir().expect("tempdir");
+    let in2csv_path = dir.path().join("fake-in2csv");
+    let csvjson_path = dir.path().join("fake-csvjson");
+
+    write_exec_script(
+        &in2csv_path,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "csvkit 2.1.0"
+  exit 0
+fi
+
+if [ $# -gt 0 ]; then
+  cat "$1"
+else
+  cat
+fi
+"#,
+    );
+
+    write_exec_script(
+        &csvjson_path,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "csvkit 2.1.0"
+  exit 0
+fi
+
+if [ "$1" = "--no-inference" ]; then
+  shift
+fi
+
+cat >/dev/null
+cat <<'JSON'
+[{"name":"alice","id":"1"},{"name":"bob","id":"2"}]
+JSON
+"#,
+    );
+
+    (
+        dir,
+        in2csv_path.display().to_string(),
+        csvjson_path.display().to_string(),
+    )
+}
+
 fn write_passthrough_jq_script(path: PathBuf) -> PathBuf {
     write_exec_script(&path, "#!/bin/sh\ncat\n");
+    path
+}
+
+fn write_fake_jc_script(path: PathBuf) -> PathBuf {
+    write_exec_script(
+        &path,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "fake-jc 1.2.3"
+  exit 0
+fi
+
+parser=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --quiet)
+      shift
+      ;;
+    --*)
+      parser="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+cat >/dev/null
+if [ "$parser" = "--ifconfig" ]; then
+  cat <<'JSON'
+[{"b":2,"a":1},{"nested":{"d":4,"c":3}}]
+JSON
+  exit 0
+fi
+
+echo "unsupported parser: $parser" 1>&2
+exit 7
+"#,
+    );
+    path
+}
+
+fn write_fake_mdbook_script(path: PathBuf) -> PathBuf {
+    write_exec_script(
+        &path,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "fake-mdbook 0.1.0"
+  exit 0
+fi
+exit 0
+"#,
+    );
     path
 }
 

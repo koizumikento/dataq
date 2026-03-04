@@ -23,6 +23,7 @@ fn help_is_available() {
         .stdout(predicate::str::contains("sdiff"))
         .stdout(predicate::str::contains("diff"))
         .stdout(predicate::str::contains("profile"))
+        .stdout(predicate::str::contains("schema"))
         .stdout(predicate::str::contains("scan"))
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("contract"))
@@ -232,6 +233,14 @@ fn assert_schema_help_outputs_machine_readable_json() {
     assert_eq!(
         stdout_json["mismatch_shape"]["reason"],
         Value::from("schema_mismatch")
+    );
+    assert_eq!(
+        stdout_json["mode"]["available_engines"],
+        Value::Array(vec![
+            Value::from("jsonschema"),
+            Value::from("ajv"),
+            Value::from("checkjs"),
+        ])
     );
     assert!(stdout_json["example_schema"].is_object());
 }

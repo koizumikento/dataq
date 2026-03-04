@@ -37,6 +37,15 @@ pub enum TransformRowsetError {
     },
 }
 
+/// Domain errors for transform SQL execution through a DuckDB adapter hook.
+#[derive(Debug, Error)]
+pub enum TransformSqlError {
+    #[error("`--query` cannot be empty")]
+    InvalidSql,
+    #[error("failed to transform rowset with duckdb: {0}")]
+    Duckdb(String),
+}
+
 /// Executes fixed stage order `jq -> mlr` with deterministic ordering.
 pub fn execute_rowset(
     values: &[Value],
@@ -65,11 +74,7 @@ pub fn execute_rowset(
             jq_output_records: jq_output,
             source,
         })?;
-    let mlr_rows: Vec<Value> = mlr_rows
-        .into_iter()
-        .map(canonicalize_float_values)
-        .collect();
-    let rows = deterministic_rows(mlr_rows);
+    let rows = normalize_output_rows(mlr_rows);
     let mlr_output = rows.len();
 
     Ok(TransformRowsetExecution {
@@ -78,6 +83,33 @@ pub fn execute_rowset(
         jq_output_records: jq_output,
         mlr_output_records: mlr_output,
     })
+}
+
+/// Executes SQL rowset transform through an injected DuckDB adapter hook.
+pub fn execute_sql_with_duckdb_hook<F, E>(
+    values: &[Value],
+    sql: &str,
+    execute_duckdb: F,
+) -> Result<Vec<Value>, TransformSqlError>
+where
+    F: FnOnce(&[Value], &str) -> Result<Vec<Value>, E>,
+    E: std::fmt::Display,
+{
+    if sql.trim().is_empty() {
+        return Err(TransformSqlError::InvalidSql);
+    }
+
+    let rows = execute_duckdb(values, sql)
+        .map_err(|source| TransformSqlError::Duckdb(source.to_string()))?;
+    Ok(normalize_output_rows(rows))
+}
+
+fn normalize_output_rows(rows: Vec<Value>) -> Vec<Value> {
+    let rows = rows
+        .into_iter()
+        .map(canonicalize_float_values)
+        .collect::<Vec<Value>>();
+    deterministic_rows(rows)
 }
 
 fn deterministic_rows(mut rows: Vec<Value>) -> Vec<Value> {

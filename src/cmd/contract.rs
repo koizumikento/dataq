@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 18] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 19] = [
     ContractCommand::Canon,
     ContractCommand::IngestApi,
     ContractCommand::Ingest,
@@ -17,6 +17,7 @@ pub const ORDERED_COMMANDS: [ContractCommand; 18] = [
     ContractCommand::IngestBook,
     ContractCommand::Scan,
     ContractCommand::TransformRowset,
+    ContractCommand::TransformSql,
     ContractCommand::Merge,
     ContractCommand::Doctor,
     ContractCommand::RecipeRun,
@@ -40,6 +41,7 @@ pub enum ContractCommand {
     IngestBook,
     Scan,
     TransformRowset,
+    TransformSql,
     Merge,
     Doctor,
     RecipeRun,
@@ -93,6 +95,7 @@ const INGEST_NOTES_FIELDS: &[&str] = &[
 ];
 const INGEST_BOOK_FIELDS: &[&str] = &["book", "summary"];
 const SCAN_FIELDS: &[&str] = &["matches", "summary"];
+const TRANSFORM_SQL_FIELDS: &[&str] = &[];
 const DOCTOR_FIELDS: &[&str] = &["tools"];
 const RECIPE_RUN_FIELDS: &[&str] = &["matched", "exit_code", "steps"];
 const RECIPE_LOCK_FIELDS: &[&str] = &[
@@ -118,6 +121,7 @@ const INGEST_YAML_JOBS_NOTES: &[&str] = &[
 const ASSERT_NOTES: &[&str] = &[
     "Validation mismatch details are emitted in `mismatches`.",
     "`--rules-help` and `--schema-help` have dedicated schema IDs.",
+    "`--schema` defaults to built-in `jsonschema`; optional engines are `ajv` and `checkjs`.",
 ];
 const GATE_SCHEMA_NOTES: &[&str] = &[
     "JSON output shape is aligned with `assert --schema`.",
@@ -138,6 +142,7 @@ const DIFF_SOURCE_NOTES: &[&str] = &[
 const PROFILE_NOTES: &[&str] = &[
     "`fields` keys are canonical JSON paths in deterministic order.",
     "`numeric_stats` is omitted when no numeric samples exist.",
+    "`--from csv` can normalize qsv adapter profile/stats CSV rows into the same output schema.",
 ];
 const INGEST_DOC_NOTES: &[&str] = &[
     "Extraction runs as `pandoc -t json` followed by jq projection.",
@@ -158,6 +163,10 @@ const SCAN_NOTES: &[&str] = &[
 const TRANSFORM_ROWSET_NOTES: &[&str] = &[
     "Output is always a JSON array.",
     "`jq` runs first, then `mlr`, with stage-level diagnostics in `--emit-pipeline`.",
+];
+const TRANSFORM_SQL_NOTES: &[&str] = &[
+    "Output is always a JSON array.",
+    "`duckdb` executes the SQL stage with explicit argument-array invocation.",
 ];
 const MERGE_NOTES: &[&str] = &[
     "Output is the merged root JSON value.",
@@ -322,6 +331,13 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             exit_codes: exit_codes("validation mismatch is not used by this command"),
             notes: TRANSFORM_ROWSET_NOTES,
         },
+        ContractCommand::TransformSql => CommandContract {
+            command: "transform-sql",
+            schema: "dataq.transform.sql.output.v1",
+            output_fields: TRANSFORM_SQL_FIELDS,
+            exit_codes: exit_codes("validation mismatch is not used by this command"),
+            notes: TRANSFORM_SQL_NOTES,
+        },
         ContractCommand::Merge => CommandContract {
             command: "merge",
             schema: "dataq.merge.output.v1",
@@ -385,5 +401,32 @@ fn serialize_payload<T: Serialize>(payload: &T) -> ContractCommandResponse {
                 "message": format!("failed to serialize contract payload: {error}"),
             }),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{ContractCommand, run_for_command};
+
+    #[test]
+    fn assert_contract_keeps_expected_output_fields() {
+        let response = run_for_command(ContractCommand::Assert);
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(
+            response.payload["output_fields"],
+            json!(["matched", "mismatch_count", "mismatches"])
+        );
+    }
+
+    #[test]
+    fn assert_contract_mentions_optional_schema_engines() {
+        let response = run_for_command(ContractCommand::Assert);
+        let notes = response.payload["notes"].as_array().expect("notes array");
+        assert!(notes.iter().any(|note| {
+            note.as_str()
+                .is_some_and(|text| text.contains("optional engines are `ajv` and `checkjs`"))
+        }));
     }
 }

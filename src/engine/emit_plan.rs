@@ -9,7 +9,7 @@ use crate::cmd::{
     canon, contract, doctor, join, merge, profile, sdiff,
 };
 
-const TOOL_ORDER: [&str; 3] = ["jq", "yq", "mlr"];
+const TOOL_ORDER: [&str; 6] = ["jq", "yq", "mlr", "ajv", "duckdb", "check-jsonschema"];
 
 /// Request shape for static plan resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +96,11 @@ fn resolve_steps(command: &str, args: &[String]) -> Result<Vec<String>, EmitPlan
         "join" => Ok(join::pipeline_steps()),
         "aggregate" => Ok(aggregate::pipeline_steps()),
         "merge" => Ok(merge::pipeline_steps()),
+        "transform-sql" => Ok(vec![
+            "resolve_transform_sql_input".to_string(),
+            "execute_transform_sql_with_duckdb".to_string(),
+            "write_transform_sql_output".to_string(),
+        ]),
         "doctor" => Ok(doctor::pipeline_steps(None)),
         "contract" => Ok(contract::pipeline_steps()),
         "recipe" | "recipe.run" => resolve_recipe_steps(args),
@@ -106,6 +111,26 @@ fn resolve_steps(command: &str, args: &[String]) -> Result<Vec<String>, EmitPlan
             "write_mcp_response".to_string(),
         ]),
         _ => Err(EmitPlanError::UnknownCommand(command.to_string())),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssertSchemaPlanEngine {
+    Jsonschema,
+    Ajv,
+    Checkjs,
+}
+
+impl AssertSchemaPlanEngine {
+    fn from_flag_value(value: &str) -> Result<Self, EmitPlanError> {
+        match value {
+            "jsonschema" => Ok(Self::Jsonschema),
+            "ajv" => Ok(Self::Ajv),
+            "checkjs" => Ok(Self::Checkjs),
+            other => Err(EmitPlanError::InvalidArguments(format!(
+                "`--engine`/`--schema-engine` must be `jsonschema`, `ajv`, or `checkjs` (received `{other}`)"
+            ))),
+        }
     }
 }
 
@@ -134,7 +159,58 @@ fn resolve_assert_steps(args: &[String]) -> Result<Vec<String>, EmitPlanError> {
     if schema_help {
         return Ok(vec!["emit_assert_schema_help".to_string()]);
     }
+
+    let uses_rules = has_flag_or_assigned_value(args, "--rules");
+    let uses_schema = has_flag_or_assigned_value(args, "--schema");
+    if uses_rules && uses_schema {
+        return Err(EmitPlanError::InvalidArguments(
+            "`--rules` and `--schema` are mutually exclusive".to_string(),
+        ));
+    }
+    let schema_engine = parse_assert_schema_engine(args)?;
+    if schema_engine.is_some() && !uses_schema {
+        return Err(EmitPlanError::InvalidArguments(
+            "`--engine`/`--schema-engine` are supported only with `--schema`".to_string(),
+        ));
+    }
+    let schema_flag = parse_assert_custom_flag(args, "--schema-flag")?;
+    let input_flag = parse_assert_custom_flag(args, "--input-flag")?;
+    if (schema_flag.is_some() || input_flag.is_some())
+        && schema_engine.unwrap_or(AssertSchemaPlanEngine::Jsonschema)
+            != AssertSchemaPlanEngine::Checkjs
+    {
+        return Err(EmitPlanError::InvalidArguments(
+            "`--schema-flag` and `--input-flag` are supported only with schema engine `checkjs`"
+                .to_string(),
+        ));
+    }
+    if uses_schema {
+        let schema_engine = schema_engine.unwrap_or(AssertSchemaPlanEngine::Jsonschema);
+        return Ok(assert_schema_pipeline_steps(normalize_mode, schema_engine));
+    }
+
     Ok(assert_cmd::pipeline_steps(normalize_mode))
+}
+
+fn assert_schema_pipeline_steps(
+    normalize: Option<AssertInputNormalizeMode>,
+    schema_engine: AssertSchemaPlanEngine,
+) -> Vec<String> {
+    let validate_step = match schema_engine {
+        AssertSchemaPlanEngine::Jsonschema => "validate_assert_schema_with_jsonschema",
+        AssertSchemaPlanEngine::Ajv => "validate_assert_schema_with_ajv",
+        AssertSchemaPlanEngine::Checkjs => "validate_assert_schema_with_check_jsonschema",
+    };
+    let mut steps = vec![
+        "load_schema".to_string(),
+        "resolve_input_format".to_string(),
+        "read_input_values".to_string(),
+        validate_step.to_string(),
+    ];
+    if normalize.is_some() {
+        steps.insert(3, "normalize_assert_input".to_string());
+    }
+    steps
 }
 
 fn resolve_recipe_steps(args: &[String]) -> Result<Vec<String>, EmitPlanError> {
@@ -197,8 +273,107 @@ fn parse_assert_normalize_mode(
     }
 }
 
+fn parse_assert_schema_engine(
+    args: &[String],
+) -> Result<Option<AssertSchemaPlanEngine>, EmitPlanError> {
+    let mut engine_value: Option<AssertSchemaPlanEngine> = None;
+    let mut schema_engine_value: Option<AssertSchemaPlanEngine> = None;
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let current = args[index].as_str();
+        if current == "--engine" || current == "--schema-engine" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(EmitPlanError::InvalidArguments(format!(
+                    "missing value for `{current}`"
+                )));
+            };
+            let parsed = AssertSchemaPlanEngine::from_flag_value(value)?;
+            if current == "--engine" {
+                if engine_value.is_some() {
+                    return Err(EmitPlanError::InvalidArguments(
+                        "`--engine` can only be provided once".to_string(),
+                    ));
+                }
+                engine_value = Some(parsed);
+            } else {
+                if schema_engine_value.is_some() {
+                    return Err(EmitPlanError::InvalidArguments(
+                        "`--schema-engine` can only be provided once".to_string(),
+                    ));
+                }
+                schema_engine_value = Some(parsed);
+            }
+        } else if let Some((flag, value)) = current.split_once('=') {
+            if flag == "--engine" || flag == "--schema-engine" {
+                let parsed = AssertSchemaPlanEngine::from_flag_value(value)?;
+                if flag == "--engine" {
+                    if engine_value.is_some() {
+                        return Err(EmitPlanError::InvalidArguments(
+                            "`--engine` can only be provided once".to_string(),
+                        ));
+                    }
+                    engine_value = Some(parsed);
+                } else {
+                    if schema_engine_value.is_some() {
+                        return Err(EmitPlanError::InvalidArguments(
+                            "`--schema-engine` can only be provided once".to_string(),
+                        ));
+                    }
+                    schema_engine_value = Some(parsed);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    Ok(schema_engine_value.or(engine_value))
+}
+
+fn parse_assert_custom_flag(args: &[String], flag: &str) -> Result<Option<String>, EmitPlanError> {
+    let mut value: Option<String> = None;
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let current = args[index].as_str();
+        if current == flag {
+            if value.is_some() {
+                return Err(EmitPlanError::InvalidArguments(format!(
+                    "`{flag}` can only be provided once"
+                )));
+            }
+            index += 1;
+            let Some(next) = args.get(index) else {
+                return Err(EmitPlanError::InvalidArguments(format!(
+                    "missing value for `{flag}`"
+                )));
+            };
+            value = Some(next.clone());
+        } else if let Some((candidate_flag, assigned_value)) = current.split_once('=') {
+            if candidate_flag == flag {
+                if value.is_some() {
+                    return Err(EmitPlanError::InvalidArguments(format!(
+                        "`{flag}` can only be provided once"
+                    )));
+                }
+                value = Some(assigned_value.to_string());
+            }
+        }
+        index += 1;
+    }
+
+    Ok(value)
+}
+
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
+}
+
+fn has_flag_or_assigned_value(args: &[String], flag: &str) -> bool {
+    let prefix = format!("{flag}=");
+    args.iter()
+        .any(|arg| arg == flag || arg.starts_with(prefix.as_str()))
 }
 
 fn reject_assigned_assert_help_value(args: &[String], flag: &str) -> Result<(), EmitPlanError> {
@@ -231,8 +406,11 @@ fn build_stages(command: &str, steps: &[String]) -> Vec<EmitPlanStage> {
 fn stage_tool(command: &str, step: &str) -> &'static str {
     match command {
         "assert" if step == "normalize_assert_input" => "yq+jq+mlr",
+        "assert" if step == "validate_assert_schema_with_ajv" => "ajv",
+        "assert" if step == "validate_assert_schema_with_check_jsonschema" => "check-jsonschema",
         "join" if step == "execute_join_with_mlr" => "mlr",
         "aggregate" if step == "execute_aggregate_with_mlr" => "mlr",
+        "transform-sql" if step == "execute_transform_sql_with_duckdb" => "duckdb",
         "doctor" => match step {
             "doctor_probe_jq" => "jq",
             "doctor_probe_yq" => "yq",
@@ -295,6 +473,181 @@ mod tests {
             plan.tools
                 .iter()
                 .any(|tool| tool.name == "mlr" && tool.expected)
+        );
+        assert!(
+            plan.tools
+                .iter()
+                .any(|tool| tool.name == "check-jsonschema" && !tool.expected)
+        );
+    }
+
+    #[test]
+    fn resolves_assert_schema_plan_defaults_to_jsonschema_stage() {
+        let plan = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec!["--schema=schema.json".to_string()],
+        })
+        .expect("assert schema plan");
+
+        let steps: Vec<String> = plan.stages.iter().map(|stage| stage.step.clone()).collect();
+        assert_eq!(
+            steps,
+            vec![
+                "load_schema",
+                "resolve_input_format",
+                "read_input_values",
+                "validate_assert_schema_with_jsonschema",
+            ]
+        );
+        assert!(
+            plan.stages
+                .iter()
+                .all(|stage| stage.tool != "check-jsonschema")
+        );
+        assert!(plan.stages.iter().any(|stage| stage.tool == "rust"));
+        assert!(
+            plan.tools
+                .iter()
+                .any(|tool| tool.name == "check-jsonschema" && !tool.expected)
+        );
+    }
+
+    #[test]
+    fn resolves_assert_schema_plan_with_checkjsonschema_when_engine_checkjs() {
+        let plan = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec![
+                "--schema=schema.json".to_string(),
+                "--engine=checkjs".to_string(),
+            ],
+        })
+        .expect("assert schema checkjs plan");
+        assert!(
+            plan.stages
+                .iter()
+                .any(|stage| stage.step == "validate_assert_schema_with_check_jsonschema")
+        );
+        assert!(
+            plan.tools
+                .iter()
+                .any(|tool| tool.name == "check-jsonschema" && tool.expected)
+        );
+    }
+
+    #[test]
+    fn resolves_assert_schema_plan_with_ajv_when_engine_ajv() {
+        let plan = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec![
+                "--schema=schema.json".to_string(),
+                "--engine=ajv".to_string(),
+            ],
+        })
+        .expect("assert schema ajv plan");
+        assert!(
+            plan.stages
+                .iter()
+                .any(|stage| stage.step == "validate_assert_schema_with_ajv")
+        );
+        assert!(plan.stages.iter().any(|stage| stage.tool == "ajv"));
+        assert!(
+            plan.tools
+                .iter()
+                .any(|tool| tool.name == "ajv" && tool.expected)
+        );
+    }
+
+    #[test]
+    fn rejects_rules_and_schema_combination_for_assert_plan() {
+        let error = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec![
+                "--rules".to_string(),
+                "rules.yaml".to_string(),
+                "--schema".to_string(),
+            ],
+        })
+        .expect_err("rules + schema must fail");
+        assert_eq!(
+            error,
+            EmitPlanError::InvalidArguments(
+                "`--rules` and `--schema` are mutually exclusive".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_assert_engine_override_without_schema_for_assert_plan() {
+        let error = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec!["--engine=ajv".to_string()],
+        })
+        .expect_err("engine without schema must fail");
+        assert_eq!(
+            error,
+            EmitPlanError::InvalidArguments(
+                "`--engine`/`--schema-engine` are supported only with `--schema`".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_assert_schema_flag_overrides_without_checkjs_engine() {
+        let error = resolve(&EmitPlanRequest {
+            command: "assert".to_string(),
+            args: vec![
+                "--schema=schema.json".to_string(),
+                "--schema-flag=--custom-schema".to_string(),
+                "--input-flag=--custom-input".to_string(),
+            ],
+        })
+        .expect_err("custom flags without checkjs must fail");
+        assert_eq!(
+            error,
+            EmitPlanError::InvalidArguments(
+                "`--schema-flag` and `--input-flag` are supported only with schema engine `checkjs`"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn resolves_transform_sql_plan_with_duckdb_stage_and_tools() {
+        let plan = resolve(&EmitPlanRequest {
+            command: "transform-sql".to_string(),
+            args: Vec::new(),
+        })
+        .expect("transform-sql plan");
+
+        assert_eq!(
+            plan.stages
+                .iter()
+                .map(|stage| stage.step.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "resolve_transform_sql_input",
+                "execute_transform_sql_with_duckdb",
+                "write_transform_sql_output",
+            ]
+        );
+        assert_eq!(plan.stages[1].tool, "duckdb");
+        assert_eq!(
+            plan.stages[1].depends_on,
+            vec!["resolve_transform_sql_input".to_string()]
+        );
+        assert_eq!(
+            plan.tools
+                .iter()
+                .map(|tool| (tool.name.as_str(), tool.expected))
+                .collect::<Vec<_>>(),
+            vec![
+                ("jq", false),
+                ("yq", false),
+                ("mlr", false),
+                ("ajv", false),
+                ("duckdb", true),
+                ("check-jsonschema", false),
+            ]
         );
     }
 

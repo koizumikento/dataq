@@ -549,6 +549,52 @@ fn emit_pipeline_true_includes_pipeline() {
 }
 
 #[test]
+fn profile_emit_pipeline_marks_qsv_used_for_qsv_csv_input() {
+    let dir = tempdir().expect("tempdir");
+    let input_path = dir.path().join("qsv-profile.csv");
+    let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
+id,Integer,1,3,4,1,4,2.333333,2,4\n\
+flag,String,2,2,4,,,,,\n";
+    fs::write(&input_path, qsv_rows).expect("write qsv csv");
+
+    let request = tool_call_request(
+        31,
+        "dataq.profile",
+        json!({
+            "emit_pipeline": true,
+            "from": "csv",
+            "input_path": input_path
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+
+    let tools = response["result"]["structuredContent"]["pipeline"]["external_tools"]
+        .as_array()
+        .expect("external_tools");
+    let qsv_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == json!("qsv"))
+        .expect("qsv entry");
+    assert_eq!(qsv_entry["used"], Value::Bool(true));
+
+    let stage = response["result"]["structuredContent"]["pipeline"]["stage_diagnostics"]
+        .as_array()
+        .expect("stage diagnostics")
+        .first()
+        .expect("qsv stage");
+    assert_eq!(stage["step"], Value::from("profile_qsv_normalize"));
+    assert_eq!(stage["tool"], Value::from("qsv"));
+}
+
+#[test]
 fn ingest_doc_emit_pipeline_marks_pandoc_and_jq_used() {
     let toolchain = FakeToolchain::new();
     let request = tool_call_request(

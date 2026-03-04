@@ -13,6 +13,7 @@ dataq [--emit-pipeline] <command> [options]
 - `canon`: 入力を決定的に正規化し、JSON/JSONLへ変換
 - `ingest api`: HTTP API 応答を `xh -> jq` で決定的JSONへ正規化
 - `ingest yaml-jobs`: YAMLのCIジョブ定義を正規化JSON配列へ変換
+- `ingest tabular`: 表形式入力を `csvkit` (`in2csv -> csvjson`) で決定的JSON配列へ変換
 - `assert`: ルールまたはJSON Schemaで検証
 - `gate schema`: JSON Schemaで品質ゲートを実行（`assert --schema` ラッパー）
 - `gate policy`: ルールベース品質ゲートを実行（`matched/violations/details`）
@@ -23,7 +24,8 @@ dataq [--emit-pipeline] <command> [options]
 - `join`: 2入力をキー結合してJSON配列を出力
 - `aggregate`: グループ集計をJSON配列で出力
 - `scan text`: 正規表現でテキストを走査して構造化マッチを出力
-- `transform rowset`: 固定2段 (`jq -> mlr`) でrowset変換してJSON配列を出力
+- `transform rowset`: 固定2段 (`jq -> sql`) でrowset変換してJSON配列を出力
+- `transform sql`: `duckdb` でSQL変換してJSON配列を出力
 - `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
 - `doctor`: 依存ツール診断（`--profile` 指定でワークフロー別要件評価）
 - `recipe run`: 宣言的レシピを定義順に実行
@@ -37,18 +39,19 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|scan|transform-rowset|merge|doctor|recipe-run|recipe-lock>`
+  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|ingest-notes|ingest-book|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
   - `--command recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `transform-rowset`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `ingest.notes`, `ingest-book`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
   - `output_fields`
   - `exit_codes`
   - `notes`
+  - `assert` の `notes` には `--schema` 既定エンジン（`jsonschema`）と任意エンジン（`ajv`/`checkjs`）を含む
 - 終了コード:
   - `0`: 成功
   - `3`: 入力不正（例: `--command` に未知値）
@@ -67,7 +70,11 @@ dataq [--emit-pipeline] <command> [options]
   - `command`: 対象サブコマンド名
   - `args`: 計画解決に使った引数配列
   - `stages`: 段情報配列（`order`, `step`, `tool`, `depends_on`）
-  - `tools`: `jq|yq|mlr` の期待利用有無（`expected`）
+  - `tools`: `jq|yq|mlr|ajv|duckdb|check-jsonschema` の期待利用有無（`expected`）
+- `assert --schema` の既定 stage は `validate_assert_schema_with_jsonschema`
+  - `--engine=ajv` で `validate_assert_schema_with_ajv`
+  - `--engine=checkjs` で `validate_assert_schema_with_check_jsonschema`
+- `assert` 向け `--args` では runtime と同様に、`--engine/--schema-engine` は `--schema` と併用時のみ有効
 - 終了コード:
   - `0`: 成功
   - `3`: 未対応サブコマンドまたは `--args` 形式不正
@@ -143,6 +150,7 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.aggregate`
   - `dataq.scan.text`
   - `dataq.transform.rowset`
+  - `dataq.transform.sql`
   - `dataq.merge`
   - `dataq.doctor`
   - `dataq.contract`
@@ -243,7 +251,7 @@ dataq [--emit-pipeline] <command> [options]
 ## `transform rowset` コマンド契約（MVP）
 
 - コマンド:
-  - `dataq transform rowset --input <path|-> --jq-filter <filter> --mlr <verb...>`
+  - `dataq transform rowset --input <path|-> --engine <sqlite> --jq-filter <filter> --mlr <verb...>`
 - 出力: JSON 配列（stdout）
 - ステージ:
   - stage1 `jq`: enrichment/type shaping
@@ -252,13 +260,32 @@ dataq [--emit-pipeline] <command> [options]
   - tool 実行失敗または filter/args 不正は exit `3`
 - 実行方式:
   - `jq` / `mlr` を明示的引数配列で実行（シェル展開なし）
-  - `--emit-pipeline` で `stage_diagnostics` に `transform_rowset_jq`, `transform_rowset_mlr` を出力
+  - `--emit-pipeline` で `stage_diagnostics` に `transform_rowset_jq`, `transform_rowset_mlr` を出力（stage2 `tool` は `mlr`）
   - stage ごとに `input_records` / `output_records` を出力
+
+## `transform sql` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq transform sql --input <path|-> --query <sql> --engine <duckdb>`
+- 出力: JSON 配列（stdout）
+- 実行方式:
+  - 入力 rowset を DuckDB へロードし、`--query` を実行
+  - 決定的な行順が必要なクエリは `ORDER BY` を明示
+  - `duckdb` は明示的引数配列で実行（シェル展開なし）
+- 例:
+  - `dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, AVG(price) AS avg_price FROM input GROUP BY team ORDER BY team'`
+- 終了コード:
+  - `0`: SQL 実行成功
+  - `3`: 入力/使用エラー（`duckdb` 不在、`--query` 不正、SQL実行失敗、入力不正）
+  - `1`: 予期しない内部エラー
+  - `2`: 本コマンドでは未使用（検証系コマンドで利用）
 
 ## `profile` 出力契約
 
 - 既存キーは固定: `record_count`, `field_count`, `fields`, `type_distribution`
 - `fields.<canonical-path>.numeric_stats` は後方互換な追加キー（数値サンプルが存在するときのみ出力）
+- `--from csv` は通常CSV行の集計に加えて、qsv adapter 出力CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` 等）を同一スキーマへ正規化可能
+- qsv adapter 正規化パスが使われた場合、`--emit-pipeline` で `stage_diagnostics` に `profile_qsv_normalize` を出力し、`external_tools` で `qsv.used=true` を記録
 - `numeric_stats` スキーマ:
   - `count`
   - `min`
@@ -305,6 +332,8 @@ dataq [--emit-pipeline] <command> [options]
 - `dataq assert --rules-help` で `--rules` 用ルール仕様を機械可読JSONで出力
 - `dataq assert --schema-help` で `--schema`（JSON Schema検証）の使い方と結果契約を機械可読JSONで出力
 - このモードは検証処理を実行せず、終了コード `0` で終了
+- `dataq assert --schema <path> --engine <jsonschema|ajv|checkjs>` で schema 検証エンジンを選択可能（既定: `jsonschema`。`ajv` は `ajv` CLI と `DATAQ_AJV_BIN`、`checkjs` は `check-jsonschema` CLI と `DATAQ_CHECK_JSONSCHEMA_BIN` で上書き可能）
+- schema mismatch の `mismatches[].expected` には `engine`, `instance_path`, `schema_path`, `keyword`（任意）, `message` を正規化して出力
 - `dataq assert --normalize github-actions-jobs|gitlab-ci-jobs` で生のCI定義を `yq -> jq -> mlr` の固定3段でジョブ単位レコードへ正規化してから `--rules` 検証可能（`yq`/`jq`/`mlr` 必須）
 - 継続利用向けには `dataq ingest yaml-jobs` で正規化結果を固定してから `dataq assert --rules ...` へ接続する運用を推奨
 
@@ -380,7 +409,7 @@ dataq [--emit-pipeline] <command> [options]
 
 - `0`: 成功
 - `2`: 検証失敗（期待仕様に不一致）
-- `3`: 入力不正（フォーマット不正、必須引数不足など）、`doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）、`ingest doc` の `pandoc`/parse 失敗、または `codex install-skill` のルート解決/コピー失敗
+- `3`: 入力不正（フォーマット不正、必須引数不足など）、`doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）、`ingest doc` の `pandoc`/parse 失敗、`ingest tabular` の `csvkit` 不足/変換失敗、または `codex install-skill` のルート解決/コピー失敗
 - `1`: その他実行時エラー
 
 ## `doctor` コマンド契約（MVP）
@@ -450,6 +479,21 @@ dataq [--emit-pipeline] <command> [options]
 - 異常時契約:
   - malformed YAML、未知 `--mode`、`jq`/`yq`/`mlr` 不足は exit `3`
 
+## `ingest tabular` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq ingest tabular --input <path|->`
+- 出力: JSON 配列（stdout）
+- 実行方式:
+  - `in2csv` で入力をCSVへ正規化
+  - `csvjson --no-inference` でJSON配列へ変換
+  - 行オブジェクトのキー順を再帰的に固定して出力
+- `--emit-pipeline` 指定時の `steps`:
+  - `ingest_tabular_csvkit_in2csv`
+  - `ingest_tabular_csvkit_csvjson`
+- 異常時契約:
+  - `csvkit` 不足、表形式変換失敗、不正入力は exit `3`
+
 ### `sdiff` のCIゲート拡張
 
 - `--fail-on-diff`（既定: `false`）:
@@ -490,7 +534,7 @@ pipeline JSON schema:
 - `command`: 実行サブコマンド名
 - `input`: 入力ソース情報（stdin/path, format）
 - `steps`: 実行ステップ配列
-- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）に、コマンド固有ツール（例: `ingest doc` の `pandoc`）を追記。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
+- `external_tools`: 外部ツールの使用有無。通常は `jq|yq|mlr`（固定順）に、コマンド固有ツール（例: `ingest doc` の `pandoc`, `ingest tabular` の `csvkit`, `profile --from csv` の qsv正規化パスで `qsv`）を追記。`doctor --profile` では `jq|yq|mlr|pandoc|xh|nb|mdbook|rg`（probe順）を出力
 - `stage_diagnostics` (optional): 段ごとの診断情報（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）
   - 追加メトリクス: `input_bytes`, `output_bytes`, `duration_ms`（決定性保持のため固定 `0`）
   - 後方互換: 既存フィールド（`order`, `step`, `tool`, `input_records`, `output_records`, `status`）は不変

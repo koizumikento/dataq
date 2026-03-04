@@ -32,6 +32,8 @@ mod profile_cli;
 mod recipe_cli;
 #[path = "cli/scan_cli.rs"]
 mod scan_cli;
+#[path = "cli/schema_cli.rs"]
+mod schema_cli;
 #[path = "cli/sdiff_cli.rs"]
 mod sdiff_cli;
 #[path = "cli/transform_cli.rs"]

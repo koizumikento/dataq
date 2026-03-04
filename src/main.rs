@@ -8,7 +8,7 @@ use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use dataq::cmd::{
     aggregate, r#assert, canon, codex, contract, diff, doctor, emit, gate, ingest, ingest_api,
-    ingest_yaml_jobs, join, mcp, merge, profile, recipe, scan, sdiff, transform,
+    ingest_yaml_jobs, join, mcp, merge, profile, recipe, scan, schema, sdiff, transform,
 };
 use dataq::domain::error::CanonError;
 use dataq::domain::ingest::IngestYamlJobsMode;
@@ -50,6 +50,8 @@ enum Commands {
     Assert(AssertArgs),
     /// Run deterministic quality gates.
     Gate(GateArgs),
+    /// Infer JSON Schema from tabular input via qsv.
+    Schema(SchemaArgs),
     /// Compare structural differences across two datasets.
     Sdiff(SdiffArgs),
     /// Compare normalized outputs resolved from source presets or files.
@@ -60,7 +62,7 @@ enum Commands {
     Join(JoinArgs),
     /// Aggregate grouped metrics with deterministic JSON output.
     Aggregate(AggregateArgs),
-    /// Transform rowsets with fixed `jq -> mlr` stages.
+    /// Transform rowsets with fixed `jq -> sql` stages.
     Transform(TransformArgs),
     /// Scan repository text with deterministic structured match output.
     Scan(ScanArgs),
@@ -112,12 +114,43 @@ struct AssertArgs {
     #[arg(long)]
     schema: Option<PathBuf>,
 
+    /// Select schema validation engine for `--schema` mode.
+    #[arg(
+        long,
+        value_enum,
+        requires = "schema",
+        conflicts_with_all = ["rules", "rules_help", "schema_help"]
+    )]
+    schema_engine: Option<CliAssertSchemaEngine>,
+
+    /// Override schema argument flag forwarded to schema-engine integrations.
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        requires = "schema",
+        conflicts_with_all = ["rules", "rules_help", "schema_help"]
+    )]
+    schema_flag: Option<String>,
+
+    /// Override input argument flag forwarded to schema-engine integrations.
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        requires = "schema",
+        conflicts_with_all = ["rules", "rules_help", "schema_help"]
+    )]
+    input_flag: Option<String>,
+
     #[arg(long, conflicts_with_all = ["rules_help", "schema_help"])]
     input: Option<PathBuf>,
 
     /// Normalize raw input into assert-friendly records before validation.
     #[arg(long, value_enum, conflicts_with_all = ["rules_help", "schema_help"])]
     normalize: Option<CliAssertNormalizeMode>,
+
+    /// Schema validation engine used with `--schema`.
+    #[arg(long, value_enum, default_value_t = CliAssertSchemaEngine::Jsonschema)]
+    engine: CliAssertSchemaEngine,
 
     /// Print machine-readable rules help for `--rules` and exit.
     #[arg(long, default_value_t = false)]
@@ -140,6 +173,10 @@ enum IngestSubcommand {
     Api(IngestApiArgs),
     /// Extract and normalize job definitions from YAML.
     YamlJobs(IngestYamlJobsArgs),
+    /// Parse semi-structured text via `jc` into deterministic JSON envelope.
+    Jc(IngestJcArgs),
+    /// Normalize tabular input into deterministic JSON rows via csvkit.
+    Tabular(IngestTabularArgs),
     /// Fetch and normalize `nb` notes into deterministic JSON.
     Notes(IngestNotesArgs),
     /// Extract deterministic schema fields from a document.
@@ -178,6 +215,22 @@ struct IngestYamlJobsArgs {
 
     #[arg(long, value_enum)]
     mode: CliIngestYamlJobsMode,
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestJcArgs {
+    #[arg(long)]
+    parser: String,
+
+    #[arg(long, default_value = "-")]
+    input: String,
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestTabularArgs {
+    /// Input path or `-` for stdin.
+    #[arg(long)]
+    input: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -250,6 +303,24 @@ struct GatePolicyArgs {
 
     #[arg(long, value_enum)]
     source: Option<CliGatePolicySource>,
+}
+
+#[derive(Debug, clap::Args)]
+struct SchemaArgs {
+    #[command(subcommand)]
+    command: SchemaSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SchemaSubcommand {
+    /// Infer JSON schema from tabular input via qsv.
+    Infer(SchemaInferArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct SchemaInferArgs {
+    #[arg(long)]
+    input: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -359,8 +430,10 @@ struct TransformArgs {
 
 #[derive(Debug, Subcommand)]
 enum TransformSubcommand {
-    /// Run fixed two-stage rowset transform (`jq` then `mlr`).
+    /// Run fixed two-stage rowset transform (`jq` then SQL stage).
     Rowset(TransformRowsetArgs),
+    /// Run SQL transform via an explicitly selected query engine.
+    Sql(TransformSqlArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -369,13 +442,45 @@ struct TransformRowsetArgs {
     #[arg(long)]
     input: String,
 
+    /// Stage-2 execution engine selector.
+    #[arg(long, value_enum, default_value_t = CliTransformRowsetEngine::Sqlite)]
+    engine: CliTransformRowsetEngine,
+
     /// jq filter used in stage 1.
     #[arg(long = "jq-filter")]
     jq_filter: String,
 
-    /// mlr verb/arguments used in stage 2.
+    /// Stage-2 verb/arguments used by the current mlr-backed adapter path.
     #[arg(long = "mlr", required = true, num_args = 1.., allow_hyphen_values = true)]
     mlr: Vec<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct TransformSqlArgs {
+    /// SQL engine used for query execution.
+    #[arg(long, value_enum)]
+    engine: CliTransformSqlEngine,
+
+    /// SQL query text to execute.
+    #[arg(long)]
+    query: String,
+
+    /// Input path or `-` for stdin.
+    #[arg(long)]
+    input: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CliTransformSqlEngine {
+    Duckdb,
+}
+
+impl CliTransformSqlEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Duckdb => "duckdb",
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -556,9 +661,31 @@ enum CliAggregateMetric {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliTransformRowsetEngine {
+    Sqlite,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliAssertNormalizeMode {
     GithubActionsJobs,
     GitlabCiJobs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum CliAssertSchemaEngine {
+    Jsonschema,
+    Ajv,
+    Checkjs,
+}
+
+impl CliAssertSchemaEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Jsonschema => "jsonschema",
+            Self::Ajv => "ajv",
+            Self::Checkjs => "checkjs",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -630,6 +757,8 @@ enum CliContractCommand {
     Scan,
     #[value(name = "transform-rowset")]
     TransformRowset,
+    #[value(name = "transform-sql")]
+    TransformSql,
     Merge,
     Doctor,
     #[value(name = "recipe-run", alias = "recipe")]
@@ -686,11 +815,29 @@ impl From<CliAggregateMetric> for AggregateMetric {
     }
 }
 
+impl From<CliTransformRowsetEngine> for transform::TransformRowsetSqlEngine {
+    fn from(value: CliTransformRowsetEngine) -> Self {
+        match value {
+            CliTransformRowsetEngine::Sqlite => transform::TransformRowsetSqlEngine::Sqlite,
+        }
+    }
+}
+
 impl From<CliAssertNormalizeMode> for r#assert::AssertInputNormalizeMode {
     fn from(value: CliAssertNormalizeMode) -> Self {
         match value {
             CliAssertNormalizeMode::GithubActionsJobs => Self::GithubActionsJobs,
             CliAssertNormalizeMode::GitlabCiJobs => Self::GitlabCiJobs,
+        }
+    }
+}
+
+impl From<CliAssertSchemaEngine> for r#assert::AssertSchemaEngine {
+    fn from(value: CliAssertSchemaEngine) -> Self {
+        match value {
+            CliAssertSchemaEngine::Jsonschema => Self::Jsonschema,
+            CliAssertSchemaEngine::Ajv => Self::Ajv,
+            CliAssertSchemaEngine::Checkjs => Self::Checkjs,
         }
     }
 }
@@ -724,6 +871,7 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::IngestBook => Self::IngestBook,
             CliContractCommand::Scan => Self::Scan,
             CliContractCommand::TransformRowset => Self::TransformRowset,
+            CliContractCommand::TransformSql => Self::TransformSql,
             CliContractCommand::Merge => Self::Merge,
             CliContractCommand::Doctor => Self::Doctor,
             CliContractCommand::RecipeRun => Self::RecipeRun,
@@ -804,6 +952,7 @@ fn run() -> i32 {
         Commands::Ingest(args) => run_ingest(args, emit_pipeline),
         Commands::Assert(args) => run_assert(args, emit_pipeline),
         Commands::Gate(args) => run_gate(args, emit_pipeline),
+        Commands::Schema(args) => run_schema(args, emit_pipeline),
         Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
         Commands::Diff(args) => run_diff(args, emit_pipeline),
         Commands::Profile(args) => run_profile(args, emit_pipeline),
@@ -1033,6 +1182,10 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
 fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
     let input = args.input.clone();
     let normalize_mode = args.normalize.map(Into::into);
+    let schema_dispatch = assert_schema_dispatch_args(&args);
+    let default_cli_engine = args.engine;
+    let effective_cli_engine = schema_dispatch.engine.unwrap_or(default_cli_engine);
+    let schema_engine: r#assert::AssertSchemaEngine = effective_cli_engine.into();
     let input_format = input
         .as_deref()
         .map(|path| dataq_io::resolve_input_format(None, Some(path)).ok())
@@ -1045,8 +1198,21 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         .schema
         .as_deref()
         .and_then(|path| dataq_io::resolve_input_format(None, Some(path)).ok());
-    let mut steps = r#assert::pipeline_steps(normalize_mode);
-    let mut deterministic_guards = r#assert::deterministic_guards(normalize_mode);
+    let mut steps = if args.schema.is_some() {
+        r#assert::schema_pipeline_steps(normalize_mode, schema_engine)
+    } else {
+        r#assert::pipeline_steps(normalize_mode)
+    };
+    let mut deterministic_guards = r#assert::deterministic_guards(normalize_mode, schema_engine);
+    if let Some(engine) = schema_dispatch.engine {
+        deterministic_guards.push(format!("assert_schema_engine_{}", engine.as_str()));
+    }
+    if schema_dispatch.schema_flag.is_some() {
+        deterministic_guards.push("assert_schema_flag_explicit".to_string());
+    }
+    if schema_dispatch.input_flag.is_some() {
+        deterministic_guards.push("assert_input_flag_explicit".to_string());
+    }
     let mut trace = r#assert::AssertPipelineTrace::default();
 
     let exit_code = if args.rules_help {
@@ -1076,10 +1242,12 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
         };
 
         let stdin = io::stdin();
-        let (response, run_trace) = r#assert::run_with_stdin_and_normalize_with_trace(
+        let (response, run_trace) = run_assert_with_dispatch(
             &command_args,
             stdin.lock(),
             normalize_mode,
+            &schema_dispatch,
+            default_cli_engine,
         );
         trace = run_trace;
 
@@ -1137,10 +1305,48 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AssertSchemaDispatchArgs {
+    engine: Option<CliAssertSchemaEngine>,
+    schema_flag: Option<String>,
+    input_flag: Option<String>,
+}
+
+fn assert_schema_dispatch_args(args: &AssertArgs) -> AssertSchemaDispatchArgs {
+    AssertSchemaDispatchArgs {
+        engine: args.schema_engine,
+        schema_flag: args.schema_flag.clone(),
+        input_flag: args.input_flag.clone(),
+    }
+}
+
+fn run_assert_with_dispatch<R: Read>(
+    command_args: &r#assert::AssertCommandArgs,
+    stdin: R,
+    normalize_mode: Option<r#assert::AssertInputNormalizeMode>,
+    schema_dispatch: &AssertSchemaDispatchArgs,
+    default_engine: CliAssertSchemaEngine,
+) -> (
+    r#assert::AssertCommandResponse,
+    r#assert::AssertPipelineTrace,
+) {
+    let selected_engine = schema_dispatch.engine.unwrap_or(default_engine);
+    r#assert::run_with_stdin_and_normalize_with_trace_and_engine(
+        command_args,
+        stdin,
+        normalize_mode,
+        selected_engine.into(),
+        schema_dispatch.schema_flag.as_deref(),
+        schema_dispatch.input_flag.as_deref(),
+    )
+}
+
 fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         IngestSubcommand::Api(api_args) => run_ingest_api(api_args, emit_pipeline),
         IngestSubcommand::YamlJobs(args) => run_ingest_yaml_jobs(args, emit_pipeline),
+        IngestSubcommand::Jc(args) => run_ingest_jc(args, emit_pipeline),
+        IngestSubcommand::Tabular(args) => run_ingest_tabular(args, emit_pipeline),
         IngestSubcommand::Notes(args) => run_ingest_notes(args, emit_pipeline),
         IngestSubcommand::Doc(args) => run_ingest_doc(args, emit_pipeline),
         IngestSubcommand::Book(args) => run_ingest_book(args, emit_pipeline),
@@ -1260,6 +1466,126 @@ fn run_ingest_yaml_jobs(args: IngestYamlJobsArgs, emit_pipeline: bool) -> i32 {
         let report = build_ingest_yaml_jobs_pipeline_report(&args, mode, input_is_stdin, &trace);
         emit_pipeline_report(&report);
     }
+    exit_code
+}
+
+fn run_ingest_jc(args: IngestJcArgs, emit_pipeline: bool) -> i32 {
+    let input_path = if args.input == "-" {
+        None
+    } else {
+        Some(PathBuf::from(&args.input))
+    };
+
+    let command_args = ingest::IngestJcCommandArgs {
+        parser: args.parser.clone(),
+        input: input_path.clone(),
+    };
+
+    let stdin = io::stdin();
+    let (response, trace) = ingest::run_jc_with_stdin_and_trace(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest jc response".to_string(),
+                    json!({"command": "ingest.jc"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest jc error".to_string(),
+                    json!({"command": "ingest.jc"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected ingest jc exit code: {other}"),
+                json!({"command": "ingest.jc"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_ingest_jc_pipeline_report(&args, input_path, &trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
+}
+
+fn run_ingest_tabular(args: IngestTabularArgs, emit_pipeline: bool) -> i32 {
+    let input_path = if args.input == "-" {
+        None
+    } else {
+        Some(PathBuf::from(&args.input))
+    };
+
+    let command_args = ingest::IngestTabularCommandArgs {
+        input: input_path.clone(),
+    };
+    let stdin = io::stdin();
+    let (response, trace) = ingest::run_tabular_with_stdin_and_trace(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest tabular response".to_string(),
+                    json!({"command": "ingest.tabular"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest tabular error".to_string(),
+                    json!({"command": "ingest.tabular"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected ingest tabular exit code: {other}"),
+                json!({"command": "ingest.tabular"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let report = build_ingest_tabular_pipeline_report(&args, input_path, &trace);
+        emit_pipeline_report(&report);
+    }
+
     exit_code
 }
 
@@ -1502,6 +1828,66 @@ fn run_gate(args: GateArgs, emit_pipeline: bool) -> i32 {
         GateSubcommand::Schema(schema_args) => run_gate_schema(schema_args, emit_pipeline),
         GateSubcommand::Policy(policy_args) => run_gate_policy(policy_args, emit_pipeline),
     }
+}
+
+fn run_schema(args: SchemaArgs, emit_pipeline: bool) -> i32 {
+    match args.command {
+        SchemaSubcommand::Infer(infer_args) => run_schema_infer(infer_args, emit_pipeline),
+    }
+}
+
+fn run_schema_infer(args: SchemaInferArgs, emit_pipeline: bool) -> i32 {
+    let command_args = schema::SchemaInferCommandArgs {
+        input: args.input.clone(),
+    };
+
+    let stdin = io::stdin();
+    let response = schema::run_infer_with_stdin(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize schema infer response".to_string(),
+                    json!({"command": "schema.infer"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize schema infer error".to_string(),
+                    json!({"command": "schema.infer"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected schema infer exit code: {other}"),
+                json!({"command": "schema.infer"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_schema_infer_pipeline_report(&args);
+        emit_pipeline_report(&pipeline_report);
+    }
+
+    exit_code
 }
 
 fn run_gate_schema(args: GateSchemaArgs, emit_pipeline: bool) -> i32 {
@@ -1848,6 +2234,7 @@ fn run_transform(args: TransformArgs, emit_pipeline: bool) -> i32 {
                 normalize_transform_rowset_global_flags(rowset_args, emit_pipeline);
             run_transform_rowset(rowset_args, emit_pipeline)
         }
+        TransformSubcommand::Sql(sql_args) => run_transform_sql(sql_args, emit_pipeline),
     }
 }
 
@@ -1946,7 +2333,8 @@ fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {
         jq_filter: args.jq_filter.clone(),
         mlr: args.mlr.clone(),
     };
-    let (response, trace) = transform::run_rowset_with_trace(&command_args);
+    let sql_engine = transform::TransformRowsetSqlEngine::from(args.engine);
+    let (response, trace) = transform::run_rowset_with_sql_engine_trace(&command_args, sql_engine);
 
     let exit_code = match response.exit_code {
         0 => {
@@ -1989,6 +2377,138 @@ fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {
     if emit_pipeline {
         let pipeline_report =
             build_transform_rowset_pipeline_report(&args, input_format, args.input == "-", &trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+    exit_code
+}
+
+fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
+    let (input, input_format, stdin_input) = if args.input == "-" {
+        let stdin = io::stdin();
+        let mut bytes = Vec::new();
+        if let Err(error) = stdin.lock().read_to_end(&mut bytes) {
+            emit_error(
+                "input_usage_error",
+                format!("failed to read stdin: {error}"),
+                json!({"command": "transform.sql"}),
+                3,
+            );
+            if emit_pipeline {
+                emit_pipeline_report(&build_transform_sql_pipeline_report(
+                    &args,
+                    None,
+                    true,
+                    &transform::TransformSqlPipelineTrace::default(),
+                ));
+            }
+            return 3;
+        }
+
+        let format = match dataq_io::autodetect_stdin_input_format(&bytes) {
+            Ok(format) => format,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    error.to_string(),
+                    json!({"command": "transform.sql"}),
+                    3,
+                );
+                if emit_pipeline {
+                    emit_pipeline_report(&build_transform_sql_pipeline_report(
+                        &args,
+                        None,
+                        true,
+                        &transform::TransformSqlPipelineTrace::default(),
+                    ));
+                }
+                return 3;
+            }
+        };
+
+        let values = match dataq_io::reader::read_values(Cursor::new(bytes), format) {
+            Ok(values) => values,
+            Err(error) => {
+                emit_error(
+                    "input_usage_error",
+                    format!("failed to read input: {error}"),
+                    json!({"command": "transform.sql"}),
+                    3,
+                );
+                if emit_pipeline {
+                    emit_pipeline_report(&build_transform_sql_pipeline_report(
+                        &args,
+                        Some(format),
+                        true,
+                        &transform::TransformSqlPipelineTrace::default(),
+                    ));
+                }
+                return 3;
+            }
+        };
+
+        (
+            transform::TransformSqlCommandInput::Inline(values),
+            Some(format),
+            true,
+        )
+    } else {
+        let path = PathBuf::from(args.input.clone());
+        let format = dataq_io::resolve_input_format(None, Some(path.as_path())).ok();
+        (
+            transform::TransformSqlCommandInput::Path(path),
+            format,
+            false,
+        )
+    };
+
+    let command_args = transform::TransformSqlCommandArgs {
+        input,
+        sql: args.query.clone(),
+    };
+    let (response, trace) =
+        transform::run_sql_with_trace(&command_args, dataq::adapters::duckdb::run_query);
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize transform sql output".to_string(),
+                    json!({"command": "transform.sql"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 => {
+            if emit_json_stderr(&response.payload) {
+                3
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize transform sql error".to_string(),
+                    json!({"command": "transform.sql"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected transform sql exit code: {other}"),
+                json!({"command": "transform.sql"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report =
+            build_transform_sql_pipeline_report(&args, input_format, stdin_input, &trace);
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
@@ -2308,15 +2828,14 @@ fn run_diff_source(args: DiffSourceArgs, emit_pipeline: bool) -> i32 {
 
 fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     let input_format = Some(args.from.into());
-    let pipeline_report = build_profile_pipeline_report(&args, input_format);
 
     let command_args = profile::ProfileCommandArgs {
-        input: args.input,
+        input: args.input.clone(),
         from: input_format,
     };
 
     let stdin = io::stdin();
-    let response = profile::run_with_stdin(&command_args, stdin.lock());
+    let (response, trace) = profile::run_with_stdin_and_trace(&command_args, stdin.lock());
 
     let exit_code = match response.exit_code {
         0 => {
@@ -2357,6 +2876,7 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     };
 
     if emit_pipeline {
+        let pipeline_report = build_profile_pipeline_report(&args, input_format, &trace);
         emit_pipeline_report(&pipeline_report);
     }
     exit_code
@@ -3128,6 +3648,79 @@ fn build_ingest_yaml_jobs_pipeline_report(
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
+fn build_schema_infer_pipeline_report(args: &SchemaInferArgs) -> PipelineReport {
+    let source = match args.input.as_deref() {
+        Some(path) if !schema::is_stdin_path(path) => {
+            PipelineInputSource::path("input", path.display().to_string(), Some("csv"))
+        }
+        _ => PipelineInputSource::stdin("input", Some("csv")),
+    };
+
+    ensure_external_tool(
+        PipelineReport::new(
+            "schema.infer",
+            PipelineInput::new(vec![source]),
+            schema::infer_pipeline_steps(),
+            schema::infer_deterministic_guards(),
+        ),
+        "qsv",
+    )
+}
+
+fn build_ingest_jc_pipeline_report(
+    args: &IngestJcArgs,
+    input_path: Option<PathBuf>,
+    trace: &ingest::IngestJcPipelineTrace,
+) -> PipelineReport {
+    let source = if let Some(path) = input_path {
+        PipelineInputSource::path("input", path.display().to_string(), None)
+    } else if args.input == "-" {
+        PipelineInputSource::stdin("input", None)
+    } else {
+        PipelineInputSource::path("input", args.input.clone(), None)
+    };
+
+    let mut report = PipelineReport::new(
+        "ingest.jc",
+        PipelineInput::new(vec![source]),
+        ingest::jc_pipeline_steps(),
+        ingest::jc_deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
+fn build_ingest_tabular_pipeline_report(
+    args: &IngestTabularArgs,
+    input_path: Option<PathBuf>,
+    trace: &ingest::IngestTabularPipelineTrace,
+) -> PipelineReport {
+    let source = if let Some(path) = input_path {
+        PipelineInputSource::path(
+            "input",
+            path.display().to_string(),
+            Some(Format::Csv.as_str()),
+        )
+    } else if args.input == "-" {
+        PipelineInputSource::stdin("input", Some(Format::Csv.as_str()))
+    } else {
+        PipelineInputSource::path("input", args.input.clone(), Some(Format::Csv.as_str()))
+    };
+
+    let mut report = PipelineReport::new(
+        "ingest.tabular",
+        PipelineInput::new(vec![source]),
+        ingest::tabular_pipeline_steps(),
+        ingest::tabular_deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
 fn build_gate_schema_pipeline_report(
     args: &GateSchemaArgs,
     input_is_stdin: bool,
@@ -3277,6 +3870,7 @@ fn build_diff_source_pipeline_report(
 fn build_profile_pipeline_report(
     args: &ProfileArgs,
     input_format: Option<Format>,
+    trace: &profile::ProfilePipelineTrace,
 ) -> PipelineReport {
     let source = if let Some(path) = &args.input {
         PipelineInputSource::path(
@@ -3288,12 +3882,16 @@ fn build_profile_pipeline_report(
         PipelineInputSource::stdin("input", format_label(input_format))
     };
 
-    PipelineReport::new(
+    let mut report = PipelineReport::new(
         "profile",
         PipelineInput::new(vec![source]),
         profile::pipeline_steps(),
         profile::deterministic_guards(),
-    )
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
 fn build_ingest_notes_pipeline_report(trace: &ingest::IngestNotesPipelineTrace) -> PipelineReport {
@@ -3408,6 +4006,35 @@ fn build_transform_rowset_pipeline_report(
         PipelineInput::new(vec![source]),
         transform::pipeline_steps(),
         transform::deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
+fn build_transform_sql_pipeline_report(
+    args: &TransformSqlArgs,
+    input_format: Option<Format>,
+    stdin_input: bool,
+    trace: &transform::TransformSqlPipelineTrace,
+) -> PipelineReport {
+    let source = if stdin_input {
+        PipelineInputSource::stdin("input", format_label(input_format))
+    } else {
+        PipelineInputSource::path("input", args.input.as_str(), format_label(input_format))
+    };
+    let mut deterministic_guards = transform::sql_deterministic_guards();
+    deterministic_guards.push(format!("transform_sql_engine_{}", args.engine.as_str()));
+
+    let mut report = ensure_external_tool(
+        PipelineReport::new(
+            "transform.sql",
+            PipelineInput::new(vec![source]),
+            transform::sql_pipeline_steps(),
+            deterministic_guards,
+        ),
+        "duckdb",
     );
     for used_tool in &trace.used_tools {
         report = report.mark_external_tool_used(used_tool);
@@ -3750,11 +4377,33 @@ fn resolve_tool_executable(tool_name: &str) -> String {
         "jq" => Some("DATAQ_JQ_BIN"),
         "yq" => Some("DATAQ_YQ_BIN"),
         "mlr" => Some("DATAQ_MLR_BIN"),
+        "ajv" => Some("DATAQ_AJV_BIN"),
+        "duckdb" => Some("DATAQ_DUCKDB_BIN"),
+        "check-jsonschema" => Some("DATAQ_CHECK_JSONSCHEMA_BIN"),
+        "sqlite" => Some("DATAQ_SQLITE_BIN"),
         "xh" => Some("DATAQ_XH_BIN"),
         "pandoc" => Some("DATAQ_PANDOC_BIN"),
         "mdbook" => Some("DATAQ_MDBOOK_BIN"),
         "rg" => Some("DATAQ_RG_BIN"),
         "nb" => Some("DATAQ_NB_BIN"),
+        "qsv" => Some("DATAQ_QSV_BIN"),
+        "jc" => Some("DATAQ_JC_BIN"),
+        "csvkit" => std::env::var("DATAQ_CSVKIT_BIN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|_| "DATAQ_CSVKIT_BIN")
+            .or_else(|| {
+                std::env::var("DATAQ_CSVKIT_IN2CSV_BIN")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|_| "DATAQ_CSVKIT_IN2CSV_BIN")
+            })
+            .or_else(|| {
+                std::env::var("DATAQ_CSVKIT_CSVJSON_BIN")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|_| "DATAQ_CSVKIT_CSVJSON_BIN")
+            }),
         _ => None,
     };
 
@@ -3898,6 +4547,10 @@ mod tests {
             AggregateMetric::from(CliAggregateMetric::Avg),
             AggregateMetric::Avg
         );
+        assert_eq!(
+            transform::TransformRowsetSqlEngine::from(CliTransformRowsetEngine::Sqlite),
+            transform::TransformRowsetSqlEngine::Sqlite
+        );
 
         assert_eq!(
             r#assert::AssertInputNormalizeMode::from(CliAssertNormalizeMode::GithubActionsJobs),
@@ -3907,6 +4560,12 @@ mod tests {
             r#assert::AssertInputNormalizeMode::from(CliAssertNormalizeMode::GitlabCiJobs),
             r#assert::AssertInputNormalizeMode::GitlabCiJobs
         );
+        assert_eq!(
+            r#assert::AssertSchemaEngine::from(CliAssertSchemaEngine::Checkjs),
+            r#assert::AssertSchemaEngine::Checkjs
+        );
+        assert_eq!(CliAssertSchemaEngine::Jsonschema.as_str(), "jsonschema");
+        assert_eq!(CliAssertSchemaEngine::Checkjs.as_str(), "checkjs");
 
         assert_eq!(
             gate::GatePolicySourcePreset::from(CliGatePolicySource::ScanText),
@@ -3932,6 +4591,10 @@ mod tests {
         assert_eq!(
             contract::ContractCommand::from(CliContractCommand::TransformRowset),
             contract::ContractCommand::TransformRowset
+        );
+        assert_eq!(
+            contract::ContractCommand::from(CliContractCommand::TransformSql),
+            contract::ContractCommand::TransformSql
         );
         assert_eq!(
             contract::ContractCommand::from(CliContractCommand::RecipeRun),
@@ -4025,6 +4688,106 @@ mod tests {
             ingest::IngestDocInputFormat::from(CliIngestDocFormat::Latex),
             ingest::IngestDocInputFormat::Latex
         );
+
+        assert_eq!(CliTransformSqlEngine::Duckdb.as_str(), "duckdb");
+    }
+
+    #[test]
+    fn transform_sql_cli_parses_engine_query_and_input() {
+        let cli = Cli::try_parse_from([
+            "dataq",
+            "--emit-pipeline",
+            "transform",
+            "sql",
+            "--engine",
+            "duckdb",
+            "--query",
+            "select * from input",
+            "--input",
+            "input.json",
+        ])
+        .expect("parse transform sql command");
+
+        assert!(cli.emit_pipeline);
+        match cli.command {
+            Commands::Transform(TransformArgs {
+                command: TransformSubcommand::Sql(args),
+            }) => {
+                assert_eq!(args.engine, CliTransformSqlEngine::Duckdb);
+                assert_eq!(args.query, "select * from input");
+                assert_eq!(args.input, "input.json");
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_sql_cli_requires_input_flag() {
+        let error = Cli::try_parse_from([
+            "dataq",
+            "transform",
+            "sql",
+            "--engine",
+            "duckdb",
+            "--query",
+            "select 1",
+        ])
+        .expect_err("missing --input should fail");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn contract_cli_accepts_transform_sql_command_value() {
+        let cli = Cli::try_parse_from(["dataq", "contract", "--command", "transform-sql"])
+            .expect("parse contract transform-sql");
+        match cli.command {
+            Commands::Contract(ContractArgs {
+                command: Some(CliContractCommand::TransformSql),
+                all: false,
+            }) => {}
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assert_cli_parses_schema_engine_and_schema_input_flags() {
+        let cli = Cli::try_parse_from([
+            "dataq",
+            "assert",
+            "--schema",
+            "schema.json",
+            "--input",
+            "input.json",
+            "--schema-engine",
+            "checkjs",
+            "--schema-flag=--schemafile",
+            "--input-flag=--instance",
+        ])
+        .expect("cli parse");
+
+        let Commands::Assert(args) = cli.command else {
+            panic!("expected assert command");
+        };
+        assert_eq!(args.schema, Some(PathBuf::from("schema.json")));
+        assert_eq!(args.input, Some(PathBuf::from("input.json")));
+        assert_eq!(args.schema_engine, Some(CliAssertSchemaEngine::Checkjs));
+        assert_eq!(args.schema_flag.as_deref(), Some("--schemafile"));
+        assert_eq!(args.input_flag.as_deref(), Some("--instance"));
+    }
+
+    #[test]
+    fn assert_cli_rejects_schema_engine_with_rules_mode() {
+        let error = Cli::try_parse_from([
+            "dataq",
+            "assert",
+            "--rules",
+            "rules.yaml",
+            "--schema-engine",
+            "checkjs",
+        ])
+        .expect_err("schema-engine should conflict with --rules");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -4146,8 +4909,12 @@ mod tests {
         let assert_args = AssertArgs {
             rules: Some(PathBuf::from("rules.json")),
             schema: None,
+            schema_engine: None,
+            schema_flag: None,
+            input_flag: None,
             input: Some(PathBuf::from("input.json")),
             normalize: Some(CliAssertNormalizeMode::GithubActionsJobs),
+            engine: CliAssertSchemaEngine::Jsonschema,
             rules_help: false,
             schema_help: false,
         };
@@ -4198,6 +4965,29 @@ mod tests {
         );
         assert_eq!(ingest_yaml_jobs_report.command, "ingest_yaml_jobs");
 
+        let ingest_jc_args = IngestJcArgs {
+            parser: "ifconfig".to_string(),
+            input: "-".to_string(),
+        };
+        let ingest_jc_trace = ingest::IngestJcPipelineTrace {
+            used_tools: vec!["jc".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let ingest_jc_report =
+            build_ingest_jc_pipeline_report(&ingest_jc_args, None, &ingest_jc_trace);
+        assert_eq!(ingest_jc_report.command, "ingest.jc");
+
+        let ingest_tabular_args = IngestTabularArgs {
+            input: "-".to_string(),
+        };
+        let ingest_tabular_trace = ingest::IngestTabularPipelineTrace {
+            used_tools: vec!["csvkit".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let ingest_tabular_report =
+            build_ingest_tabular_pipeline_report(&ingest_tabular_args, None, &ingest_tabular_trace);
+        assert_eq!(ingest_tabular_report.command, "ingest.tabular");
+
         let gate_schema_args = GateSchemaArgs {
             schema: PathBuf::from("schema.json"),
             input: Some(PathBuf::from("input.json")),
@@ -4227,6 +5017,12 @@ mod tests {
         );
         assert_eq!(gate_policy_report.command, "gate.policy");
 
+        let schema_infer_args = SchemaInferArgs {
+            input: Some(PathBuf::from("input.csv")),
+        };
+        let schema_infer_report = build_schema_infer_pipeline_report(&schema_infer_args);
+        assert_eq!(schema_infer_report.command, "schema.infer");
+
         let sdiff_args = SdiffArgs {
             left: PathBuf::from("left.json"),
             right: PathBuf::from("right.json"),
@@ -4252,7 +5048,9 @@ mod tests {
             input: Some(PathBuf::from("input.json")),
             from: CliInputFormat::Json,
         };
-        let profile_report = build_profile_pipeline_report(&profile_args, Some(Format::Json));
+        let profile_trace = profile::ProfilePipelineTrace::default();
+        let profile_report =
+            build_profile_pipeline_report(&profile_args, Some(Format::Json), &profile_trace);
         assert_eq!(profile_report.command, "profile");
 
         let ingest_doc_args = IngestDocArgs {
@@ -4296,6 +5094,7 @@ mod tests {
 
         let transform_args = TransformRowsetArgs {
             input: "-".to_string(),
+            engine: CliTransformRowsetEngine::Sqlite,
             jq_filter: ".".to_string(),
             mlr: vec!["cat".to_string()],
         };
@@ -4307,6 +5106,29 @@ mod tests {
             &transform_trace,
         );
         assert_eq!(transform_report.command, "transform.rowset");
+
+        let transform_sql_args = TransformSqlArgs {
+            engine: CliTransformSqlEngine::Duckdb,
+            query: "select 1".to_string(),
+            input: "-".to_string(),
+        };
+        let transform_sql_trace = transform::TransformSqlPipelineTrace {
+            used_tools: vec!["duckdb".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let transform_sql_report = build_transform_sql_pipeline_report(
+            &transform_sql_args,
+            Some(Format::Json),
+            true,
+            &transform_sql_trace,
+        );
+        assert_eq!(transform_sql_report.command, "transform.sql");
+        assert!(
+            transform_sql_report
+                .external_tools
+                .iter()
+                .any(|tool| tool.name == "duckdb" && tool.used)
+        );
 
         let merge_args = MergeArgs {
             base: PathBuf::from("base.json"),
@@ -4460,6 +5282,64 @@ mod tests {
     }
 
     #[test]
+    fn assert_schema_dispatch_args_capture_engine_and_flags() {
+        let args = AssertArgs {
+            rules: None,
+            schema: Some(PathBuf::from("schema.json")),
+            schema_engine: Some(CliAssertSchemaEngine::Checkjs),
+            schema_flag: Some("--schemafile".to_string()),
+            input_flag: Some("--instance".to_string()),
+            input: Some(PathBuf::from("input.json")),
+            normalize: None,
+            engine: CliAssertSchemaEngine::Jsonschema,
+            rules_help: false,
+            schema_help: false,
+        };
+        let dispatch = assert_schema_dispatch_args(&args);
+        assert_eq!(dispatch.engine, Some(CliAssertSchemaEngine::Checkjs));
+        assert_eq!(dispatch.schema_flag.as_deref(), Some("--schemafile"));
+        assert_eq!(dispatch.input_flag.as_deref(), Some("--instance"));
+    }
+
+    #[test]
+    fn run_assert_dispatch_with_schema_engine_flags_preserves_exit_mapping() {
+        let schema_path = PathBuf::from("/definitely-missing/schema.json");
+        let input_path = PathBuf::from("/definitely-missing/input.json");
+        let legacy_exit = run_assert(
+            AssertArgs {
+                rules: None,
+                schema: Some(schema_path.clone()),
+                schema_engine: None,
+                schema_flag: None,
+                input_flag: None,
+                input: Some(input_path.clone()),
+                normalize: None,
+                engine: CliAssertSchemaEngine::Jsonschema,
+                rules_help: false,
+                schema_help: false,
+            },
+            false,
+        );
+        let flagged_exit = run_assert(
+            AssertArgs {
+                rules: None,
+                schema: Some(schema_path),
+                schema_engine: Some(CliAssertSchemaEngine::Checkjs),
+                schema_flag: Some("--schemafile".to_string()),
+                input_flag: Some("--instance".to_string()),
+                input: Some(input_path),
+                normalize: None,
+                engine: CliAssertSchemaEngine::Jsonschema,
+                rules_help: false,
+                schema_help: false,
+            },
+            false,
+        );
+        assert_eq!(legacy_exit, 3);
+        assert_eq!(flagged_exit, legacy_exit);
+    }
+
+    #[test]
     fn run_wrappers_cover_input_usage_exit_paths() {
         assert_eq!(
             run_ingest_notes(
@@ -4468,6 +5348,17 @@ mod tests {
                     since: None,
                     until: None,
                     to: CliIngestNotesOutput::Json,
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_ingest_jc(
+                IngestJcArgs {
+                    parser: "bad parser".to_string(),
+                    input: "/definitely-missing/ingest-jc-input.txt".to_string(),
                 },
                 true,
             ),
@@ -4514,6 +5405,16 @@ mod tests {
                     rules: PathBuf::from("/definitely-missing/rules.json"),
                     input: Some(PathBuf::from("/definitely-missing/input.json")),
                     source: Some(CliGatePolicySource::ScanText),
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_schema_infer(
+                SchemaInferArgs {
+                    input: Some(PathBuf::from("/definitely-missing/input.csv")),
                 },
                 true,
             ),
@@ -4578,8 +5479,21 @@ mod tests {
             run_transform_rowset(
                 TransformRowsetArgs {
                     input: "/definitely-missing/input.json".to_string(),
+                    engine: CliTransformRowsetEngine::Sqlite,
                     jq_filter: ".".to_string(),
                     mlr: vec!["cat".to_string()],
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
+            run_transform_sql(
+                TransformSqlArgs {
+                    engine: CliTransformSqlEngine::Duckdb,
+                    query: "select * from input".to_string(),
+                    input: "/definitely-missing/input.json".to_string(),
                 },
                 true,
             ),
@@ -4705,6 +5619,17 @@ mod tests {
         );
         assert_eq!(ingest_exit, 3);
 
+        let ingest_jc_exit = run_ingest(
+            IngestArgs {
+                command: IngestSubcommand::Jc(IngestJcArgs {
+                    parser: "bad parser".to_string(),
+                    input: "/definitely-missing/ingest-jc-input.txt".to_string(),
+                }),
+            },
+            false,
+        );
+        assert_eq!(ingest_jc_exit, 3);
+
         let gate_exit = run_gate(
             GateArgs {
                 command: GateSubcommand::Schema(GateSchemaArgs {
@@ -4717,10 +5642,21 @@ mod tests {
         );
         assert_eq!(gate_exit, 3);
 
+        let schema_exit = run_schema(
+            SchemaArgs {
+                command: SchemaSubcommand::Infer(SchemaInferArgs {
+                    input: Some(PathBuf::from("/definitely-missing/input.csv")),
+                }),
+            },
+            false,
+        );
+        assert_eq!(schema_exit, 3);
+
         let transform_exit = run_transform(
             TransformArgs {
                 command: TransformSubcommand::Rowset(TransformRowsetArgs {
                     input: "/definitely-missing/input.json".to_string(),
+                    engine: CliTransformRowsetEngine::Sqlite,
                     jq_filter: ".".to_string(),
                     mlr: vec!["cat".to_string()],
                 }),
@@ -4728,6 +5664,18 @@ mod tests {
             false,
         );
         assert_eq!(transform_exit, 3);
+
+        let transform_sql_exit = run_transform(
+            TransformArgs {
+                command: TransformSubcommand::Sql(TransformSqlArgs {
+                    engine: CliTransformSqlEngine::Duckdb,
+                    query: "select 1".to_string(),
+                    input: "/definitely-missing/input.json".to_string(),
+                }),
+            },
+            false,
+        );
+        assert_eq!(transform_sql_exit, 3);
 
         let scan_exit = run_scan(
             ScanArgs {

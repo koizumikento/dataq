@@ -22,8 +22,12 @@ mod ingest_api_flow;
 mod ingest_book_flow;
 #[path = "integration/ingest_doc_roundtrip.rs"]
 mod ingest_doc_roundtrip;
+#[path = "integration/ingest_jc_flow.rs"]
+mod ingest_jc_flow;
 #[path = "integration/ingest_notes_flow.rs"]
 mod ingest_notes_flow;
+#[path = "integration/ingest_tabular_flow.rs"]
+mod ingest_tabular_flow;
 #[path = "integration/ingest_yaml_jobs_flow.rs"]
 mod ingest_yaml_jobs_flow;
 #[path = "integration/io_format_resolution.rs"]
@@ -44,6 +48,8 @@ mod recipe_replay_flow;
 mod scan_text_flow;
 #[path = "integration/transform_rowset_flow.rs"]
 mod transform_rowset_flow;
+#[path = "integration/transform_sql_flow.rs"]
+mod transform_sql_flow;
 #[path = "integration/util_sort.rs"]
 mod util_sort;
 #[path = "integration/util_time.rs"]

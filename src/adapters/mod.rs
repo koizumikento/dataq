@@ -1,8 +1,15 @@
+pub mod ajv;
+pub mod check_jsonschema;
+pub mod csvkit;
+pub mod duckdb;
+pub mod jc;
 pub mod jq;
 pub mod mdbook;
 pub mod mlr;
 pub mod nb;
 pub mod pandoc;
+pub mod qsv;
 pub mod rg;
+pub mod sqlite;
 pub mod xh;
 pub mod yq;
