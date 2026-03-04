@@ -26,6 +26,7 @@ GitHub の tap リポジトリを用意します（例: `stray-tools`）。
 
 `.github/workflows/publish-homebrew-tap.yml` は次のタイミングで `Formula/dataq.rb` を更新します。
 
+- `Release` workflow 成功時（`workflow_run`）
 - GitHub Release 公開時（`release.published`）
 - 手動実行（`workflow_dispatch`）
 

@@ -1,6 +1,11 @@
 name: Publish Homebrew Tap
 
 on:
+  workflow_run:
+    workflows:
+      - Release
+    types:
+      - completed
   release:
     types:
       - published
@@ -17,7 +22,12 @@ permissions:
 jobs:
   publish-tap:
     name: Update tap formula
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    if: |
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v')) ||
+      github.event_name == 'release' ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       SOURCE_REPO: ${{ github.repository }}
@@ -30,7 +40,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${{ github.event_name }}" == "release" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "RELEASE_TAG=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_ENV"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
             echo "RELEASE_TAG=${{ github.event.release.tag_name }}" >> "$GITHUB_ENV"
           else
             echo "RELEASE_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
