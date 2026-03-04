@@ -1,3 +1,4 @@
+pub mod check_jsonschema;
 pub mod jq;
 pub mod mdbook;
 pub mod mlr;

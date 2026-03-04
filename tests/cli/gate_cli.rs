@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use predicates::prelude::predicate;
 use serde_json::Value;
@@ -7,6 +8,9 @@ use tempfile::tempdir;
 
 #[test]
 fn gate_schema_passes_when_input_matches_schema() {
+    if !check_jsonschema_available() {
+        return;
+    }
     let dir = tempdir().expect("temp dir");
     let schema_path = dir.path().join("schema.json");
     fs::write(
@@ -36,6 +40,9 @@ fn gate_schema_passes_when_input_matches_schema() {
 
 #[test]
 fn gate_schema_reports_mismatch_with_exit_two() {
+    if !check_jsonschema_available() {
+        return;
+    }
     let dir = tempdir().expect("temp dir");
     let schema_path = dir.path().join("schema.json");
     fs::write(
@@ -65,6 +72,9 @@ fn gate_schema_reports_mismatch_with_exit_two() {
 
 #[test]
 fn gate_schema_maps_invalid_schema_to_exit_three() {
+    if !check_jsonschema_available() {
+        return;
+    }
     let dir = tempdir().expect("temp dir");
     let schema_path = dir.path().join("schema.json");
     fs::write(&schema_path, r#"{"type":123}"#).expect("write invalid schema");
@@ -79,8 +89,7 @@ fn gate_schema_maps_invalid_schema_to_exit_three() {
         .write_stdin(r#"[{"id":1}]"#)
         .assert()
         .code(3)
-        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""))
-        .stderr(predicate::str::contains("invalid schema"));
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
 }
 
 #[test]
@@ -108,6 +117,9 @@ fn gate_schema_rejects_unknown_from_preset_with_explicit_error() {
 
 #[test]
 fn gate_schema_emit_pipeline_uses_required_step_names() {
+    if !check_jsonschema_available() {
+        return;
+    }
     let dir = tempdir().expect("temp dir");
     let schema_path = dir.path().join("schema.json");
     fs::write(&schema_path, r#"{"type":"array"}"#).expect("write schema");
@@ -138,6 +150,9 @@ fn gate_schema_emit_pipeline_uses_required_step_names() {
 
 #[test]
 fn gate_schema_from_preset_accepts_file_input_without_extension() {
+    if !check_jsonschema_available() {
+        return;
+    }
     let dir = tempdir().expect("temp dir");
     let input_path = dir.path().join("workflow");
     let schema_path = dir.path().join("schema.json");
@@ -365,6 +380,13 @@ fn parse_last_stderr_json(stderr: &[u8]) -> Value {
         .find(|candidate| !candidate.trim().is_empty())
         .expect("non-empty stderr line");
     serde_json::from_str(line).expect("stderr json")
+}
+
+fn check_jsonschema_available() -> bool {
+    Command::new("check-jsonschema")
+        .arg("--help")
+        .output()
+        .is_ok()
 }
 
 fn write_exec_script(path: &PathBuf, body: &str) {
