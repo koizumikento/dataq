@@ -111,6 +111,83 @@ fn ingest_doc_unsupported_format_is_cli_input_error() {
 }
 
 #[test]
+fn ingest_jc_emits_deterministic_envelope_and_pipeline_stage() {
+    let dir = tempdir().expect("tempdir");
+    let jc_bin = write_fake_jc_script(dir.path().join("fake-jc"));
+    let input_path = dir.path().join("ifconfig.txt");
+    fs::write(&input_path, "eth0: up\n").expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_JC_BIN", &jc_bin)
+        .args([
+            "--emit-pipeline",
+            "ingest",
+            "jc",
+            "--parser",
+            "ifconfig",
+            "--input",
+            input_path.to_str().expect("utf8 input"),
+        ])
+        .output()
+        .expect("run ingest jc");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(stdout_json["source"], json!("jc"));
+    assert_eq!(stdout_json["parser"], json!("ifconfig"));
+    assert_eq!(stdout_json["result_type"], json!("array"));
+    assert_eq!(stdout_json["record_count"], json!(2));
+    assert_eq!(
+        stdout_json["records"],
+        json!([
+            {"a": 1, "b": 2},
+            {"nested": {"c": 3, "d": 4}}
+        ])
+    );
+
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["command"], json!("ingest.jc"));
+    assert_eq!(stderr_json["steps"], json!(["ingest_jc_parse"]));
+    assert_eq!(
+        stderr_json["stage_diagnostics"][0]["step"],
+        json!("ingest_jc_parse")
+    );
+    assert_eq!(stderr_json["stage_diagnostics"][0]["tool"], json!("jc"));
+    assert_eq!(stderr_json["stage_diagnostics"][0]["status"], json!("ok"));
+
+    let tools = stderr_json["external_tools"]
+        .as_array()
+        .expect("external_tools");
+    let jc_entry = tools
+        .iter()
+        .find(|entry| entry["name"] == json!("jc"))
+        .expect("jc entry");
+    assert_eq!(jc_entry["used"], json!(true));
+    assert_eq!(
+        stderr_json["fingerprint"]["tool_versions"]["jc"],
+        json!("fake-jc 1.2.3")
+    );
+}
+
+#[test]
+fn ingest_jc_invalid_parser_returns_exit_three() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["ingest", "jc", "--parser", "bad parser", "--input", "-"])
+        .output()
+        .expect("run ingest jc");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr_json = parse_last_stderr_json(&output.stderr);
+    assert_eq!(stderr_json["error"], json!("input_usage_error"));
+    assert!(
+        stderr_json["message"]
+            .as_str()
+            .expect("message")
+            .contains("invalid `--parser`")
+    );
+}
+
+#[test]
 fn ingest_book_outputs_nested_tree_and_optional_file_metadata() {
     let dir = tempdir().expect("tempdir");
     let jq_bin = write_passthrough_jq_script(dir.path().join("jq-pass"));
@@ -282,6 +359,46 @@ esac
 
 fn write_passthrough_jq_script(path: PathBuf) -> PathBuf {
     write_exec_script(&path, "#!/bin/sh\ncat\n");
+    path
+}
+
+fn write_fake_jc_script(path: PathBuf) -> PathBuf {
+    write_exec_script(
+        &path,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "fake-jc 1.2.3"
+  exit 0
+fi
+
+parser=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --quiet)
+      shift
+      ;;
+    --*)
+      parser="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+cat >/dev/null
+if [ "$parser" = "--ifconfig" ]; then
+  cat <<'JSON'
+[{"b":2,"a":1},{"nested":{"d":4,"c":3}}]
+JSON
+  exit 0
+fi
+
+echo "unsupported parser: $parser" 1>&2
+exit 7
+"#,
+    );
     path
 }
 

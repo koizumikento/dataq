@@ -1,3 +1,4 @@
+pub mod jc;
 pub mod jq;
 pub mod mdbook;
 pub mod mlr;

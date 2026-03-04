@@ -140,6 +140,8 @@ enum IngestSubcommand {
     Api(IngestApiArgs),
     /// Extract and normalize job definitions from YAML.
     YamlJobs(IngestYamlJobsArgs),
+    /// Parse semi-structured text via `jc` into deterministic JSON envelope.
+    Jc(IngestJcArgs),
     /// Fetch and normalize `nb` notes into deterministic JSON.
     Notes(IngestNotesArgs),
     /// Extract deterministic schema fields from a document.
@@ -178,6 +180,15 @@ struct IngestYamlJobsArgs {
 
     #[arg(long, value_enum)]
     mode: CliIngestYamlJobsMode,
+}
+
+#[derive(Debug, clap::Args)]
+struct IngestJcArgs {
+    #[arg(long)]
+    parser: String,
+
+    #[arg(long, default_value = "-")]
+    input: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1141,6 +1152,7 @@ fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
     match args.command {
         IngestSubcommand::Api(api_args) => run_ingest_api(api_args, emit_pipeline),
         IngestSubcommand::YamlJobs(args) => run_ingest_yaml_jobs(args, emit_pipeline),
+        IngestSubcommand::Jc(args) => run_ingest_jc(args, emit_pipeline),
         IngestSubcommand::Notes(args) => run_ingest_notes(args, emit_pipeline),
         IngestSubcommand::Doc(args) => run_ingest_doc(args, emit_pipeline),
         IngestSubcommand::Book(args) => run_ingest_book(args, emit_pipeline),
@@ -1260,6 +1272,67 @@ fn run_ingest_yaml_jobs(args: IngestYamlJobsArgs, emit_pipeline: bool) -> i32 {
         let report = build_ingest_yaml_jobs_pipeline_report(&args, mode, input_is_stdin, &trace);
         emit_pipeline_report(&report);
     }
+    exit_code
+}
+
+fn run_ingest_jc(args: IngestJcArgs, emit_pipeline: bool) -> i32 {
+    let input_path = if args.input == "-" {
+        None
+    } else {
+        Some(PathBuf::from(&args.input))
+    };
+
+    let command_args = ingest::IngestJcCommandArgs {
+        parser: args.parser.clone(),
+        input: input_path.clone(),
+    };
+
+    let stdin = io::stdin();
+    let (response, trace) = ingest::run_jc_with_stdin_and_trace(&command_args, stdin.lock());
+
+    let exit_code = match response.exit_code {
+        0 => {
+            if emit_json_stdout(&response.payload) {
+                0
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest jc response".to_string(),
+                    json!({"command": "ingest.jc"}),
+                    1,
+                );
+                1
+            }
+        }
+        3 | 1 => {
+            if emit_json_stderr(&response.payload) {
+                response.exit_code
+            } else {
+                emit_error(
+                    "internal_error",
+                    "failed to serialize ingest jc error".to_string(),
+                    json!({"command": "ingest.jc"}),
+                    1,
+                );
+                1
+            }
+        }
+        other => {
+            emit_error(
+                "internal_error",
+                format!("unexpected ingest jc exit code: {other}"),
+                json!({"command": "ingest.jc"}),
+                1,
+            );
+            1
+        }
+    };
+
+    if emit_pipeline {
+        let pipeline_report = build_ingest_jc_pipeline_report(&args, input_path, &trace);
+        emit_pipeline_report(&pipeline_report);
+    }
+
     exit_code
 }
 
@@ -3128,6 +3201,31 @@ fn build_ingest_yaml_jobs_pipeline_report(
     report.with_stage_diagnostics(trace.stage_diagnostics.clone())
 }
 
+fn build_ingest_jc_pipeline_report(
+    args: &IngestJcArgs,
+    input_path: Option<PathBuf>,
+    trace: &ingest::IngestJcPipelineTrace,
+) -> PipelineReport {
+    let source = if let Some(path) = input_path {
+        PipelineInputSource::path("input", path.display().to_string(), None)
+    } else if args.input == "-" {
+        PipelineInputSource::stdin("input", None)
+    } else {
+        PipelineInputSource::path("input", args.input.clone(), None)
+    };
+
+    let mut report = PipelineReport::new(
+        "ingest.jc",
+        PipelineInput::new(vec![source]),
+        ingest::jc_pipeline_steps(),
+        ingest::jc_deterministic_guards(),
+    );
+    for used_tool in &trace.used_tools {
+        report = report.mark_external_tool_used(used_tool);
+    }
+    report.with_stage_diagnostics(trace.stage_diagnostics.clone())
+}
+
 fn build_gate_schema_pipeline_report(
     args: &GateSchemaArgs,
     input_is_stdin: bool,
@@ -3755,6 +3853,7 @@ fn resolve_tool_executable(tool_name: &str) -> String {
         "mdbook" => Some("DATAQ_MDBOOK_BIN"),
         "rg" => Some("DATAQ_RG_BIN"),
         "nb" => Some("DATAQ_NB_BIN"),
+        "jc" => Some("DATAQ_JC_BIN"),
         _ => None,
     };
 
@@ -4198,6 +4297,18 @@ mod tests {
         );
         assert_eq!(ingest_yaml_jobs_report.command, "ingest_yaml_jobs");
 
+        let ingest_jc_args = IngestJcArgs {
+            parser: "ifconfig".to_string(),
+            input: "-".to_string(),
+        };
+        let ingest_jc_trace = ingest::IngestJcPipelineTrace {
+            used_tools: vec!["jc".to_string()],
+            stage_diagnostics: Vec::new(),
+        };
+        let ingest_jc_report =
+            build_ingest_jc_pipeline_report(&ingest_jc_args, None, &ingest_jc_trace);
+        assert_eq!(ingest_jc_report.command, "ingest.jc");
+
         let gate_schema_args = GateSchemaArgs {
             schema: PathBuf::from("schema.json"),
             input: Some(PathBuf::from("input.json")),
@@ -4475,6 +4586,17 @@ mod tests {
         );
 
         assert_eq!(
+            run_ingest_jc(
+                IngestJcArgs {
+                    parser: "bad parser".to_string(),
+                    input: "/definitely-missing/ingest-jc-input.txt".to_string(),
+                },
+                true,
+            ),
+            3
+        );
+
+        assert_eq!(
             run_ingest_doc(
                 IngestDocArgs {
                     input: "/definitely-missing/dataq-ingest-doc.md".to_string(),
@@ -4704,6 +4826,17 @@ mod tests {
             false,
         );
         assert_eq!(ingest_exit, 3);
+
+        let ingest_jc_exit = run_ingest(
+            IngestArgs {
+                command: IngestSubcommand::Jc(IngestJcArgs {
+                    parser: "bad parser".to_string(),
+                    input: "/definitely-missing/ingest-jc-input.txt".to_string(),
+                }),
+            },
+            false,
+        );
+        assert_eq!(ingest_jc_exit, 3);
 
         let gate_exit = run_gate(
             GateArgs {

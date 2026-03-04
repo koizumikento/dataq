@@ -6,10 +6,13 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::adapters::{jq, mdbook, nb};
-use crate::domain::report::PipelineStageDiagnostic;
+use crate::adapters::{jc, jq, mdbook, nb};
+use crate::domain::report::{PipelineStageDiagnostic, PipelineStageMetrics};
 pub use crate::engine::ingest::IngestDocInputFormat;
 use crate::engine::ingest::{self, IngestBookOptions, IngestDocError};
+use crate::util::sort::sort_value_keys;
+
+const INGEST_JC_PARSE_STEP: &str = "ingest_jc_parse";
 
 /// Input arguments for `ingest doc` command execution API.
 #[derive(Debug, Clone)]
@@ -26,6 +29,13 @@ pub struct IngestNotesCommandArgs {
     pub until: Option<String>,
 }
 
+/// Input arguments for `ingest jc` command execution.
+#[derive(Debug, Clone)]
+pub struct IngestJcCommandArgs {
+    pub parser: String,
+    pub input: Option<PathBuf>,
+}
+
 /// Structured command response that carries exit-code mapping and JSON payload.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct IngestDocCommandResponse {
@@ -36,6 +46,13 @@ pub struct IngestDocCommandResponse {
 /// Structured command response that carries exit-code mapping and JSON payload.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct IngestNotesCommandResponse {
+    pub exit_code: i32,
+    pub payload: Value,
+}
+
+/// Structured command response that carries exit-code mapping and JSON payload.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct IngestJcCommandResponse {
     pub exit_code: i32,
     pub payload: Value,
 }
@@ -87,6 +104,31 @@ impl IngestBookPipelineTrace {
     }
 }
 
+/// Trace details used by `--emit-pipeline` for ingest-jc stages.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IngestJcPipelineTrace {
+    pub used_tools: Vec<String>,
+    pub stage_diagnostics: Vec<PipelineStageDiagnostic>,
+}
+
+impl IngestJcPipelineTrace {
+    fn mark_tool_used(&mut self, tool: &'static str) {
+        if self.used_tools.iter().any(|used| used == tool) {
+            return;
+        }
+        self.used_tools.push(tool.to_string());
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct IngestJcEnvelope {
+    source: String,
+    parser: String,
+    result_type: String,
+    record_count: usize,
+    records: Vec<Value>,
+}
+
 pub fn run_with_stdin<R: Read>(args: &IngestDocCommandArgs, stdin: R) -> IngestDocCommandResponse {
     match execute(args, stdin) {
         Ok(payload) => IngestDocCommandResponse {
@@ -95,6 +137,96 @@ pub fn run_with_stdin<R: Read>(args: &IngestDocCommandArgs, stdin: R) -> IngestD
         },
         Err(error) => map_error(error),
     }
+}
+
+pub fn run_jc_with_stdin_and_trace<R: Read>(
+    args: &IngestJcCommandArgs,
+    stdin: R,
+) -> (IngestJcCommandResponse, IngestJcPipelineTrace) {
+    let mut trace = IngestJcPipelineTrace::default();
+    let input_bytes = match load_jc_input_bytes(args, stdin) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            return (
+                IngestJcCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": message,
+                    }),
+                },
+                trace,
+            );
+        }
+    };
+
+    trace.mark_tool_used("jc");
+    let parsed = match jc::parse_with_parser(&args.parser, &input_bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            trace
+                .stage_diagnostics
+                .push(PipelineStageDiagnostic::failure_with_metrics(
+                    1,
+                    INGEST_JC_PARSE_STEP,
+                    "jc",
+                    1,
+                    PipelineStageMetrics {
+                        input_bytes: input_bytes.len(),
+                        output_bytes: 0,
+                        duration_ms: 0,
+                    },
+                ));
+            let message = match error {
+                jc::JcError::Unavailable => "ingest jc requires `jc` in PATH".to_string(),
+                jc::JcError::InvalidParser | jc::JcError::InvalidParserName(_) => {
+                    format!("invalid `--parser` for ingest jc: {error}")
+                }
+                _ => format!("failed to parse input with jc: {error}"),
+            };
+            return (
+                IngestJcCommandResponse {
+                    exit_code: 3,
+                    payload: json!({
+                        "error": "input_usage_error",
+                        "message": message,
+                    }),
+                },
+                trace,
+            );
+        }
+    };
+
+    let envelope = build_jc_output_envelope(&args.parser, parsed);
+    let output_bytes = serde_json::to_vec(&envelope).map_or(0, |bytes| bytes.len());
+    trace
+        .stage_diagnostics
+        .push(PipelineStageDiagnostic::success_with_metrics(
+            1,
+            INGEST_JC_PARSE_STEP,
+            "jc",
+            1,
+            envelope.record_count,
+            PipelineStageMetrics {
+                input_bytes: input_bytes.len(),
+                output_bytes,
+                duration_ms: 0,
+            },
+        ));
+
+    (
+        IngestJcCommandResponse {
+            exit_code: 0,
+            payload: json!({
+                "source": envelope.source,
+                "parser": envelope.parser,
+                "result_type": envelope.result_type,
+                "record_count": envelope.record_count,
+                "records": envelope.records,
+            }),
+        },
+        trace,
+    )
 }
 
 pub fn run_notes_with_trace(
@@ -443,6 +575,56 @@ fn load_input_bytes<R: Read>(
     }
 }
 
+fn load_jc_input_bytes<R: Read>(
+    args: &IngestJcCommandArgs,
+    mut stdin: R,
+) -> Result<Vec<u8>, String> {
+    if let Some(path) = &args.input {
+        let mut file = File::open(path)
+            .map_err(|error| format!("failed to open input file `{}`: {error}", path.display()))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|error| format!("failed to read input file `{}`: {error}", path.display()))?;
+        Ok(bytes)
+    } else {
+        let mut bytes = Vec::new();
+        stdin
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("failed to read stdin: {error}"))?;
+        Ok(bytes)
+    }
+}
+
+fn build_jc_output_envelope(parser: &str, payload: Value) -> IngestJcEnvelope {
+    let normalized_parser = parser.trim().trim_start_matches('-').to_ascii_lowercase();
+    let normalized_payload = sort_value_keys(&payload);
+    let result_type = jc_result_type(&normalized_payload).to_string();
+
+    let records = match normalized_payload {
+        Value::Array(items) => items,
+        other => vec![other],
+    };
+
+    IngestJcEnvelope {
+        source: "jc".to_string(),
+        parser: normalized_parser,
+        result_type,
+        record_count: records.len(),
+        records,
+    }
+}
+
+fn jc_result_type(value: &Value) -> &'static str {
+    match value {
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Null => "null",
+    }
+}
+
 fn map_error(error: IngestDocError) -> IngestDocCommandResponse {
     IngestDocCommandResponse {
         exit_code: 3,
@@ -478,6 +660,21 @@ pub fn notes_deterministic_guards() -> Vec<String> {
         "no_shell_interpolation_for_user_input".to_string(),
         "ingest_notes_sorted_by_created_at_then_id".to_string(),
         "ingest_notes_timestamps_normalized_to_utc".to_string(),
+    ]
+}
+
+/// Ordered pipeline-step names used for `ingest jc` diagnostics.
+pub fn jc_pipeline_steps() -> Vec<String> {
+    vec![INGEST_JC_PARSE_STEP.to_string()]
+}
+
+/// Determinism guards planned for `ingest jc` command.
+pub fn jc_deterministic_guards() -> Vec<String> {
+    vec![
+        "jc_execution_with_explicit_arg_array".to_string(),
+        "jc_parser_argument_normalized_and_validated".to_string(),
+        "ingest_jc_output_wrapped_in_stable_envelope".to_string(),
+        "ingest_jc_object_keys_sorted_recursively".to_string(),
     ]
 }
 
@@ -520,7 +717,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notes_and_book_trace_mark_tool_used_deduplicates_entries() {
+    fn notes_book_and_jc_trace_mark_tool_used_deduplicates_entries() {
         let mut notes_trace = IngestNotesPipelineTrace::default();
         notes_trace.mark_tool_used("jq");
         notes_trace.mark_tool_used("jq");
@@ -534,6 +731,11 @@ mod tests {
         book_trace.mark_tool_used("jq");
         book_trace.mark_tool_used("jq");
         assert_eq!(book_trace.used_tools, vec!["jq".to_string()]);
+
+        let mut jc_trace = IngestJcPipelineTrace::default();
+        jc_trace.mark_tool_used("jc");
+        jc_trace.mark_tool_used("jc");
+        assert_eq!(jc_trace.used_tools, vec!["jc".to_string()]);
     }
 
     #[test]
@@ -621,6 +823,45 @@ mod tests {
     }
 
     #[test]
+    fn run_jc_with_invalid_parser_returns_input_usage_shape() {
+        let args = IngestJcCommandArgs {
+            parser: "bad parser".to_string(),
+            input: None,
+        };
+
+        let (response, trace) = run_jc_with_stdin_and_trace(&args, Cursor::new(b"raw-input"));
+        assert_eq!(response.exit_code, 3);
+        assert_eq!(response.payload["error"], json!("input_usage_error"));
+        assert!(
+            response.payload["message"]
+                .as_str()
+                .expect("message")
+                .contains("invalid `--parser`")
+        );
+        assert_eq!(trace.used_tools, vec!["jc".to_string()]);
+        assert_eq!(trace.stage_diagnostics.len(), 1);
+        assert_eq!(
+            trace.stage_diagnostics[0].step,
+            INGEST_JC_PARSE_STEP.to_string()
+        );
+        assert_eq!(trace.stage_diagnostics[0].tool, "jc".to_string());
+    }
+
+    #[test]
+    fn build_jc_output_envelope_normalizes_shape_and_keys() {
+        let envelope =
+            build_jc_output_envelope(" --IFCONFIG ", json!([{"b":2,"a":1}, {"z":{"d":4,"c":3}}]));
+        assert_eq!(envelope.source, "jc".to_string());
+        assert_eq!(envelope.parser, "ifconfig".to_string());
+        assert_eq!(envelope.result_type, "array".to_string());
+        assert_eq!(envelope.record_count, 2);
+        assert_eq!(
+            envelope.records,
+            vec![json!({"a":1,"b":2}), json!({"z":{"c":3,"d":4}})]
+        );
+    }
+
+    #[test]
     fn map_error_returns_input_usage_shape() {
         let response = map_error(IngestDocError::MissingPandoc);
         assert_eq!(response.exit_code, 3);
@@ -644,6 +885,12 @@ mod tests {
             notes_deterministic_guards()
                 .iter()
                 .any(|guard| guard == "ingest_notes_timestamps_normalized_to_utc")
+        );
+        assert_eq!(jc_pipeline_steps(), vec!["ingest_jc_parse".to_string()]);
+        assert!(
+            jc_deterministic_guards()
+                .iter()
+                .any(|guard| guard == "ingest_jc_output_wrapped_in_stable_envelope")
         );
         assert_eq!(
             pipeline_steps_book(),
