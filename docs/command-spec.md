@@ -24,6 +24,7 @@ dataq [--emit-pipeline] <command> [options]
 - `aggregate`: グループ集計をJSON配列で出力
 - `scan text`: 正規表現でテキストを走査して構造化マッチを出力
 - `transform rowset`: 固定2段 (`jq -> mlr`) でrowset変換してJSON配列を出力
+- `transform sql`: `duckdb` でSQL変換してJSON配列を出力
 - `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
 - `doctor`: 依存ツール診断（`--profile` 指定でワークフロー別要件評価）
 - `recipe run`: 宣言的レシピを定義順に実行
@@ -37,12 +38,12 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|scan|transform-rowset|merge|doctor|recipe-run|recipe-lock>`
+  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
   - `--command recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `transform-rowset`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`
@@ -143,6 +144,7 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.aggregate`
   - `dataq.scan.text`
   - `dataq.transform.rowset`
+  - `dataq.transform.sql`
   - `dataq.merge`
   - `dataq.doctor`
   - `dataq.contract`
@@ -254,6 +256,23 @@ dataq [--emit-pipeline] <command> [options]
   - `jq` / `mlr` を明示的引数配列で実行（シェル展開なし）
   - `--emit-pipeline` で `stage_diagnostics` に `transform_rowset_jq`, `transform_rowset_mlr` を出力
   - stage ごとに `input_records` / `output_records` を出力
+
+## `transform sql` コマンド契約（MVP）
+
+- コマンド:
+  - `dataq transform sql --input <path|-> --query <sql> --duckdb-path <path>`
+- 出力: JSON 配列（stdout）
+- 実行方式:
+  - 入力 rowset を DuckDB へロードし、`--query` を実行
+  - 決定的な行順が必要なクエリは `ORDER BY` を明示
+  - `duckdb` は明示的引数配列で実行（シェル展開なし）
+- 例:
+  - `dataq transform sql --input orders.json --query 'SELECT team, AVG(price) AS avg_price FROM input GROUP BY team ORDER BY team' --duckdb-path .dataq/tmp/orders.duckdb`
+- 終了コード:
+  - `0`: SQL 実行成功
+  - `3`: 入力/使用エラー（`duckdb` 不在、`--query` 不正、SQL実行失敗、入力不正）
+  - `1`: 予期しない内部エラー
+  - `2`: 本コマンドでは未使用（検証系コマンドで利用）
 
 ## `profile` 出力契約
 
