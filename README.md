@@ -63,7 +63,7 @@ AI処理そのものは行わず、エージェントやCIから呼びやすい�
 | `ingest notes` | `nb`, `jq` |
 | `ingest book` | `jq`（`DATAQ_INGEST_BOOK_VERIFY_MDBOOK` 有効時は `mdbook` も必要） |
 | `scan text` | `rg`（`--jq-project` を使う場合は `jq` も必要） |
-| `transform rowset` | `jq`, `mlr` |
+| `transform rowset` | `jq`, `mlr`（`--emit-pipeline` の stage2 tool label は `sqlite`） |
 
 補足:
 - `doctor --profile` でワークフロー別に必要ツールの充足を診断できます（`doc` / `api` / `notes` / `book` / `scan` など）。
@@ -93,7 +93,7 @@ dataq [--emit-pipeline] <command> [options]
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <inner|left>` |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <count|sum|avg>` `--target <field>` |
 | `scan text` | テキストを正規表現で走査し構造化結果を出力 | `--pattern <regex>` |
-| `transform rowset` | `jq -> mlr` の2段でrowsetを変換しJSON配列を出力 | `--input <path|->` `--jq-filter <filter>` `--mlr <verb...>` |
+| `transform rowset` | `jq -> sql(sqlite)` の2段でrowsetを変換しJSON配列を出力 | `--input <path|->` `--engine <sqlite>` `--jq-filter <filter>` `--mlr <verb...>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <last-wins|deep-merge|array-replace>` `--policy-path <path=policy>...` |
 | `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
@@ -158,8 +158,8 @@ dataq aggregate --input orders.json --group-by team --metric avg --target price
 # テキスト走査（policy mode ではヒット時に終了コード2）
 dataq scan text --pattern 'TODO|FIXME' --path . --glob '*.rs' --policy-mode
 
-# rowset変換（stage1: jq, stage2: mlr）
-dataq transform rowset --input orders.json --jq-filter '.' --mlr stats1 -a mean -f price -g team
+# rowset変換（stage1: jq, stage2: sql(sqlite)）
+dataq transform rowset --input orders.json --engine sqlite --jq-filter '.' --mlr stats1 -a mean -f price -g team
 
 # ポリシーマージ
 dataq merge --base base.yaml --overlay patch1.json --overlay patch2.yaml --policy deep-merge
@@ -523,14 +523,15 @@ YAMLのCIジョブ定義を `yq -> jq -> mlr` の固定3段で正規化し、決
 
 ### 10. `transform rowset`
 
-固定2段 (`jq -> mlr`) で rowset を変換し、JSON配列で返す。
+固定2段 (`jq -> sql`) で rowset を変換し、JSON配列で返す（現状の SQL engine は `sqlite`）。
 
 - `--input <path|->`: 入力（`-` は stdin）
+- `--engine <sqlite>`: stage2 の SQL engine（既定値 `sqlite`）
 - `--jq-filter <filter>`: stage1 の jq filter
-- `--mlr <verb...>`: stage2 の mlr 引数列
+- `--mlr <verb...>`: stage2 アダプタ引数列（sqlite path で使用）
 - 出力は JSON 配列固定
-- `jq`/`mlr` 実行や filter/args 不正は終了コード `3`
-- `--emit-pipeline` では `transform_rowset_jq`, `transform_rowset_mlr` を stage 診断として出力
+- `jq`/`sqlite` 実行や filter/args 不正は終了コード `3`
+- `--emit-pipeline` では `transform_rowset_jq`, `transform_rowset_mlr` を stage 診断として出力（stage2 `tool` は `sqlite`）
 
 ### 11. `merge`
 

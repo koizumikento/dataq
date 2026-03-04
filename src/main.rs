@@ -60,7 +60,7 @@ enum Commands {
     Join(JoinArgs),
     /// Aggregate grouped metrics with deterministic JSON output.
     Aggregate(AggregateArgs),
-    /// Transform rowsets with fixed `jq -> mlr` stages.
+    /// Transform rowsets with fixed `jq -> sql` stages.
     Transform(TransformArgs),
     /// Scan repository text with deterministic structured match output.
     Scan(ScanArgs),
@@ -359,7 +359,7 @@ struct TransformArgs {
 
 #[derive(Debug, Subcommand)]
 enum TransformSubcommand {
-    /// Run fixed two-stage rowset transform (`jq` then `mlr`).
+    /// Run fixed two-stage rowset transform (`jq` then SQL stage).
     Rowset(TransformRowsetArgs),
 }
 
@@ -369,11 +369,15 @@ struct TransformRowsetArgs {
     #[arg(long)]
     input: String,
 
+    /// SQL execution engine for stage 2.
+    #[arg(long, value_enum, default_value_t = CliTransformRowsetEngine::Sqlite)]
+    engine: CliTransformRowsetEngine,
+
     /// jq filter used in stage 1.
     #[arg(long = "jq-filter")]
     jq_filter: String,
 
-    /// mlr verb/arguments used in stage 2.
+    /// Stage-2 verb/arguments used by the current sqlite-backed adapter path.
     #[arg(long = "mlr", required = true, num_args = 1.., allow_hyphen_values = true)]
     mlr: Vec<String>,
 }
@@ -556,6 +560,11 @@ enum CliAggregateMetric {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliTransformRowsetEngine {
+    Sqlite,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliAssertNormalizeMode {
     GithubActionsJobs,
     GitlabCiJobs,
@@ -682,6 +691,14 @@ impl From<CliAggregateMetric> for AggregateMetric {
             CliAggregateMetric::Count => Self::Count,
             CliAggregateMetric::Sum => Self::Sum,
             CliAggregateMetric::Avg => Self::Avg,
+        }
+    }
+}
+
+impl From<CliTransformRowsetEngine> for transform::TransformRowsetSqlEngine {
+    fn from(value: CliTransformRowsetEngine) -> Self {
+        match value {
+            CliTransformRowsetEngine::Sqlite => transform::TransformRowsetSqlEngine::Sqlite,
         }
     }
 }
@@ -1946,7 +1963,8 @@ fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {
         jq_filter: args.jq_filter.clone(),
         mlr: args.mlr.clone(),
     };
-    let (response, trace) = transform::run_rowset_with_trace(&command_args);
+    let sql_engine = transform::TransformRowsetSqlEngine::from(args.engine);
+    let (response, trace) = transform::run_rowset_with_sql_engine_trace(&command_args, sql_engine);
 
     let exit_code = match response.exit_code {
         0 => {
@@ -3750,6 +3768,7 @@ fn resolve_tool_executable(tool_name: &str) -> String {
         "jq" => Some("DATAQ_JQ_BIN"),
         "yq" => Some("DATAQ_YQ_BIN"),
         "mlr" => Some("DATAQ_MLR_BIN"),
+        "sqlite" => Some("DATAQ_SQLITE_BIN"),
         "xh" => Some("DATAQ_XH_BIN"),
         "pandoc" => Some("DATAQ_PANDOC_BIN"),
         "mdbook" => Some("DATAQ_MDBOOK_BIN"),
@@ -3897,6 +3916,10 @@ mod tests {
         assert_eq!(
             AggregateMetric::from(CliAggregateMetric::Avg),
             AggregateMetric::Avg
+        );
+        assert_eq!(
+            transform::TransformRowsetSqlEngine::from(CliTransformRowsetEngine::Sqlite),
+            transform::TransformRowsetSqlEngine::Sqlite
         );
 
         assert_eq!(
@@ -4296,6 +4319,7 @@ mod tests {
 
         let transform_args = TransformRowsetArgs {
             input: "-".to_string(),
+            engine: CliTransformRowsetEngine::Sqlite,
             jq_filter: ".".to_string(),
             mlr: vec!["cat".to_string()],
         };
@@ -4578,6 +4602,7 @@ mod tests {
             run_transform_rowset(
                 TransformRowsetArgs {
                     input: "/definitely-missing/input.json".to_string(),
+                    engine: CliTransformRowsetEngine::Sqlite,
                     jq_filter: ".".to_string(),
                     mlr: vec!["cat".to_string()],
                 },
@@ -4721,6 +4746,7 @@ mod tests {
             TransformArgs {
                 command: TransformSubcommand::Rowset(TransformRowsetArgs {
                     input: "/definitely-missing/input.json".to_string(),
+                    engine: CliTransformRowsetEngine::Sqlite,
                     jq_filter: ".".to_string(),
                     mlr: vec!["cat".to_string()],
                 }),

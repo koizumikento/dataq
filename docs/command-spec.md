@@ -23,7 +23,7 @@ dataq [--emit-pipeline] <command> [options]
 - `join`: 2入力をキー結合してJSON配列を出力
 - `aggregate`: グループ集計をJSON配列で出力
 - `scan text`: 正規表現でテキストを走査して構造化マッチを出力
-- `transform rowset`: 固定2段 (`jq -> mlr`) でrowset変換してJSON配列を出力
+- `transform rowset`: 固定2段 (`jq -> sql`) でrowset変換してJSON配列を出力
 - `merge`: base + overlays をポリシーマージ（`--policy-path` で subtree 別上書き可）
 - `doctor`: 依存ツール診断（`--profile` 指定でワークフロー別要件評価）
 - `recipe run`: 宣言的レシピを定義順に実行
@@ -243,16 +243,16 @@ dataq [--emit-pipeline] <command> [options]
 ## `transform rowset` コマンド契約（MVP）
 
 - コマンド:
-  - `dataq transform rowset --input <path|-> --jq-filter <filter> --mlr <verb...>`
+  - `dataq transform rowset --input <path|-> --engine <sqlite> --jq-filter <filter> --mlr <verb...>`
 - 出力: JSON 配列（stdout）
 - ステージ:
   - stage1 `jq`: enrichment/type shaping
-  - stage2 `mlr`: aggregation/join/statistics
+  - stage2 `sql(sqlite)`: aggregation/join/statistics
 - 異常時契約:
   - tool 実行失敗または filter/args 不正は exit `3`
 - 実行方式:
-  - `jq` / `mlr` を明示的引数配列で実行（シェル展開なし）
-  - `--emit-pipeline` で `stage_diagnostics` に `transform_rowset_jq`, `transform_rowset_mlr` を出力
+  - `jq` / sqlite path を明示的引数配列で実行（シェル展開なし）
+  - `--emit-pipeline` で `stage_diagnostics` に `transform_rowset_jq`, `transform_rowset_mlr` を出力（stage2 `tool` は `sqlite`）
   - stage ごとに `input_records` / `output_records` を出力
 
 ## `profile` 出力契約

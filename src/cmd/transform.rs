@@ -9,6 +9,32 @@ use crate::domain::report::PipelineStageDiagnostic;
 use crate::engine::transform::{self, TransformRowsetError};
 use crate::io;
 
+/// SQL execution engine used for transform rowset stage 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformRowsetSqlEngine {
+    Sqlite,
+}
+
+impl TransformRowsetSqlEngine {
+    const fn pipeline_stage_step(self) -> &'static str {
+        match self {
+            Self::Sqlite => "transform_rowset_mlr",
+        }
+    }
+
+    const fn pipeline_tool_label(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+        }
+    }
+
+    const fn error_label(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
+
 /// Input arguments for `transform rowset` execution.
 #[derive(Debug, Clone)]
 pub struct TransformRowsetCommandArgs {
@@ -50,6 +76,13 @@ impl TransformRowsetPipelineTrace {
 pub fn run_rowset_with_trace(
     args: &TransformRowsetCommandArgs,
 ) -> (TransformRowsetCommandResponse, TransformRowsetPipelineTrace) {
+    run_rowset_with_sql_engine_trace(args, TransformRowsetSqlEngine::Sqlite)
+}
+
+pub fn run_rowset_with_sql_engine_trace(
+    args: &TransformRowsetCommandArgs,
+    sql_engine: TransformRowsetSqlEngine,
+) -> (TransformRowsetCommandResponse, TransformRowsetPipelineTrace) {
     let mut trace = TransformRowsetPipelineTrace::default();
     let values = match resolve_input_rows(&args.input) {
         Ok(values) => values,
@@ -70,7 +103,7 @@ pub fn run_rowset_with_trace(
     match transform::execute_rowset(&values, &args.jq_filter, &args.mlr) {
         Ok(result) => {
             trace.mark_tool_used("jq");
-            trace.mark_tool_used("mlr");
+            trace.mark_tool_used(sql_engine.pipeline_tool_label());
             trace
                 .stage_diagnostics
                 .push(PipelineStageDiagnostic::success(
@@ -84,8 +117,8 @@ pub fn run_rowset_with_trace(
                 .stage_diagnostics
                 .push(PipelineStageDiagnostic::success(
                     2,
-                    "transform_rowset_mlr",
-                    "mlr",
+                    sql_engine.pipeline_stage_step(),
+                    sql_engine.pipeline_tool_label(),
                     result.jq_output_records,
                     result.mlr_output_records,
                 ));
@@ -127,7 +160,7 @@ pub fn run_rowset_with_trace(
             source,
         }) => {
             trace.mark_tool_used("jq");
-            trace.mark_tool_used("mlr");
+            trace.mark_tool_used(sql_engine.pipeline_tool_label());
             trace
                 .stage_diagnostics
                 .push(PipelineStageDiagnostic::success(
@@ -141,8 +174,8 @@ pub fn run_rowset_with_trace(
                 .stage_diagnostics
                 .push(PipelineStageDiagnostic::failure(
                     2,
-                    "transform_rowset_mlr",
-                    "mlr",
+                    sql_engine.pipeline_stage_step(),
+                    sql_engine.pipeline_tool_label(),
                     jq_output_records,
                 ));
             (
@@ -150,7 +183,10 @@ pub fn run_rowset_with_trace(
                     exit_code: 3,
                     payload: json!({
                         "error": "input_usage_error",
-                        "message": format!("failed to transform rowset with mlr: {source}"),
+                        "message": format!(
+                            "failed to transform rowset with {}: {source}",
+                            sql_engine.error_label()
+                        ),
                     }),
                 },
                 trace,
