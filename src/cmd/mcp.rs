@@ -1147,6 +1147,19 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
+    let fields = match parse_string_list(args, &["field"], "field") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let allow_missing_fields = match parse_bool(
+        args,
+        &["allow_missing_fields"],
+        false,
+        "allow_missing_fields",
+    ) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
     let input = match parse_value_input(
         args,
         &["input_path", "input_file"],
@@ -1166,6 +1179,8 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
                 &profile::ProfileCommandArgs {
                     input: Some(path.clone()),
                     from,
+                    fields: fields.clone(),
+                    allow_missing_fields,
                 },
                 Cursor::new(Vec::new()),
             );
@@ -1181,6 +1196,8 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
                 &profile::ProfileCommandArgs {
                     input: None,
                     from: Some(Format::Json),
+                    fields: fields.clone(),
+                    allow_missing_fields,
                 },
                 Cursor::new(serialize_values_as_json_input(values)),
             );
@@ -2404,6 +2421,8 @@ fn tool_input_schema(tool_name: &str) -> Value {
             "properties": {
                 "emit_pipeline": emit_pipeline_schema(),
                 "from": format_schema(),
+                "field": string_or_array_of_strings_schema(),
+                "allow_missing_fields": { "type": "boolean", "default": false },
                 "input": json_value_schema(),
                 "input_path": { "type": "string" }
             },
@@ -2764,7 +2783,8 @@ fn tool_examples(tool_name: &str) -> Vec<Value> {
         "dataq.profile" => vec![json!({
             "name": "profile-inline",
             "arguments": {
-                "input": [{"id": 1}, {"id": 2}]
+                "input": [{"id": 1}, {"id": 2}],
+                "field": "id"
             }
         })],
         "dataq.ingest.doc" => vec![json!({
@@ -3211,6 +3231,7 @@ fn input_usage_error_with_invalid_params(
 
 const MACHINE_PARAM_NAMES: &[&str] = &[
     "all",
+    "allow_missing_fields",
     "args",
     "base",
     "base_dir",
@@ -3221,6 +3242,7 @@ const MACHINE_PARAM_NAMES: &[&str] = &[
     "emit_pipeline",
     "expect_status",
     "fail_on_diff",
+    "field",
     "file_path",
     "from",
     "glob",

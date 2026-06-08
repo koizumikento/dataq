@@ -192,7 +192,9 @@ pub fn normalize_qsv_profile_rows(values: &[Value]) -> Result<Option<ProfileRepo
     Ok(Some(ProfileReport {
         record_count,
         field_count: fields.len(),
+        returned_field_count: None,
         fields,
+        missing_fields: None,
     }))
 }
 
@@ -430,8 +432,37 @@ pub fn profile_values(values: &[Value]) -> ProfileReport {
     ProfileReport {
         record_count: values.len(),
         field_count: fields.len(),
+        returned_field_count: None,
         fields,
+        missing_fields: None,
     }
+}
+
+/// Projects a completed profile report to a deterministic set of canonical field paths.
+pub fn project_report(
+    mut report: ProfileReport,
+    requested_fields: &[String],
+    allow_missing_fields: bool,
+) -> Result<ProfileReport, Vec<String>> {
+    let requested: BTreeSet<String> = requested_fields.iter().cloned().collect();
+    let missing_fields: Vec<String> = requested
+        .iter()
+        .filter(|field| !report.fields.contains_key(*field))
+        .cloned()
+        .collect();
+
+    if !allow_missing_fields && !missing_fields.is_empty() {
+        return Err(missing_fields);
+    }
+
+    report.fields.retain(|field, _| requested.contains(field));
+    report.returned_field_count = Some(report.fields.len());
+    report.missing_fields = if allow_missing_fields {
+        Some(missing_fields)
+    } else {
+        None
+    };
+    Ok(report)
 }
 
 fn collect_record_samples(value: &Value, path: &str, out: &mut BTreeMap<String, Vec<Value>>) {

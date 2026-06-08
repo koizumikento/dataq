@@ -147,6 +147,8 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.sdiff`
   - `dataq.diff.source`
   - `dataq.profile`
+    - `field`: string または string[]。CLI の `--field` と同じ projection 指定
+    - `allow_missing_fields`: boolean。CLI の `--allow-missing-fields` と同じ欠損許可
   - `dataq.ingest.doc`
   - `dataq.ingest.notes`
   - `dataq.ingest.book`
@@ -288,8 +290,15 @@ dataq [--emit-pipeline] <command> [options]
 ## `profile` 出力契約
 
 - 既存キーは固定: `record_count`, `field_count`, `fields`, `type_distribution`
+- projection 指定時のみ `returned_field_count` を追加し、`field_count` は入力全体のフィールドパス件数を維持
+- `--field <name-or-path>` は複数指定可能。直接名は `$["name"]` に解決し、`$` で始まる値は canonical path として検証
+- `fields` projection は canonical path 順でソートし、重複指定は 1 件にまとめる
+- 欠損 projection は既定で exit `3` の `input_usage_error`
+- `--allow-missing-fields` 指定時は exit `0` とし、存在する field のみ返して `missing_fields` に欠損 canonical path をソート/重複排除済み配列で出力
+- 空の `--field`、または不正な canonical path は `--allow-missing-fields` 指定時でも exit `3`
 - `fields.<canonical-path>.numeric_stats` は後方互換な追加キー（数値サンプルが存在するときのみ出力）
 - `--from csv` は通常CSV行の集計に加えて、qsv adapter 出力CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` 等）を同一スキーマへ正規化可能
+- projection は通常 profile と qsv adapter CSV 正規化後の profile の両方に適用
 - qsv adapter 正規化パスが使われた場合、`--emit-pipeline` で `stage_diagnostics` に `profile_qsv_normalize` を出力し、`external_tools` で `qsv.used=true` を記録
 - `numeric_stats` スキーマ:
   - `count`

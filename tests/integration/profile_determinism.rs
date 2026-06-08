@@ -9,6 +9,8 @@ fn profile_is_deterministic_for_identical_input() {
     let args = ProfileCommandArgs {
         input: None,
         from: Some(Format::Json),
+        fields: Vec::new(),
+        allow_missing_fields: false,
     };
 
     let first = run_with_stdin(&args, Cursor::new(input));
@@ -28,6 +30,34 @@ fn profile_numeric_stats_are_deterministic_for_same_input_bytes() {
     let args = ProfileCommandArgs {
         input: None,
         from: Some(Format::Json),
+        fields: Vec::new(),
+        allow_missing_fields: false,
+    };
+
+    let first = run_with_stdin(&args, Cursor::new(input));
+    let second = run_with_stdin(&args, Cursor::new(input));
+
+    assert_eq!(first.exit_code, 0);
+    assert_eq!(second.exit_code, 0);
+
+    let first_bytes = serde_json::to_vec(&first.payload).expect("serialize first payload");
+    let second_bytes = serde_json::to_vec(&second.payload).expect("serialize second payload");
+    assert_eq!(first_bytes, second_bytes);
+}
+
+#[test]
+fn profile_projection_is_deterministic_for_unsorted_duplicate_fields() {
+    let input = r#"[{"a":1,"z":"x","nested":{"b":true}},{"z":"x","a":null}]"#;
+    let args = ProfileCommandArgs {
+        input: None,
+        from: Some(Format::Json),
+        fields: vec![
+            "z".to_string(),
+            "$[\"nested\"][\"b\"]".to_string(),
+            "a".to_string(),
+            "z".to_string(),
+        ],
+        allow_missing_fields: true,
     };
 
     let first = run_with_stdin(&args, Cursor::new(input));

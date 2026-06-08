@@ -145,6 +145,37 @@ fn contract_diff_source_command_includes_sources_field() {
 }
 
 #[test]
+fn contract_profile_command_mentions_projection_fields() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "profile"])
+        .output()
+        .expect("run contract profile");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(payload["command"], json!("profile"));
+    assert_eq!(
+        payload["output_fields"],
+        json!([
+            "record_count",
+            "field_count",
+            "returned_field_count",
+            "fields",
+            "missing_fields"
+        ])
+    );
+    assert!(
+        payload["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note.as_str().unwrap_or_default().contains("--field"))
+    );
+}
+
+#[test]
 fn contract_command_unknown_value_returns_exit_three() {
     assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["contract", "--command", "unknown"])

@@ -22,6 +22,12 @@ impl ValuePath {
         }
     }
 
+    pub fn object_key(key: impl Into<String>) -> Self {
+        Self {
+            segments: vec![PathSegment::Key(key.into())],
+        }
+    }
+
     pub fn parse_canonical(input: &str) -> Result<Self, ValuePathError> {
         if !input.starts_with('$') {
             return Err(ValuePathError::new(

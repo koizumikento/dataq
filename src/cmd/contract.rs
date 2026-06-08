@@ -97,7 +97,13 @@ const ASSERT_FIELDS: &[&str] = &["matched", "mismatch_count", "mismatches"];
 const GATE_FIELDS: &[&str] = &["matched", "violations", "details"];
 const SDIFF_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values"];
 const DIFF_SOURCE_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values", "sources"];
-const PROFILE_FIELDS: &[&str] = &["record_count", "field_count", "fields"];
+const PROFILE_FIELDS: &[&str] = &[
+    "record_count",
+    "field_count",
+    "returned_field_count",
+    "fields",
+    "missing_fields",
+];
 const INGEST_DOC_FIELDS: &[&str] = &["meta", "headings", "links", "tables", "code_blocks"];
 const INGEST_NOTES_FIELDS: &[&str] = &[
     "id",
@@ -173,6 +179,9 @@ const DIFF_SOURCE_NOTES: &[&str] = &[
 const PROFILE_NOTES: &[&str] = &[
     "`fields` keys are canonical JSON paths in deterministic order.",
     "`numeric_stats` is omitted when no numeric samples exist.",
+    "`--field` projects `fields` after profile computation; `field_count` remains the total input field count.",
+    "`returned_field_count` is emitted only when projection is requested.",
+    "`missing_fields` is emitted when `--allow-missing-fields` is used.",
     "`--from csv` can normalize qsv adapter profile/stats CSV rows into the same output schema.",
 ];
 const INGEST_DOC_NOTES: &[&str] = &[
