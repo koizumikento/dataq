@@ -652,6 +652,68 @@ fn profile_tool_projects_field_string_or_array_and_reports_missing_when_allowed(
 }
 
 #[test]
+fn profile_tool_schema_and_examples_include_brief_arguments() {
+    let output = run_mcp(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 303,
+            "method": "tools/list",
+            "params": {},
+        }),
+        None,
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    let profile_tool = response["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == json!("dataq.profile"))
+        .expect("profile tool");
+
+    let properties = &profile_tool["inputSchema"]["properties"];
+    assert_eq!(properties["brief"]["type"], Value::from("boolean"));
+    assert_eq!(properties["max_fields"]["minimum"], Value::from(0));
+    assert_eq!(
+        properties["sort_fields"]["enum"],
+        json!(["path", "unique_count", "null_ratio"])
+    );
+    assert!(
+        profile_tool["examples"]
+            .as_array()
+            .expect("examples")
+            .iter()
+            .any(|example| example["arguments"]["brief"] == json!(true))
+    );
+}
+
+#[test]
+fn profile_tool_brief_accepts_sort_and_max_fields() {
+    let request = tool_call_request(
+        304,
+        "dataq.profile",
+        json!({
+            "input": [{"a": 1, "b": 1}, {"a": 2, "b": 1}, {"a": 3, "b": null}],
+            "brief": true,
+            "sort_fields": "unique_count",
+            "max_fields": 1
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    let payload = &response["result"]["structuredContent"]["payload"];
+    assert_eq!(payload["truncated"], json!(true));
+    assert_eq!(payload["fields"][0]["path"], json!("$[\"a\"]"));
+    assert!(payload["fields"][0].get("type_distribution").is_none());
+    assert!(payload["fields"][0].get("numeric_stats").is_none());
+    assert_eq!(payload["fields"][0]["numeric"]["count"], json!(3));
+}
+
+#[test]
 fn profile_tool_missing_projected_field_is_input_usage_error_by_default() {
     let request = tool_call_request(
         302,

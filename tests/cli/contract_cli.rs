@@ -161,6 +161,7 @@ fn contract_profile_command_mentions_projection_fields() {
         json!([
             "record_count",
             "field_count",
+            "truncated",
             "returned_field_count",
             "fields",
             "missing_fields"
@@ -172,6 +173,13 @@ fn contract_profile_command_mentions_projection_fields() {
             .expect("notes")
             .iter()
             .any(|note| note.as_str().unwrap_or_default().contains("--field"))
+    );
+    assert!(
+        payload["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note.as_str().unwrap_or_default().contains("--brief"))
     );
 }
 
