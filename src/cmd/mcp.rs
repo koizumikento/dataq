@@ -16,7 +16,9 @@ use crate::domain::report::{
     ExternalToolUsage, PipelineInput, PipelineInputSource, PipelineReport,
 };
 use crate::domain::rules::AssertRules;
-use crate::engine::aggregate::AggregateMetric;
+use crate::engine::aggregate::{
+    AggregateMetric, AggregateOptions, AggregateOrder, AggregateSortBy,
+};
 use crate::engine::r#assert as assert_engine;
 use crate::engine::canon::{CanonOptions, canonicalize_values};
 use crate::engine::ingest as ingest_engine;
@@ -1551,6 +1553,28 @@ fn execute_aggregate(args: &Map<String, Value>) -> ToolExecution {
         Ok(None) => AggregateMetric::Count,
         Err(message) => return input_usage_error(message),
     };
+    let sort_by = match parse_optional_string(args, &["sort_by"], "sort_by") {
+        Ok(Some(value)) => match value.as_str() {
+            "group" => AggregateSortBy::Group,
+            "metric" => AggregateSortBy::Metric,
+            _ => return input_usage_error("`sort_by` must be one of `group`, `metric`"),
+        },
+        Ok(None) => AggregateSortBy::Group,
+        Err(message) => return input_usage_error(message),
+    };
+    let order = match parse_optional_string(args, &["order"], "order") {
+        Ok(Some(value)) => match value.as_str() {
+            "asc" => AggregateOrder::Asc,
+            "desc" => AggregateOrder::Desc,
+            _ => return input_usage_error("`order` must be one of `asc`, `desc`"),
+        },
+        Ok(None) => AggregateOrder::Asc,
+        Err(message) => return input_usage_error(message),
+    };
+    let limit = match parse_optional_usize(args, &["limit"], "limit") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
 
     let input_format = source_format(&input);
 
@@ -1559,6 +1583,11 @@ fn execute_aggregate(args: &Map<String, Value>) -> ToolExecution {
         group_by,
         metric,
         target,
+        options: AggregateOptions {
+            sort_by,
+            order,
+            limit,
+        },
     };
     let (response, trace) = aggregate::run_with_trace(&command_args);
 
@@ -2543,7 +2572,18 @@ fn tool_input_schema(tool_name: &str) -> Value {
                 "metric": {
                     "type": "string",
                     "enum": ["count", "sum", "avg"]
-                }
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["group", "metric"],
+                    "default": "group"
+                },
+                "order": {
+                    "type": "string",
+                    "enum": ["asc", "desc"],
+                    "default": "asc"
+                },
+                "limit": { "type": "integer", "minimum": 0 }
             },
             "required": ["group_by", "target"],
             "additionalProperties": false,
@@ -2854,15 +2894,35 @@ fn tool_examples(tool_name: &str) -> Vec<Value> {
                 "how": "inner"
             }
         })],
-        "dataq.aggregate" => vec![json!({
-            "name": "aggregate-count",
-            "arguments": {
-                "input": [{"team": "a", "price": 10}],
-                "group_by": "team",
-                "target": "price",
-                "metric": "count"
-            }
-        })],
+        "dataq.aggregate" => vec![
+            json!({
+                "name": "aggregate-count",
+                "arguments": {
+                    "input": [{"team": "a", "price": 10}],
+                    "group_by": "team",
+                    "target": "price",
+                    "metric": "count",
+                    "sort_by": "group",
+                    "order": "asc"
+                }
+            }),
+            json!({
+                "name": "aggregate-top-k",
+                "arguments": {
+                    "input": [
+                        {"team": "a", "price": 10},
+                        {"team": "a", "price": 5},
+                        {"team": "b", "price": 7}
+                    ],
+                    "group_by": "team",
+                    "target": "price",
+                    "metric": "sum",
+                    "sort_by": "metric",
+                    "order": "desc",
+                    "limit": 10
+                }
+            }),
+        ],
         "dataq.scan.text" => vec![json!({
             "name": "scan-pattern",
             "arguments": {
@@ -3297,6 +3357,7 @@ const MACHINE_PARAM_NAMES: &[&str] = &[
     "left",
     "left_from",
     "left_path",
+    "limit",
     "lock_path",
     "max_fields",
     "max_matches",
@@ -3307,6 +3368,7 @@ const MACHINE_PARAM_NAMES: &[&str] = &[
     "normalize",
     "normalize_time",
     "on",
+    "order",
     "out_path",
     "overlay_paths",
     "overlays",
@@ -3326,6 +3388,7 @@ const MACHINE_PARAM_NAMES: &[&str] = &[
     "schema",
     "schema_path",
     "since",
+    "sort_by",
     "sort_fields",
     "sort_keys",
     "source",

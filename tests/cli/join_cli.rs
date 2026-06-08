@@ -181,6 +181,135 @@ fn aggregate_command_count_sum_avg_are_deterministic() {
 }
 
 #[test]
+fn aggregate_command_sorts_by_metric_desc_and_limits_top_k() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"a","price":5.0},{"team":"b","price":7.0},{"team":"c","price":8.0},{"team":"c","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "sum",
+            "--target",
+            "price",
+            "--sort-by",
+            "metric",
+            "--order",
+            "desc",
+            "--limit",
+            "2",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let output_json: Value = serde_json::from_slice(&output).expect("parse output");
+    assert_eq!(
+        output_json,
+        json!([
+            {"sum": 15.0, "team": "a"},
+            {"sum": 15.0, "team": "c"}
+        ])
+    );
+}
+
+#[test]
+fn aggregate_command_group_desc_reverses_group_order() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"a","price":5.0},{"team":"b","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "count",
+            "--target",
+            "price",
+            "--sort-by",
+            "group",
+            "--order",
+            "desc",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let output_json: Value = serde_json::from_slice(&output).expect("parse output");
+    assert_eq!(
+        output_json,
+        json!([
+            {"count": 1, "team": "b"},
+            {"count": 2, "team": "a"}
+        ])
+    );
+}
+
+#[test]
+fn aggregate_command_limit_zero_returns_empty_array() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"b","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "count",
+            "--target",
+            "price",
+            "--limit",
+            "0",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let output_json: Value = serde_json::from_slice(&output).expect("parse output");
+    assert_eq!(output_json, json!([]));
+}
+
+#[test]
 fn aggregate_emit_pipeline_reports_stage_diagnostics_with_metrics() {
     let dir = tempdir().expect("tempdir");
     let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
@@ -264,6 +393,49 @@ fn aggregate_emit_pipeline_is_deterministic_for_identical_input() {
     let second = run_once();
     assert_eq!(first, second);
     assert_eq!(first["stage_diagnostics"][0]["duration_ms"], Value::from(0));
+}
+
+#[test]
+fn aggregate_emit_pipeline_args_hash_changes_for_sort_options() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":10.0},{"team":"a","price":5.0},{"team":"b","price":7.0}]"#,
+    )
+    .expect("write input");
+
+    let run_with_args = |extra_args: &[&str]| {
+        let mut args = vec![
+            "aggregate",
+            "--emit-pipeline",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "count",
+            "--target",
+            "price",
+        ];
+        args.extend_from_slice(extra_args);
+        let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+            .env("DATAQ_MLR_BIN", &mlr_bin)
+            .args(args)
+            .output()
+            .expect("run aggregate command");
+        assert_eq!(output.status.code(), Some(0));
+        parse_last_stderr_json(&output.stderr)
+    };
+
+    let default_report = run_with_args(&[]);
+    let sorted_report = run_with_args(&["--sort-by", "metric", "--order", "desc", "--limit", "1"]);
+    assert_ne!(
+        default_report["fingerprint"]["args_hash"],
+        sorted_report["fingerprint"]["args_hash"]
+    );
 }
 
 #[test]
@@ -465,11 +637,20 @@ if [ "$mode" = "join" ]; then
 fi
 
 if [ "$mode" = "stats1" ]; then
+  stdin_payload="$(cat)"
   if [ "$action" = "count" ]; then
+    if printf '%s' "$stdin_payload" | grep -q '"team":"c"'; then
+      printf '[{"team":"c","price_count":"2"},{"team":"a","price_count":"2"},{"team":"b","price_count":"1"}]'
+      exit 0
+    fi
     printf '[{"team":"a","price_count":"2"},{"team":"b","price_count":"1"}]'
     exit 0
   fi
   if [ "$action" = "sum" ]; then
+    if printf '%s' "$stdin_payload" | grep -q '"team":"c"'; then
+      printf '[{"team":"c","price_sum":"15.0"},{"team":"a","price_sum":"15.0"},{"team":"b","price_sum":"7.0"}]'
+      exit 0
+    fi
     printf '[{"team":"a","price_sum":"15.0"},{"team":"b","price_sum":"7.0"}]'
     exit 0
   fi
