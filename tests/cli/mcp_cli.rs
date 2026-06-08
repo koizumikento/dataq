@@ -164,6 +164,32 @@ fn tools_list_is_deterministic_and_in_fixed_order() {
             "missing contract command enum value {command}"
         );
     }
+
+    let aggregate_tool = first_json["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == json!("dataq.aggregate"))
+        .expect("aggregate tool");
+    assert_eq!(
+        aggregate_tool["inputSchema"]["properties"]["sort_by"]["enum"],
+        json!(["group", "metric"])
+    );
+    assert_eq!(
+        aggregate_tool["inputSchema"]["properties"]["order"]["enum"],
+        json!(["asc", "desc"])
+    );
+    assert_eq!(
+        aggregate_tool["inputSchema"]["properties"]["limit"]["minimum"],
+        Value::from(0)
+    );
+    assert!(
+        aggregate_tool["examples"]
+            .as_array()
+            .expect("aggregate examples")
+            .iter()
+            .any(|example| example["name"] == json!("aggregate-top-k"))
+    );
 }
 
 #[test]
@@ -432,6 +458,95 @@ fn tools_call_minimal_success_for_all_tools() {
             response["result"]["structuredContent"]["exit_code"],
             Value::from(0),
             "tool: {tool_name}",
+        );
+    }
+}
+
+#[test]
+fn aggregate_tool_sorts_by_metric_desc_and_limits_top_k() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        24,
+        "dataq.aggregate",
+        json!({
+            "input": [
+                {"team":"a","price":10.0},
+                {"team":"a","price":5.0},
+                {"team":"b","price":7.0},
+                {"team":"c","price":8.0},
+                {"team":"c","price":7.0}
+            ],
+            "group_by": "team",
+            "metric": "sum",
+            "target": "price",
+            "sort_by": "metric",
+            "order": "desc",
+            "limit": 2
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(false));
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"],
+        json!([
+            {"sum": 15.0, "team": "a"},
+            {"sum": 15.0, "team": "c"}
+        ])
+    );
+}
+
+#[test]
+fn aggregate_tool_rejects_invalid_sort_order_and_limit_values() {
+    let invalid_cases = [
+        (
+            json!({
+                "input": [{"team": "a", "value": 1}],
+                "group_by": "team",
+                "target": "value",
+                "sort_by": "score"
+            }),
+            "sort_by",
+        ),
+        (
+            json!({
+                "input": [{"team": "a", "value": 1}],
+                "group_by": "team",
+                "target": "value",
+                "order": "sideways"
+            }),
+            "order",
+        ),
+        (
+            json!({
+                "input": [{"team": "a", "value": 1}],
+                "group_by": "team",
+                "target": "value",
+                "limit": -1
+            }),
+            "limit",
+        ),
+    ];
+
+    for (index, (arguments, expected_message)) in invalid_cases.into_iter().enumerate() {
+        let request = tool_call_request(240 + index as i64, "dataq.aggregate", arguments);
+        let output = run_mcp(&request, None);
+        assert_eq!(output.status.code(), Some(0));
+
+        let response = parse_stdout_json(&output.stdout);
+        assert_eq!(response["result"]["isError"], Value::Bool(true));
+        assert_eq!(
+            response["result"]["structuredContent"]["exit_code"],
+            Value::from(3)
+        );
+        assert!(
+            response["result"]["structuredContent"]["payload"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(expected_message)
         );
     }
 }
@@ -1666,11 +1781,20 @@ if [ "$mode" = "join" ]; then
 fi
 
 if [ "$mode" = "stats1" ]; then
+  stdin_payload="$(cat)"
   if [ "$action" = "count" ]; then
+    if printf '%s' "$stdin_payload" | grep -q '"team":"c"'; then
+      printf '[{"team":"c","price_count":"2"},{"team":"a","price_count":"2"},{"team":"b","price_count":"1"}]'
+      exit 0
+    fi
     printf '[{"team":"a","price_count":"2"},{"team":"b","price_count":"1"}]'
     exit 0
   fi
   if [ "$action" = "sum" ]; then
+    if printf '%s' "$stdin_payload" | grep -q '"team":"c"'; then
+      printf '[{"team":"c","price_sum":"15.0"},{"team":"a","price_sum":"15.0"},{"team":"b","price_sum":"7.0"}]'
+      exit 0
+    fi
     printf '[{"team":"a","price_sum":"15.0"},{"team":"b","price_sum":"7.0"}]'
     exit 0
   fi

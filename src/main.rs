@@ -15,7 +15,9 @@ use dataq::domain::ingest::IngestYamlJobsMode;
 use dataq::domain::report::{
     PipelineFingerprint, PipelineInput, PipelineInputSource, PipelineReport,
 };
-use dataq::engine::aggregate::AggregateMetric;
+use dataq::engine::aggregate::{
+    AggregateMetric, AggregateOptions, AggregateOrder, AggregateSortBy,
+};
 use dataq::engine::canon::canonicalize_value;
 use dataq::engine::ingest as ingest_engine;
 use dataq::engine::join::JoinHow;
@@ -435,6 +437,15 @@ struct AggregateArgs {
 
     #[arg(long)]
     target: String,
+
+    #[arg(long, value_enum, default_value = "group")]
+    sort_by: CliAggregateSortBy,
+
+    #[arg(long, value_enum, default_value = "asc")]
+    order: CliAggregateOrder,
+
+    #[arg(long)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -685,6 +696,18 @@ enum CliAggregateMetric {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliAggregateSortBy {
+    Group,
+    Metric,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliAggregateOrder {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliTransformRowsetEngine {
     Sqlite,
 }
@@ -852,6 +875,24 @@ impl From<CliAggregateMetric> for AggregateMetric {
             CliAggregateMetric::Count => Self::Count,
             CliAggregateMetric::Sum => Self::Sum,
             CliAggregateMetric::Avg => Self::Avg,
+        }
+    }
+}
+
+impl From<CliAggregateSortBy> for AggregateSortBy {
+    fn from(value: CliAggregateSortBy) -> Self {
+        match value {
+            CliAggregateSortBy::Group => Self::Group,
+            CliAggregateSortBy::Metric => Self::Metric,
+        }
+    }
+}
+
+impl From<CliAggregateOrder> for AggregateOrder {
+    fn from(value: CliAggregateOrder) -> Self {
+        match value {
+            CliAggregateOrder::Asc => Self::Asc,
+            CliAggregateOrder::Desc => Self::Desc,
         }
     }
 }
@@ -2221,6 +2262,11 @@ fn run_aggregate(args: AggregateArgs, emit_pipeline: bool) -> i32 {
         group_by: args.group_by.clone(),
         metric: args.metric.into(),
         target: args.target.clone(),
+        options: AggregateOptions {
+            sort_by: args.sort_by.into(),
+            order: args.order.into(),
+            limit: args.limit,
+        },
     };
     let (response, trace) = aggregate::run_with_trace(&command_args);
 
@@ -5218,6 +5264,9 @@ mod tests {
             group_by: "team".to_string(),
             metric: CliAggregateMetric::Count,
             target: "value".to_string(),
+            sort_by: CliAggregateSortBy::Group,
+            order: CliAggregateOrder::Asc,
+            limit: None,
         };
         let aggregate_trace = aggregate::AggregatePipelineTrace::default();
         let aggregate_report =
@@ -5512,6 +5561,9 @@ mod tests {
                     group_by: "team".to_string(),
                     metric: CliAggregateMetric::Count,
                     target: "value".to_string(),
+                    sort_by: CliAggregateSortBy::Group,
+                    order: CliAggregateOrder::Asc,
+                    limit: None,
                 },
                 true,
             ),

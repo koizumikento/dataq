@@ -26,7 +26,7 @@ dataq [--emit-pipeline] <command> [options]
 - `profile`: フィールド統計を決定的JSONで出力
 - `ingest doc`: ドキュメント（md/html/docx/rst/latex）を共通JSONへ抽出
 - `join`: 2入力をキー結合してJSON配列を出力
-- `aggregate`: グループ集計をJSON配列で出力
+- `aggregate`: グループ集計をJSON配列で出力（metric sort / limit で top-k 対応）
 - `scan text`: 正規表現でテキストを走査して構造化マッチを出力
 - `transform rowset`: 固定2段 (`jq -> mlr`) でrowset変換してJSON配列を出力
 - `transform sql`: `duckdb` でSQL変換してJSON配列を出力
@@ -157,6 +157,9 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.ingest.book`
   - `dataq.join`
   - `dataq.aggregate`
+    - `sort_by`: `group` / `metric`。CLI の `--sort-by` と同じ出力行 sort キー
+    - `order`: `asc` / `desc`。CLI の `--order` と同じ sort 方向
+    - `limit`: integer >= 0。CLI の `--limit` と同じ sort 後の件数上限
   - `dataq.scan.text`
   - `dataq.transform.rowset`
   - `dataq.transform.sql`
@@ -223,6 +226,7 @@ dataq [--emit-pipeline] <command> [options]
 
 - コマンド:
   - `dataq aggregate --input <path> --group-by <field> --metric <count|sum|avg> --target <field>`
+  - `dataq aggregate --input <path> --group-by <field> --metric sum --target <field> --sort-by metric --order desc --limit 10`
 - 出力: JSON 配列（stdout）
 - 出力フィールド:
   - `--metric count` のとき集計列は `count`
@@ -232,6 +236,12 @@ dataq [--emit-pipeline] <command> [options]
   - 各レコードは object
   - `group-by` と `target` は全レコードで必須
   - `sum` / `avg` は `target` が数値であることが必須
+- sort/limit:
+  - `--sort-by <group|metric>` の既定値は `group`
+  - `--order <asc|desc>` の既定値は `asc`
+  - `--limit <n>` は任意で、`0` は `[]`
+  - `--sort-by metric --order desc --limit 10` は集計metric上位10件を返す
+  - metric sort の同点は group キー literal 昇順、さらに同点なら canonical row literal 昇順で決定する
 - 異常時契約:
   - 入力不正または集計実行失敗は exit `3`
 - 実行方式:

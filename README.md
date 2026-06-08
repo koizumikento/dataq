@@ -100,7 +100,7 @@ dataq [--emit-pipeline] <command> [options]
 | `profile` | フィールド統計を決定的JSONで出力 | `--from <format>`（`format`: `json` / `yaml` / `csv` / `jsonl`）, `--field <name-or-path>`（複数可）, `--allow-missing-fields`, `--brief`, `--max-fields <n>`, `--sort-fields <path\|unique_count\|null_ratio>` |
 | `ingest doc` | ドキュメントを共通JSONスキーマへ抽出 | `--input <path-or-stdin>` `--from <format>`（`format`: `md` / `html` / `docx` / `rst` / `latex`） |
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <how>`（`how`: `inner` / `left`） |
-| `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <metric>`（`metric`: `count` / `sum` / `avg`） `--target <field>` |
+| `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <metric>`（`metric`: `count` / `sum` / `avg`） `--target <field>`（任意: `--sort-by <group\|metric>` `--order <asc\|desc>` `--limit <n>`） |
 | `scan text` | テキストを正規表現で走査し構造化結果を出力 | `--pattern <regex>` |
 | `transform rowset` | `jq -> mlr` の2段でrowsetを変換しJSON配列を出力 | `--input <path-or-stdin>` `--engine <sqlite>` `--jq-filter <filter>` `--mlr <verb...>` |
 | `transform sql` | `duckdb` でSQL変換し、DuckDB返却順のJSON配列を出力 | `--input <path-or-stdin>` `--query <sql>` `--engine <duckdb>` |
@@ -168,6 +168,10 @@ dataq join --left users.json --right scores.json --on id --how inner
 
 # グループ集計（team単位でprice平均）
 dataq aggregate --input orders.json --group-by team --metric avg --target price
+
+# 集計metric上位10件（同点はgroupキー昇順）
+dataq aggregate --input orders.json --group-by team --metric sum --target price \
+  --sort-by metric --order desc --limit 10
 
 # テキスト走査（policy mode ではヒット時に終了コード2）
 dataq scan text --pattern 'TODO|FIXME' --path . --glob '*.rs' --policy-mode
@@ -570,9 +574,13 @@ mdBook ルートを解析し、`SUMMARY.md` と book メタデータを決定的
 - `--group-by <field>`: グループキー
 - `--metric <count|sum|avg>`: 集計メトリクス
 - `--target <field>`: 集計対象キー
+- `--sort-by <group|metric>`: 出力行の並び順キー（既定: `group`）
+- `--order <asc|desc>`: 並び順（既定: `asc`）
+- `--limit <n>`: sort後に返す件数（任意、`0` は `[]`）
 - `sum` / `avg` は `--target` が数値であることを要求
 - 入力レコードは object であること、および `group-by`/`target` キーが全レコードに存在することが必須
 - 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
+- `--sort-by metric --order desc --limit 10` で集計metric上位10件を1コマンドで返す。同点は group キー literal 昇順で決定する
 - 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 
 ### `ingest tabular`
@@ -814,6 +822,9 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.ingest.book`
   - `dataq.join`
   - `dataq.aggregate`
+    - `sort_by`: `group` / `metric`。CLI の `--sort-by` と同じ出力行 sort キー
+    - `order`: `asc` / `desc`。CLI の `--order` と同じ sort 方向
+    - `limit`: integer >= 0。CLI の `--limit` と同じ sort 後の件数上限
   - `dataq.scan.text`
   - `dataq.transform.rowset`
   - `dataq.transform.sql`

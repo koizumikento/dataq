@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::cmd::stage_trace;
 use crate::domain::report::PipelineStageDiagnostic;
-use crate::engine::aggregate::{self, AggregateError, AggregateMetric};
+use crate::engine::aggregate::{self, AggregateError, AggregateMetric, AggregateOptions};
 use crate::io;
 
 /// Input arguments for aggregate command execution API.
@@ -17,6 +17,7 @@ pub struct AggregateCommandArgs {
     pub group_by: String,
     pub metric: AggregateMetric,
     pub target: String,
+    pub options: AggregateOptions,
 }
 
 /// Input source descriptor for aggregate command execution.
@@ -75,7 +76,15 @@ pub fn run_with_trace(
         "aggregate_mlr_execute",
         "mlr",
         &[values.as_slice()],
-        || aggregate::aggregate_values(&values, &args.group_by, args.metric, &args.target),
+        || {
+            aggregate::aggregate_values(
+                &values,
+                &args.group_by,
+                args.metric,
+                &args.target,
+                args.options,
+            )
+        },
     );
     match aggregate_result {
         Ok(rows) => {
