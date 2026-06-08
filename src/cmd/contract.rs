@@ -2,19 +2,24 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// Supported command names in deterministic order.
-pub const ORDERED_COMMANDS: [ContractCommand; 19] = [
+pub const ORDERED_COMMANDS: [ContractCommand; 26] = [
     ContractCommand::Canon,
     ContractCommand::IngestApi,
     ContractCommand::Ingest,
+    ContractCommand::IngestJc,
+    ContractCommand::IngestTabular,
     ContractCommand::Assert,
     ContractCommand::GateSchema,
     ContractCommand::Gate,
+    ContractCommand::SchemaInfer,
     ContractCommand::Sdiff,
     ContractCommand::DiffSource,
     ContractCommand::Profile,
     ContractCommand::IngestDoc,
     ContractCommand::IngestNotes,
     ContractCommand::IngestBook,
+    ContractCommand::Join,
+    ContractCommand::Aggregate,
     ContractCommand::Scan,
     ContractCommand::TransformRowset,
     ContractCommand::TransformSql,
@@ -22,6 +27,8 @@ pub const ORDERED_COMMANDS: [ContractCommand; 19] = [
     ContractCommand::Doctor,
     ContractCommand::RecipeRun,
     ContractCommand::RecipeLock,
+    ContractCommand::RecipeReplay,
+    ContractCommand::EmitPlan,
 ];
 
 /// Subcommand identifier accepted by `dataq contract --command`.
@@ -30,15 +37,20 @@ pub enum ContractCommand {
     Canon,
     IngestApi,
     Ingest,
+    IngestJc,
+    IngestTabular,
     Assert,
     GateSchema,
     Gate,
+    SchemaInfer,
     Sdiff,
     DiffSource,
     Profile,
     IngestDoc,
     IngestNotes,
     IngestBook,
+    Join,
+    Aggregate,
     Scan,
     TransformRowset,
     TransformSql,
@@ -46,6 +58,8 @@ pub enum ContractCommand {
     Doctor,
     RecipeRun,
     RecipeLock,
+    RecipeReplay,
+    EmitPlan,
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -78,6 +92,7 @@ struct ExitCodeContract<'a> {
 
 const NO_FIXED_ROOT_FIELDS: &[&str] = &[];
 const INGEST_API_FIELDS: &[&str] = &["source", "status", "headers", "body", "fetched_at"];
+const INGEST_JC_FIELDS: &[&str] = &["source", "parser", "result_type", "record_count", "records"];
 const ASSERT_FIELDS: &[&str] = &["matched", "mismatch_count", "mismatches"];
 const GATE_FIELDS: &[&str] = &["matched", "violations", "details"];
 const SDIFF_FIELDS: &[&str] = &["counts", "keys", "ignored_paths", "values"];
@@ -105,6 +120,8 @@ const RECIPE_LOCK_FIELDS: &[&str] = &[
     "tool_versions",
     "dataq_version",
 ];
+const RECIPE_REPLAY_FIELDS: &[&str] = &["matched", "exit_code", "lock_check", "steps"];
+const EMIT_PLAN_FIELDS: &[&str] = &["command", "args", "stages", "tools"];
 
 const CANON_NOTES: &[&str] = &[
     "Output is the canonicalized root JSON value.",
@@ -118,6 +135,16 @@ const INGEST_YAML_JOBS_NOTES: &[&str] = &[
     "Output is a JSON array of normalized job records.",
     "Mode-specific row schemas: github-actions, gitlab-ci, generic-map.",
 ];
+const INGEST_JC_NOTES: &[&str] = &[
+    "Output is a deterministic envelope around `jc` parser output.",
+    "`records` is always an array; non-array `jc` output is wrapped as one record.",
+    "Record object keys are sorted recursively.",
+];
+const INGEST_TABULAR_NOTES: &[&str] = &[
+    "Output is a JSON array of tabular rows.",
+    "Row fields are input-dependent and therefore not fixed.",
+    "`csvkit` stages convert input to CSV then JSON with inference disabled.",
+];
 const ASSERT_NOTES: &[&str] = &[
     "Validation mismatch details are emitted in `mismatches`.",
     "`--rules-help` and `--schema-help` have dedicated schema IDs.",
@@ -130,6 +157,10 @@ const GATE_SCHEMA_NOTES: &[&str] = &[
 const GATE_NOTES: &[&str] = &[
     "Policy violation details are emitted in `details`.",
     "`details` are sorted by `path` then `rule_id` for deterministic output.",
+];
+const SCHEMA_INFER_NOTES: &[&str] = &[
+    "Output is the JSON Schema value emitted by `qsv schema`.",
+    "Top-level schema keys are qsv output-dependent and therefore not fixed.",
 ];
 const SDIFF_NOTES: &[&str] = &[
     "`values.total` is the full diff count before truncation.",
@@ -191,6 +222,16 @@ const RECIPE_LOCK_NOTES: &[&str] = &[
     "`tool_versions` keys are deterministically sorted by tool name (`jq`, `mlr`, `yq`).",
     "Lock output is canonicalized before write/emit.",
 ];
+const RECIPE_REPLAY_NOTES: &[&str] = &[
+    "`lock_check` reports strict mode, match status, mismatch count, and mismatch details.",
+    "When `strict=true`, lock mismatches map to exit code 2 before step execution.",
+    "`steps` preserves recipe definition order when execution runs.",
+];
+const EMIT_PLAN_NOTES: &[&str] = &[
+    "`stages` preserves deterministic stage order with explicit dependencies.",
+    "`tools` reports expected external-tool usage in fixed tool order.",
+    "The plan is resolved statically and does not execute the target command.",
+];
 
 pub fn run_for_command(command: ContractCommand) -> ContractCommandResponse {
     let payload = command_contract(command);
@@ -247,6 +288,26 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             ),
             notes: INGEST_YAML_JOBS_NOTES,
         },
+        ContractCommand::IngestJc => CommandContract {
+            command: "ingest-jc",
+            schema: "dataq.ingest.jc.output.v1",
+            output_fields: INGEST_JC_FIELDS,
+            exit_codes: exit_codes_with_code_three(
+                "validation mismatch is not used by this command",
+                "input/usage error or missing `jc`",
+            ),
+            notes: INGEST_JC_NOTES,
+        },
+        ContractCommand::IngestTabular => CommandContract {
+            command: "ingest-tabular",
+            schema: "dataq.ingest.tabular.output.v1",
+            output_fields: NO_FIXED_ROOT_FIELDS,
+            exit_codes: exit_codes_with_code_three(
+                "validation mismatch is not used by this command",
+                "input/usage error or missing `csvkit`",
+            ),
+            notes: INGEST_TABULAR_NOTES,
+        },
         ContractCommand::Assert => CommandContract {
             command: "assert",
             schema: "dataq.assert.output.v1",
@@ -268,6 +329,16 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             exit_codes: exit_codes("policy violations detected"),
             notes: GATE_NOTES,
         },
+        ContractCommand::SchemaInfer => CommandContract {
+            command: "schema-infer",
+            schema: "dataq.schema.infer.output.v1",
+            output_fields: NO_FIXED_ROOT_FIELDS,
+            exit_codes: exit_codes_with_code_three(
+                "validation mismatch is not used by this command",
+                "input/usage error or missing `qsv`",
+            ),
+            notes: SCHEMA_INFER_NOTES,
+        },
         ContractCommand::Sdiff => CommandContract {
             command: "sdiff",
             schema: "dataq.sdiff.output.v1",
@@ -288,6 +359,34 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: PROFILE_FIELDS,
             exit_codes: exit_codes("validation mismatch is not used by this command"),
             notes: PROFILE_NOTES,
+        },
+        ContractCommand::Join => CommandContract {
+            command: "join",
+            schema: "dataq.join.output.v1",
+            output_fields: NO_FIXED_ROOT_FIELDS,
+            exit_codes: exit_codes_with_code_three(
+                "validation mismatch is not used by this command",
+                "input/usage error or missing `mlr`",
+            ),
+            notes: &[
+                "Output is a JSON array of joined rows.",
+                "Row fields are input-dependent and therefore not fixed.",
+                "`mlr` performs the join stage with explicit argument-array invocation.",
+            ],
+        },
+        ContractCommand::Aggregate => CommandContract {
+            command: "aggregate",
+            schema: "dataq.aggregate.output.v1",
+            output_fields: NO_FIXED_ROOT_FIELDS,
+            exit_codes: exit_codes_with_code_three(
+                "validation mismatch is not used by this command",
+                "input/usage error or missing `mlr`",
+            ),
+            notes: &[
+                "Output is a JSON array of grouped aggregate rows.",
+                "Row fields depend on `--group-by`, `--metric`, and `--target`.",
+                "`mlr` performs the aggregate stage with explicit argument-array invocation.",
+            ],
         },
         ContractCommand::IngestDoc => CommandContract {
             command: "ingest.doc",
@@ -370,6 +469,20 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
             output_fields: RECIPE_LOCK_FIELDS,
             exit_codes: exit_codes("validation mismatch is not used by this command"),
             notes: RECIPE_LOCK_NOTES,
+        },
+        ContractCommand::RecipeReplay => CommandContract {
+            command: "recipe-replay",
+            schema: "dataq.recipe.replay.output.v1",
+            output_fields: RECIPE_REPLAY_FIELDS,
+            exit_codes: exit_codes("strict lock mismatch or step-level validation mismatch"),
+            notes: RECIPE_REPLAY_NOTES,
+        },
+        ContractCommand::EmitPlan => CommandContract {
+            command: "emit-plan",
+            schema: "dataq.emit.plan.output.v1",
+            output_fields: EMIT_PLAN_FIELDS,
+            exit_codes: exit_codes("validation mismatch is not used by this command"),
+            notes: EMIT_PLAN_NOTES,
         },
     }
 }

@@ -744,9 +744,12 @@ enum CliContractCommand {
     Canon,
     IngestApi,
     Ingest,
+    IngestJc,
+    IngestTabular,
     Assert,
     GateSchema,
     Gate,
+    SchemaInfer,
     Sdiff,
     DiffSource,
     Profile,
@@ -754,6 +757,8 @@ enum CliContractCommand {
     #[value(name = "ingest-notes")]
     IngestNotes,
     IngestBook,
+    Join,
+    Aggregate,
     Scan,
     #[value(name = "transform-rowset")]
     TransformRowset,
@@ -764,6 +769,8 @@ enum CliContractCommand {
     #[value(name = "recipe-run", alias = "recipe")]
     RecipeRun,
     RecipeLock,
+    RecipeReplay,
+    EmitPlan,
 }
 
 impl From<CliInputFormat> for Format {
@@ -860,15 +867,20 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::Canon => Self::Canon,
             CliContractCommand::IngestApi => Self::IngestApi,
             CliContractCommand::Ingest => Self::Ingest,
+            CliContractCommand::IngestJc => Self::IngestJc,
+            CliContractCommand::IngestTabular => Self::IngestTabular,
             CliContractCommand::Assert => Self::Assert,
             CliContractCommand::GateSchema => Self::GateSchema,
             CliContractCommand::Gate => Self::Gate,
+            CliContractCommand::SchemaInfer => Self::SchemaInfer,
             CliContractCommand::Sdiff => Self::Sdiff,
             CliContractCommand::DiffSource => Self::DiffSource,
             CliContractCommand::Profile => Self::Profile,
             CliContractCommand::IngestDoc => Self::IngestDoc,
             CliContractCommand::IngestNotes => Self::IngestNotes,
             CliContractCommand::IngestBook => Self::IngestBook,
+            CliContractCommand::Join => Self::Join,
+            CliContractCommand::Aggregate => Self::Aggregate,
             CliContractCommand::Scan => Self::Scan,
             CliContractCommand::TransformRowset => Self::TransformRowset,
             CliContractCommand::TransformSql => Self::TransformSql,
@@ -876,6 +888,8 @@ impl From<CliContractCommand> for contract::ContractCommand {
             CliContractCommand::Doctor => Self::Doctor,
             CliContractCommand::RecipeRun => Self::RecipeRun,
             CliContractCommand::RecipeLock => Self::RecipeLock,
+            CliContractCommand::RecipeReplay => Self::RecipeReplay,
+            CliContractCommand::EmitPlan => Self::EmitPlan,
         }
     }
 }

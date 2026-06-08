@@ -737,12 +737,12 @@ lock ファイルを検証したうえで `recipe run` と同じレシピ実行�
 
 サブコマンドの出力契約を機械可読JSONで取得します（read-only）。
 
-- `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|ingest-notes|ingest-book|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock>`
+- `dataq contract --command <canon|ingest-api|ingest|ingest-jc|ingest-tabular|assert|gate-schema|gate|schema-infer|sdiff|diff-source|profile|ingest-doc|ingest-notes|ingest-book|join|aggregate|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock|recipe-replay|emit-plan>`
   - 単一コマンドの契約を1オブジェクトで返す
   - `recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `dataq contract --all`
   - 全コマンド契約を固定順配列で返す
-- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `ingest.notes`, `ingest-book`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+- 順序: `canon`, `ingest-api`, `ingest yaml-jobs`, `ingest-jc`, `ingest-tabular`, `assert`, `gate-schema`, `gate`, `schema-infer`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `ingest.notes`, `ingest-book`, `join`, `aggregate`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`, `recipe-replay`, `emit-plan`
 - 各契約オブジェクトのキー:
   - `command`, `schema`, `output_fields`, `exit_codes`, `notes`
   - `assert` の `notes` には `--schema` 経路の既定エンジン（`jsonschema`）と任意エンジン（`ajv`/`checkjs`）を含む
