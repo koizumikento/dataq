@@ -356,7 +356,8 @@ pub fn sql_deterministic_guards() -> Vec<String> {
     vec![
         "duckdb_execution_via_adapter_hooks".to_string(),
         "no_shell_interpolation_for_user_input".to_string(),
-        "deterministic_row_sort_after_duckdb".to_string(),
+        "duckdb_row_order_preserved".to_string(),
+        "row_object_keys_sorted_recursively".to_string(),
         "canonical_float_formatting_for_output".to_string(),
     ]
 }
@@ -391,8 +392,8 @@ mod tests {
         assert_eq!(
             response.payload,
             json!([
-                {"avg": 7.0, "team": "a"},
-                {"avg": 7.5, "team": "z"}
+                {"avg": 7.5, "team": "z"},
+                {"avg": 7.0, "team": "a"}
             ])
         );
         assert_eq!(trace.used_tools, vec!["duckdb".to_string()]);

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 
 #[test]
-fn transform_sql_duckdb_flow_is_deterministic() {
+fn transform_sql_duckdb_flow_preserves_order_and_normalizes_rows() {
     let dir = tempdir().expect("tempdir");
     let duckdb_bin = write_fake_duckdb_script(dir.path().join("fake-duckdb"));
 
@@ -56,9 +56,13 @@ fn transform_sql_duckdb_flow_is_deterministic() {
     assert_eq!(
         actual,
         json!([
-            {"team": "b", "avg_price": "7.000000"},
-            {"team": "a", "avg_price": "7.500000"}
+            {"avg_price": 7.5, "team": "a"},
+            {"avg_price": 7.0, "team": "b"}
         ])
+    );
+    assert_eq!(
+        String::from_utf8(first).expect("stdout utf8"),
+        "[{\"avg_price\":7.5,\"team\":\"a\"},{\"avg_price\":7.0,\"team\":\"b\"}]\n"
     );
 }
 
@@ -77,7 +81,7 @@ else
   cat >/dev/null
 fi
 
-printf '[{"team":"a","avg_price":"7.500000"},{"team":"b","avg_price":"7.000000"}]'
+printf '[{"team":"a","avg_price":7.500000},{"team":"b","avg_price":7.000000}]'
 "#;
 
     fs::write(&path, script).expect("write duckdb script");

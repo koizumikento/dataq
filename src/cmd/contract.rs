@@ -166,6 +166,8 @@ const TRANSFORM_ROWSET_NOTES: &[&str] = &[
 ];
 const TRANSFORM_SQL_NOTES: &[&str] = &[
     "Output is always a JSON array.",
+    "DuckDB result row order is preserved; use `ORDER BY` in SQL when deterministic ordering is required.",
+    "Object keys inside each output row are sorted recursively and float values are normalized.",
     "`duckdb` executes the SQL stage with explicit argument-array invocation.",
 ];
 const MERGE_NOTES: &[&str] = &[

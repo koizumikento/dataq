@@ -103,7 +103,7 @@ dataq [--emit-pipeline] <command> [options]
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <metric>`（`metric`: `count` / `sum` / `avg`） `--target <field>` |
 | `scan text` | テキストを正規表現で走査し構造化結果を出力 | `--pattern <regex>` |
 | `transform rowset` | `jq -> mlr` の2段でrowsetを変換しJSON配列を出力 | `--input <path-or-stdin>` `--engine <sqlite>` `--jq-filter <filter>` `--mlr <verb...>` |
-| `transform sql` | `duckdb` でSQL変換しJSON配列を出力 | `--input <path-or-stdin>` `--query <sql>` `--engine <duckdb>` |
+| `transform sql` | `duckdb` でSQL変換し、DuckDB返却順のJSON配列を出力 | `--input <path-or-stdin>` `--query <sql>` `--engine <duckdb>` |
 | `merge` | base + overlays をポリシーマージ | `--base <path>` `--overlay <path>...` `--policy <policy>`（`policy`: `last-wins` / `deep-merge` / `array-replace`） `--policy-path <path=policy>...` |
 | `doctor` | 依存診断（`--capabilities`/`--profile` 対応） | なし |
 | `recipe run` | 宣言的レシピを定義順で実行 | `--file <path>` |
@@ -622,7 +622,8 @@ mdBook ルートを解析し、`SUMMARY.md` と book メタデータを決定的
 - `--input <path|->`: 入力（`-` は stdin）
 - `--query <sql>`: 実行する SQL（決定性が必要な場合は `ORDER BY` を明示）
 - `--engine <duckdb>`: SQL 実行エンジン（現状は `duckdb` 固定）
-- 出力は JSON 配列固定
+- 出力は JSON 配列固定。DuckDB が返した行順を保持し、各行のオブジェクトキーは再帰的に canonical 順へ揃える
+- 数値の float 表現は JSON 出力時に正規化する
 - `duckdb` 不在・`--query` 不正・SQL実行失敗・入力不正は終了コード `3`
 - 終了コード:
   - `0`: SQL 実行成功

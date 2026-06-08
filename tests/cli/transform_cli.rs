@@ -294,7 +294,7 @@ fn transform_rowset_malformed_commands_return_exit_three() {
 }
 
 #[test]
-fn transform_sql_duckdb_is_machine_readable_and_deterministic() {
+fn transform_sql_duckdb_preserves_returned_order_and_canonicalizes_rows() {
     let dir = tempdir().expect("tempdir");
     let duckdb_bin = write_fake_duckdb_script(dir.path().join("fake-duckdb"));
 
@@ -327,9 +327,13 @@ fn transform_sql_duckdb_is_machine_readable_and_deterministic() {
     assert_eq!(
         parsed,
         json!([
-            {"avg": 7.0, "team": "a"},
-            {"avg": 7.5, "team": "z"}
+            {"avg": 7.5, "team": "z"},
+            {"avg": 7.0, "team": "a"}
         ])
+    );
+    assert_eq!(
+        String::from_utf8(output).expect("stdout utf8"),
+        "[{\"avg\":7.5,\"team\":\"z\"},{\"avg\":7.0,\"team\":\"a\"}]\n"
     );
 }
 

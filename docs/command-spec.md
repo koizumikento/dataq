@@ -274,7 +274,8 @@ dataq [--emit-pipeline] <command> [options]
 - 出力: JSON 配列（stdout）
 - 実行方式:
   - 入力 rowset を DuckDB へロードし、`--query` を実行
-  - 決定的な行順が必要なクエリは `ORDER BY` を明示
+  - DuckDB が返した行順を保持するため、決定的な行順が必要なクエリは `ORDER BY` を明示
+  - 各出力行のオブジェクトキーは再帰的に canonical 順へ揃え、float 表現は JSON 出力時に正規化
   - `duckdb` は明示的引数配列で実行（シェル展開なし）
 - 例:
   - `dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, AVG(price) AS avg_price FROM input GROUP BY team ORDER BY team'`
