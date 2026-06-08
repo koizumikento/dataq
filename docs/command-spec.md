@@ -208,6 +208,27 @@ dataq [--emit-pipeline] <command> [options]
   - JSON-RPCレスポンスを書き出せた場合は tool `exit_code` に関係なく `0`
   - レスポンス出力不能な致命的I/O時のみ `3`
 
+## LLM / agent quickstart
+
+エージェント導線では、先に環境・契約・計画・短い profile を確認してから本処理へ進む。
+
+```bash
+dataq doctor --profile core
+dataq contract --command profile
+dataq emit plan --command aggregate --args '["--input","orders.json","--group-by","team","--metric","sum","--target","price","--sort-by","metric","--order","desc","--limit","10"]'
+dataq profile --from json --input orders.json --brief --sort-fields unique_count --max-fields 20
+dataq aggregate --input orders.json --group-by team --metric sum --target price --sort-by metric --order desc --limit 10
+dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, SUM(price) AS revenue FROM input GROUP BY team ORDER BY revenue DESC LIMIT 10'
+```
+
+- `doctor`: 依存ツールの事前確認
+- `contract`: stdout JSON と exit code 契約の確認
+- `emit plan`: 実データを読まない stage / tool 計画の確認
+- `profile --brief`: LLM 向けの省コンテキストな入力概観
+- `aggregate`: group metric / top-k の決定的集計
+- `transform sql`: SQL と `ORDER BY` で再利用可能な確認処理を固定
+- `--emit-pipeline`: 実行時診断と fingerprint を stderr に保存
+
 ## `join` コマンド契約（MVP）
 
 - コマンド:
