@@ -121,6 +121,46 @@ dataq [--emit-pipeline] <command> [options]
 - `-h, --help`: ヘルプ
 - `-V, --version`: バージョン
 
+## LLM / agent quickstart
+
+LLM やエージェントに `dataq` を使わせるときは、長い README 全体を読むより、最初に環境・契約・データ形状を短く確認すると失敗を切り分けやすくなります。探索中の一時的な加工は `jq` / `yq` / `mlr` で構いませんが、再利用するパイプラインは `dataq` の固定コマンドと出力契約に寄せます。
+
+```bash
+# 1. 依存確認。core は jq/yq/mlr を中心に確認する
+dataq doctor --profile core
+
+# 2. エージェントに渡す前に出力契約と終了コードを確認する
+dataq contract --command profile
+
+# 3. 実データを読まずに静的な stage / tool 計画を確認する
+dataq emit plan --command aggregate \
+  --args '["--input","orders.json","--group-by","team","--metric","sum","--target","price","--sort-by","metric","--order","desc","--limit","10"]'
+
+# 4. LLM のコンテキストを圧迫しない形で入力の列・型・ユニーク数を把握する
+dataq profile --from json --input orders.json --brief \
+  --sort-fields unique_count --max-fields 20
+
+# 5. group count / sum の top-k は aggregate で決定的に返す
+dataq aggregate --input orders.json --group-by team --metric sum --target price \
+  --sort-by metric --order desc --limit 10
+
+# 6. 投影や複雑な確認集計は SQL で再利用可能にし、順序が必要なら ORDER BY を書く
+dataq transform sql --input orders.json --engine duckdb \
+  --query 'SELECT team, SUM(price) AS revenue FROM input GROUP BY team ORDER BY revenue DESC LIMIT 10'
+
+# 7. 実行時診断は stdout の結果とは分けて stderr に残す
+dataq --emit-pipeline aggregate --input orders.json --group-by team --metric sum --target price \
+  --sort-by metric --order desc --limit 10 > top-teams.json 2> pipeline.json
+```
+
+- `doctor`: エージェント実行前の依存ツール確認
+- `contract`: stdout JSON の主要フィールドと exit code 契約の確認
+- `emit plan`: 実データを読まない stage / dependency / tool の事前確認
+- `profile --brief`: LLM 向けの省コンテキストなデータ概観
+- `aggregate`: group metric と top-k の決定的な集計
+- `transform sql`: 投影、結合前確認、複雑な集計を SQL として固定
+- `--emit-pipeline`: 実行時の stage 診断、fingerprint、外部ツール使用状況の保存
+
 ## 基本的な使い方
 
 ```bash
