@@ -101,7 +101,7 @@ where
 
     let rows = execute_duckdb(values, sql)
         .map_err(|source| TransformSqlError::Duckdb(source.to_string()))?;
-    Ok(normalize_output_rows(rows))
+    Ok(normalize_sql_output_rows(rows))
 }
 
 fn normalize_output_rows(rows: Vec<Value>) -> Vec<Value> {
@@ -110,6 +110,13 @@ fn normalize_output_rows(rows: Vec<Value>) -> Vec<Value> {
         .map(canonicalize_float_values)
         .collect::<Vec<Value>>();
     deterministic_rows(rows)
+}
+
+fn normalize_sql_output_rows(rows: Vec<Value>) -> Vec<Value> {
+    rows.into_iter()
+        .map(canonicalize_float_values)
+        .map(|row| sort_value_keys(&row))
+        .collect()
 }
 
 fn deterministic_rows(mut rows: Vec<Value>) -> Vec<Value> {
@@ -153,4 +160,27 @@ fn canonicalize_float_number(number: Number) -> Option<Number> {
         return Some(number);
     }
     number.as_f64().and_then(Number::from_f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::execute_sql_with_duckdb_hook;
+
+    #[test]
+    fn sql_output_preserves_duckdb_row_order_while_canonicalizing_rows() {
+        let rows = execute_sql_with_duckdb_hook(&[], "select * from input", |_rows, _sql| {
+            Ok::<_, String>(vec![
+                json!({"z": 1.50, "a": {"y": 2.0, "b": 1}}),
+                json!({"z": 1.0, "a": {"y": 4.50, "b": 3}}),
+            ])
+        })
+        .expect("transform sql rows");
+
+        assert_eq!(
+            serde_json::to_string(&rows).expect("serialize rows"),
+            r#"[{"a":{"b":1,"y":2.0},"z":1.5},{"a":{"b":3,"y":4.5},"z":1.0}]"#
+        );
+    }
 }
