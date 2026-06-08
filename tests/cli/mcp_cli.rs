@@ -137,6 +137,67 @@ fn tools_list_is_deterministic_and_in_fixed_order() {
         replay_tool["meta"]["exit_code_contract"]["2"],
         Value::from("strict lock mismatch or step-level validation mismatch")
     );
+
+    let contract_tool = first_json["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == json!("dataq.contract"))
+        .expect("contract tool");
+    let contract_commands = contract_tool["inputSchema"]["properties"]["command"]["enum"]
+        .as_array()
+        .expect("contract command enum");
+    for command in [
+        "join",
+        "aggregate",
+        "recipe-replay",
+        "schema-infer",
+        "ingest-tabular",
+        "ingest-jc",
+        "emit-plan",
+        "transform-sql",
+    ] {
+        assert!(
+            contract_commands
+                .iter()
+                .any(|entry| entry.as_str() == Some(command)),
+            "missing contract command enum value {command}"
+        );
+    }
+}
+
+#[test]
+fn contract_tool_accepts_added_command_values() {
+    for (command, schema) in [
+        ("join", "dataq.join.output.v1"),
+        ("aggregate", "dataq.aggregate.output.v1"),
+        ("recipe-replay", "dataq.recipe.replay.output.v1"),
+        ("schema-infer", "dataq.schema.infer.output.v1"),
+        ("ingest-tabular", "dataq.ingest.tabular.output.v1"),
+        ("ingest-jc", "dataq.ingest.jc.output.v1"),
+        ("emit-plan", "dataq.emit.plan.output.v1"),
+        ("transform-sql", "dataq.transform.sql.output.v1"),
+    ] {
+        let output = run_mcp(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": command,
+                "method": "tools/call",
+                "params": {
+                    "name": "dataq.contract",
+                    "arguments": {
+                        "command": command
+                    }
+                }
+            }),
+            None,
+        );
+
+        assert_eq!(output.status.code(), Some(0), "{command}");
+        let response = parse_stdout_json(&output.stdout);
+        let payload = &response["result"]["structuredContent"]["payload"];
+        assert_eq!(payload["schema"], Value::from(schema));
+    }
 }
 
 #[test]

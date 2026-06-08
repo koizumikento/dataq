@@ -43,12 +43,12 @@ dataq [--emit-pipeline] <command> [options]
 ## `contract` 出力契約（MVP）
 
 - コマンド:
-  - `dataq contract --command <canon|ingest-api|ingest|assert|gate-schema|gate|sdiff|diff-source|profile|ingest-doc|ingest-notes|ingest-book|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock>`
+  - `dataq contract --command <canon|ingest-api|ingest|ingest-jc|ingest-tabular|assert|gate-schema|gate|schema-infer|sdiff|diff-source|profile|ingest-doc|ingest-notes|ingest-book|join|aggregate|scan|transform-rowset|transform-sql|merge|doctor|recipe-run|recipe-lock|recipe-replay|emit-plan>`
   - `dataq contract --all`
 - `--command` 出力: 単一オブジェクト
   - `--command recipe` は `recipe run` の契約（`matched`, `exit_code`, `steps`）を返す
 - `--all` 出力: 契約オブジェクト配列（決定的順序）
-  - `canon`, `ingest-api`, `ingest yaml-jobs`, `assert`, `gate-schema`, `gate`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `ingest.notes`, `ingest-book`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`
+  - `canon`, `ingest-api`, `ingest yaml-jobs`, `ingest-jc`, `ingest-tabular`, `assert`, `gate-schema`, `gate`, `schema-infer`, `sdiff`, `diff-source`, `profile`, `ingest.doc`, `ingest.notes`, `ingest-book`, `join`, `aggregate`, `scan`, `transform-rowset`, `transform-sql`, `merge`, `doctor`, `recipe-run`, `recipe-lock`, `recipe-replay`, `emit-plan`
 - 各オブジェクトの最低限キー:
   - `command`
   - `schema`

@@ -53,15 +53,20 @@ fn contract_all_returns_deterministic_order() {
             "canon",
             "ingest-api",
             "ingest yaml-jobs",
+            "ingest-jc",
+            "ingest-tabular",
             "assert",
             "gate-schema",
             "gate",
+            "schema-infer",
             "sdiff",
             "diff-source",
             "profile",
             "ingest.doc",
             "ingest.notes",
             "ingest-book",
+            "join",
+            "aggregate",
             "scan",
             "transform-rowset",
             "transform-sql",
@@ -69,6 +74,8 @@ fn contract_all_returns_deterministic_order() {
             "doctor",
             "recipe-run",
             "recipe-lock",
+            "recipe-replay",
+            "emit-plan",
         ]
     );
     for entry in contracts {
@@ -194,6 +201,55 @@ fn contract_transform_sql_command_is_available() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
     assert_eq!(payload["command"], json!("transform-sql"));
     assert_eq!(payload["schema"], json!("dataq.transform.sql.output.v1"));
+}
+
+#[test]
+fn contract_required_public_commands_are_available() {
+    let cases = [
+        ("join", "dataq.join.output.v1", json!([])),
+        ("aggregate", "dataq.aggregate.output.v1", json!([])),
+        (
+            "recipe-replay",
+            "dataq.recipe.replay.output.v1",
+            json!(["matched", "exit_code", "lock_check", "steps"]),
+        ),
+        ("schema-infer", "dataq.schema.infer.output.v1", json!([])),
+        (
+            "ingest-tabular",
+            "dataq.ingest.tabular.output.v1",
+            json!([]),
+        ),
+        (
+            "ingest-jc",
+            "dataq.ingest.jc.output.v1",
+            json!(["source", "parser", "result_type", "record_count", "records"]),
+        ),
+        (
+            "emit-plan",
+            "dataq.emit.plan.output.v1",
+            json!(["command", "args", "stages", "tools"]),
+        ),
+    ];
+
+    for (command, schema, output_fields) in cases {
+        let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+            .args(["contract", "--command", command])
+            .output()
+            .unwrap_or_else(|error| panic!("run contract {command}: {error}"));
+
+        assert_eq!(output.status.code(), Some(0), "{command}");
+        assert!(output.stderr.is_empty(), "{command}");
+
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+        assert_eq!(payload["command"], json!(command));
+        assert_eq!(payload["schema"], json!(schema));
+        assert_eq!(payload["output_fields"], output_fields);
+        assert!(payload["exit_codes"]["0"].is_string());
+        assert!(payload["exit_codes"]["2"].is_string());
+        assert!(payload["exit_codes"]["3"].is_string());
+        assert!(payload["exit_codes"]["1"].is_string());
+        assert!(payload["notes"].is_array());
+    }
 }
 
 #[test]

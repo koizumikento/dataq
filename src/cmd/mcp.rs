@@ -2605,21 +2605,29 @@ fn tool_input_schema(tool_name: &str) -> Value {
                         "canon",
                         "ingest-api",
                         "ingest",
+                        "ingest-jc",
+                        "ingest-tabular",
                         "assert",
                         "gate-schema",
                         "gate",
+                        "schema-infer",
                         "sdiff",
                         "diff-source",
                         "profile",
                         "ingest-doc",
                         "ingest-notes",
                         "ingest-book",
+                        "join",
+                        "aggregate",
                         "scan",
                         "transform-rowset",
+                        "transform-sql",
                         "merge",
                         "doctor",
                         "recipe-run",
-                        "recipe-lock"
+                        "recipe-lock",
+                        "recipe-replay",
+                        "emit-plan"
                     ]
                 }
             },
@@ -2882,12 +2890,16 @@ fn tool_contract_command(tool_name: &str) -> Option<contract::ContractCommand> {
         "dataq.ingest.doc" => Some(contract::ContractCommand::IngestDoc),
         "dataq.ingest.notes" => Some(contract::ContractCommand::IngestNotes),
         "dataq.ingest.book" => Some(contract::ContractCommand::IngestBook),
+        "dataq.join" => Some(contract::ContractCommand::Join),
+        "dataq.aggregate" => Some(contract::ContractCommand::Aggregate),
         "dataq.scan.text" => Some(contract::ContractCommand::Scan),
         "dataq.transform.rowset" => Some(contract::ContractCommand::TransformRowset),
         "dataq.merge" => Some(contract::ContractCommand::Merge),
         "dataq.doctor" => Some(contract::ContractCommand::Doctor),
+        "dataq.emit.plan" => Some(contract::ContractCommand::EmitPlan),
         "dataq.recipe.run" => Some(contract::ContractCommand::RecipeRun),
         "dataq.recipe.lock" => Some(contract::ContractCommand::RecipeLock),
+        "dataq.recipe.replay" => Some(contract::ContractCommand::RecipeReplay),
         _ => None,
     }
 }
@@ -2902,14 +2914,6 @@ fn default_exit_code_contract() -> Value {
 }
 
 fn tool_exit_code_contract(tool_name: &str) -> Value {
-    if tool_name == "dataq.recipe.replay" {
-        return json!({
-            "0": "success",
-            "2": "strict lock mismatch or step-level validation mismatch",
-            "3": "input/usage error",
-            "1": "internal/unexpected error"
-        });
-    }
     let Some(command) = tool_contract_command(tool_name) else {
         return default_exit_code_contract();
     };
@@ -3922,21 +3926,29 @@ fn contract_command_from_str(value: &str) -> Result<contract::ContractCommand, S
         "canon" => Ok(contract::ContractCommand::Canon),
         "ingest-api" => Ok(contract::ContractCommand::IngestApi),
         "ingest" => Ok(contract::ContractCommand::Ingest),
+        "ingest-jc" | "ingest.jc" => Ok(contract::ContractCommand::IngestJc),
+        "ingest-tabular" | "ingest.tabular" => Ok(contract::ContractCommand::IngestTabular),
         "assert" => Ok(contract::ContractCommand::Assert),
         "gate-schema" => Ok(contract::ContractCommand::GateSchema),
         "gate" | "gate-policy" => Ok(contract::ContractCommand::Gate),
+        "schema-infer" | "schema.infer" => Ok(contract::ContractCommand::SchemaInfer),
         "sdiff" => Ok(contract::ContractCommand::Sdiff),
         "diff-source" => Ok(contract::ContractCommand::DiffSource),
         "profile" => Ok(contract::ContractCommand::Profile),
         "ingest-doc" => Ok(contract::ContractCommand::IngestDoc),
         "ingest-notes" => Ok(contract::ContractCommand::IngestNotes),
         "ingest-book" => Ok(contract::ContractCommand::IngestBook),
+        "join" => Ok(contract::ContractCommand::Join),
+        "aggregate" => Ok(contract::ContractCommand::Aggregate),
         "scan" => Ok(contract::ContractCommand::Scan),
         "transform-rowset" | "transform.rowset" => Ok(contract::ContractCommand::TransformRowset),
+        "transform-sql" | "transform.sql" => Ok(contract::ContractCommand::TransformSql),
         "merge" => Ok(contract::ContractCommand::Merge),
         "doctor" => Ok(contract::ContractCommand::Doctor),
         "recipe" | "recipe-run" => Ok(contract::ContractCommand::RecipeRun),
         "recipe-lock" => Ok(contract::ContractCommand::RecipeLock),
+        "recipe-replay" | "recipe.replay" => Ok(contract::ContractCommand::RecipeReplay),
+        "emit-plan" | "emit.plan" => Ok(contract::ContractCommand::EmitPlan),
         _ => Err(format!("unsupported contract command `{value}`")),
     }
 }
