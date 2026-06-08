@@ -8,7 +8,11 @@ use serde_json::Value;
 pub struct ProfileReport {
     pub record_count: usize,
     pub field_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub returned_field_count: Option<usize>,
     pub fields: BTreeMap<String, ProfileFieldReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_fields: Option<Vec<String>>,
 }
 
 /// Deterministic per-field statistics.

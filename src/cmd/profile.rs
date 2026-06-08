@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -7,6 +8,7 @@ use serde_json::{Value, json};
 
 use crate::domain::error::ProfileError;
 use crate::domain::report::{PipelineStageDiagnostic, ProfileReport};
+use crate::domain::value_path::ValuePath;
 use crate::engine::profile;
 use crate::io::{self, Format};
 
@@ -15,6 +17,8 @@ use crate::io::{self, Format};
 pub struct ProfileCommandArgs {
     pub input: Option<PathBuf>,
     pub from: Option<Format>,
+    pub fields: Vec<String>,
+    pub allow_missing_fields: bool,
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -77,10 +81,16 @@ fn execute<R: Read>(
     stdin: R,
     trace: &mut ProfilePipelineTrace,
 ) -> Result<ProfileReport, ProfileError> {
+    let projection_fields = resolve_projection_fields(&args.fields)?;
     let input_format = io::resolve_input_format(args.from, args.input.as_deref())
         .map_err(|source| ProfileError::ResolveInput { source })?;
     let values = load_input_values(args, stdin, input_format)?;
-    profile_report_from_values(&values, input_format, trace)
+    let report = profile_report_from_values(&values, input_format, trace)?;
+    if projection_fields.is_empty() {
+        return Ok(report);
+    }
+    profile::project_report(report, &projection_fields, args.allow_missing_fields)
+        .map_err(|fields| ProfileError::MissingProjectedFields { fields })
 }
 
 fn serialize_report(report: ProfileReport) -> Result<Value, ProfileError> {
@@ -144,6 +154,31 @@ fn profile_report_from_values(
     Ok(profile::profile_values(values))
 }
 
+fn resolve_projection_fields(raw_fields: &[String]) -> Result<Vec<String>, ProfileError> {
+    let mut fields = BTreeSet::new();
+    for raw_field in raw_fields {
+        if raw_field.is_empty() {
+            return Err(ProfileError::InvalidProjectionField {
+                field: raw_field.clone(),
+                source: ValuePath::parse_canonical(raw_field)
+                    .expect_err("empty field is not a valid canonical path"),
+            });
+        }
+        let path = if raw_field.starts_with('$') {
+            ValuePath::parse_canonical(raw_field).map_err(|source| {
+                ProfileError::InvalidProjectionField {
+                    field: raw_field.clone(),
+                    source,
+                }
+            })?
+        } else {
+            ValuePath::object_key(raw_field.clone())
+        };
+        fields.insert(path.to_string());
+    }
+    Ok(fields.into_iter().collect())
+}
+
 /// Ordered pipeline-step names used for `--emit-pipeline` diagnostics.
 pub fn pipeline_steps() -> Vec<String> {
     vec![
@@ -177,6 +212,8 @@ mod tests {
         let args = ProfileCommandArgs {
             input: None,
             from: Some(Format::Json),
+            fields: Vec::new(),
+            allow_missing_fields: false,
         };
         let response = run_with_stdin(
             &args,
@@ -205,6 +242,8 @@ mod tests {
         let args = ProfileCommandArgs {
             input: None,
             from: Some(Format::Json),
+            fields: Vec::new(),
+            allow_missing_fields: false,
         };
         let response = run_with_stdin(&args, Cursor::new("{"));
 
@@ -217,6 +256,8 @@ mod tests {
         let args = ProfileCommandArgs {
             input: None,
             from: Some(Format::Csv),
+            fields: Vec::new(),
+            allow_missing_fields: false,
         };
         let input = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
 id,Integer,1,3,4,1,4,2.333333,2,4\n\

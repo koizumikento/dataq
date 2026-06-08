@@ -610,6 +610,74 @@ fn emit_pipeline_true_includes_pipeline() {
 }
 
 #[test]
+fn profile_tool_projects_field_string_or_array_and_reports_missing_when_allowed() {
+    let request = tool_call_request(
+        30,
+        "dataq.profile",
+        json!({
+            "input": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}],
+            "field": ["missing", "id", "$[\"missing\"]"],
+            "allow_missing_fields": true
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+    let payload = &response["result"]["structuredContent"]["payload"];
+    assert_eq!(payload["field_count"], json!(2));
+    assert_eq!(payload["returned_field_count"], json!(1));
+    assert_eq!(payload["missing_fields"], json!(["$[\"missing\"]"]));
+    assert_eq!(payload["fields"]["$[\"id\"]"]["unique_count"], json!(2));
+
+    let string_request = tool_call_request(
+        301,
+        "dataq.profile",
+        json!({
+            "input": [{"id": 1, "name": "a"}],
+            "field": "name"
+        }),
+    );
+    let string_output = run_mcp(&string_request, None);
+    let string_response = parse_stdout_json(&string_output.stdout);
+    assert_eq!(
+        string_response["result"]["structuredContent"]["payload"]["returned_field_count"],
+        Value::from(1)
+    );
+}
+
+#[test]
+fn profile_tool_missing_projected_field_is_input_usage_error_by_default() {
+    let request = tool_call_request(
+        302,
+        "dataq.profile",
+        json!({
+            "input": [{"id": 1}],
+            "field": "missing"
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["error"],
+        Value::from("input_usage_error")
+    );
+}
+
+#[test]
 fn profile_emit_pipeline_marks_qsv_used_for_qsv_csv_input() {
     let dir = tempdir().expect("tempdir");
     let input_path = dir.path().join("qsv-profile.csv");

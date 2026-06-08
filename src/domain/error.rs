@@ -1,6 +1,9 @@
 use thiserror::Error;
 
-use crate::io::{Format, IoError};
+use crate::{
+    domain::value_path::ValuePathError,
+    io::{Format, IoError},
+};
 
 /// Errors produced by the `canon` command boundary.
 #[derive(Debug, Error)]
@@ -51,6 +54,18 @@ pub enum ProfileError {
     /// qsv profile rows could not be normalized into profile output.
     #[error("failed to normalize qsv profile rows: {message}")]
     QsvNormalize { message: String },
+
+    /// Projection field input is empty or not a valid canonical path.
+    #[error("invalid profile field `{field}`: {source}")]
+    InvalidProjectionField {
+        field: String,
+        #[source]
+        source: ValuePathError,
+    },
+
+    /// Projection requested fields that are not present in the computed report.
+    #[error("missing projected profile fields: {}", fields.join(", "))]
+    MissingProjectedFields { fields: Vec<String> },
 
     /// Structured report could not be serialized.
     #[error("failed to serialize profile report: {source}")]

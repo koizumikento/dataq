@@ -97,7 +97,7 @@ dataq [--emit-pipeline] <command> [options]
 | `schema infer` | 表形式入力から `qsv` で JSON Schema を推定 | なし（`--input <path-or-stdin>` は任意） |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `diff source` | 2ソース（preset/path）を解決して構造差分を出力 | `--left <preset-or-path>` `--right <preset-or-path>` |
-| `profile` | フィールド統計を決定的JSONで出力 | `--from <format>`（`format`: `json` / `yaml` / `csv` / `jsonl`） |
+| `profile` | フィールド統計を決定的JSONで出力 | `--from <format>`（`format`: `json` / `yaml` / `csv` / `jsonl`）, `--field <name-or-path>`（複数可）, `--allow-missing-fields` |
 | `ingest doc` | ドキュメントを共通JSONスキーマへ抽出 | `--input <path-or-stdin>` `--from <format>`（`format`: `md` / `html` / `docx` / `rst` / `latex`） |
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <how>`（`how`: `inner` / `left`） |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <metric>`（`metric`: `count` / `sum` / `avg`） `--target <field>` |
@@ -524,12 +524,17 @@ mdBook ルートを解析し、`SUMMARY.md` と book メタデータを決定的
 
 - `record_count`: レコード件数
 - `field_count`: フィールドパス件数
+- `returned_field_count`: `--field` 指定時に返したフィールドパス件数
 - `fields`: canonical path ごとの集計
   - `null_ratio`（0.0-1.0）
   - `unique_count`
   - `type_distribution`（`null|boolean|number|string|array|object`）
   - `numeric_stats`（数値サンプルが1件以上ある場合のみ）
     - `count`, `min`, `max`, `mean`, `p50`, `p95`
+- `missing_fields`: `--allow-missing-fields` 指定時の欠損 projection パス（canonical path、ソート/重複排除済み）
+- `--field <name-or-path>` は出力 `fields` を projection する。直接名は `$["name"]` に解決し、`$` で始まる値は canonical path として検証する
+- projection 時も `field_count` は入力全体のフィールドパス件数を維持し、`fields` は canonical path 順で返す
+- 欠損 projection は既定で exit `3` の `input_usage_error`。`--allow-missing-fields` 指定時は exit `0` で存在する field のみ返す
 - `--from csv` では通常CSV行の集計に加えて、qsv adapter の profile/stats CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` など）も受け取り、同一スキーマへ正規化
 - qsv adapter CSV 正規化パスが使われた場合、`--emit-pipeline` の `stage_diagnostics` に `profile_qsv_normalize` を出力し、`external_tools` に `qsv` を `used=true` で記録
 
@@ -793,6 +798,8 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.sdiff`
   - `dataq.diff.source`
   - `dataq.profile`
+    - `field`: string または string[]。CLI の `--field` と同じ projection 指定
+    - `allow_missing_fields`: boolean。CLI の `--allow-missing-fields` と同じ欠損許可
   - `dataq.ingest.doc`
   - `dataq.ingest.notes`
   - `dataq.ingest.book`

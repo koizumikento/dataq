@@ -375,6 +375,12 @@ struct ProfileArgs {
 
     #[arg(long, value_enum)]
     from: CliInputFormat,
+
+    #[arg(long = "field")]
+    field: Vec<String>,
+
+    #[arg(long, default_value_t = false)]
+    allow_missing_fields: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -2846,6 +2852,8 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     let command_args = profile::ProfileCommandArgs {
         input: args.input.clone(),
         from: input_format,
+        fields: args.field.clone(),
+        allow_missing_fields: args.allow_missing_fields,
     };
 
     let stdin = io::stdin();
@@ -5061,6 +5069,8 @@ mod tests {
         let profile_args = ProfileArgs {
             input: Some(PathBuf::from("input.json")),
             from: CliInputFormat::Json,
+            field: Vec::new(),
+            allow_missing_fields: false,
         };
         let profile_trace = profile::ProfilePipelineTrace::default();
         let profile_report =
@@ -5546,6 +5556,8 @@ mod tests {
                 ProfileArgs {
                     input: Some(PathBuf::from("/definitely-missing/input.json")),
                     from: CliInputFormat::Json,
+                    field: Vec::new(),
+                    allow_missing_fields: false,
                 },
                 true,
             ),

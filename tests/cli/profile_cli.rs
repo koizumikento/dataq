@@ -174,6 +174,145 @@ flag,String,2,2,4,,,,,\n";
 }
 
 #[test]
+fn profile_command_projects_requested_fields_in_canonical_order() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "profile",
+            "--from",
+            "json",
+            "--field",
+            "name",
+            "--field",
+            "$[\"nested\"][\"score\"]",
+            "--field",
+            "name",
+        ])
+        .write_stdin(
+            r#"[{"id":1,"name":"a","nested":{"score":2}},{"id":2,"name":"b","nested":{"score":4}}]"#,
+        )
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["field_count"], json!(4));
+    assert_eq!(actual["returned_field_count"], json!(2));
+    assert_eq!(
+        actual["fields"]
+            .as_object()
+            .expect("fields object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["$[\"name\"]", "$[\"nested\"][\"score\"]"]
+    );
+    assert!(actual.get("missing_fields").is_none());
+}
+
+#[test]
+fn profile_command_missing_projection_field_returns_exit_three() {
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "json", "--field", "missing"])
+        .write_stdin(r#"[{"id":1}]"#)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""))
+        .stderr(predicate::str::contains("$[\\\"missing\\\"]"));
+}
+
+#[test]
+fn profile_command_allow_missing_projection_returns_present_fields_and_missing_list() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "profile",
+            "--from",
+            "json",
+            "--field",
+            "missing",
+            "--field",
+            "id",
+            "--field",
+            "$[\"missing\"]",
+            "--allow-missing-fields",
+        ])
+        .write_stdin(r#"[{"id":1}]"#)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["field_count"], json!(1));
+    assert_eq!(actual["returned_field_count"], json!(1));
+    assert_eq!(actual["missing_fields"], json!(["$[\"missing\"]"]));
+    assert_eq!(
+        actual["fields"]
+            .as_object()
+            .expect("fields object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["$[\"id\"]"]
+    );
+}
+
+#[test]
+fn profile_command_rejects_empty_or_invalid_projection_field() {
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "profile",
+            "--from",
+            "json",
+            "--field",
+            "",
+            "--allow-missing-fields",
+        ])
+        .write_stdin(r#"[{"id":1}]"#)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
+
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "profile",
+            "--from",
+            "json",
+            "--field",
+            "$.id",
+            "--allow-missing-fields",
+        ])
+        .write_stdin(r#"[{"id":1}]"#)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""));
+}
+
+#[test]
+fn profile_command_projects_qsv_normalized_profile_rows() {
+    let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
+id,Integer,1,3,4,1,4,2.333333,2,4\n\
+flag,String,2,2,4,,,,,\n";
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "csv", "--field", "flag"])
+        .write_stdin(qsv_rows)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["field_count"], json!(2));
+    assert_eq!(actual["returned_field_count"], json!(1));
+    assert_eq!(actual["fields"]["$[\"flag\"]"]["null_ratio"], json!(0.5));
+    assert!(actual["fields"].get("$[\"id\"]").is_none());
+}
+
+#[test]
 fn profile_command_emit_pipeline_reports_qsv_stage_diagnostics() {
     let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
 id,Integer,1,3,4,1,4,2.333333,2,4\n\
