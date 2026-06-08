@@ -313,6 +313,171 @@ flag,String,2,2,4,,,,,\n";
 }
 
 #[test]
+fn profile_command_brief_returns_compact_field_array() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "json", "--brief"])
+        .write_stdin(r#"[{"id":1,"active":true},{"id":2,"active":null}]"#)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["record_count"], json!(2));
+    assert_eq!(actual["field_count"], json!(2));
+    assert_eq!(actual["truncated"], json!(false));
+    assert!(actual["fields"].as_array().expect("fields array").len() == 2);
+    for field in actual["fields"].as_array().expect("fields array") {
+        assert!(field.get("path").is_some());
+        assert!(field.get("null_ratio").is_some());
+        assert!(field.get("unique_count").is_some());
+        assert!(field.get("dominant_type").is_some());
+        assert!(field.get("numeric").is_some());
+        assert!(field.get("type_distribution").is_none());
+        assert!(field.get("numeric_stats").is_none());
+    }
+    assert_eq!(actual["fields"][0]["path"], json!("$[\"active\"]"));
+    assert_eq!(actual["fields"][0]["dominant_type"], json!("boolean"));
+    assert_eq!(actual["fields"][0]["numeric"], json!(null));
+    assert_eq!(actual["fields"][1]["path"], json!("$[\"id\"]"));
+    assert_eq!(actual["fields"][1]["dominant_type"], json!("number"));
+    assert_eq!(actual["fields"][1]["numeric"]["count"], json!(2));
+}
+
+#[test]
+fn profile_command_brief_default_path_order_is_deterministic() {
+    let input = r#"[{"z":1,"a":1,"nested":{"b":1}}]"#;
+    let first_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "json", "--brief"])
+        .write_stdin(input)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let second_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "json", "--brief"])
+        .write_stdin(input)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(first_output, second_output);
+    let actual: serde_json::Value =
+        serde_json::from_slice(&first_output).expect("parse profile output");
+    let paths = brief_paths(&actual);
+    assert_eq!(
+        paths,
+        vec![
+            "$[\"a\"]",
+            "$[\"nested\"]",
+            "$[\"nested\"][\"b\"]",
+            "$[\"z\"]"
+        ]
+    );
+}
+
+#[test]
+fn profile_command_brief_unique_count_sort_and_max_fields_truncate() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "profile",
+            "--from",
+            "json",
+            "--brief",
+            "--sort-fields",
+            "unique_count",
+            "--max-fields",
+            "1",
+        ])
+        .write_stdin(r#"[{"a":1,"b":1},{"a":2,"b":1},{"a":3,"b":null}]"#)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["truncated"], json!(true));
+    assert_eq!(brief_paths(&actual), vec!["$[\"a\"]"]);
+    assert_eq!(actual["fields"][0]["unique_count"], json!(3));
+}
+
+#[test]
+fn profile_command_brief_null_ratio_sort_ties_by_path() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "profile",
+            "--from",
+            "json",
+            "--brief",
+            "--sort-fields",
+            "null_ratio",
+        ])
+        .write_stdin(r#"[{"a":null,"b":1,"c":null},{"a":1,"b":null}]"#)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(
+        brief_paths(&actual),
+        vec!["$[\"c\"]", "$[\"a\"]", "$[\"b\"]"]
+    );
+    assert_eq!(actual["fields"][0]["null_ratio"], json!(1.0));
+    assert_eq!(actual["fields"][0]["dominant_type"], json!("null"));
+}
+
+#[test]
+fn profile_command_brief_max_fields_zero_returns_empty_fields_and_truncated() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "json", "--brief", "--max-fields", "0"])
+        .write_stdin(r#"[{"id":1}]"#)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["field_count"], json!(1));
+    assert_eq!(actual["truncated"], json!(true));
+    assert_eq!(actual["fields"], json!([]));
+}
+
+#[test]
+fn profile_command_brief_applies_projection_before_sort_and_preserves_missing_metadata() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args([
+            "profile",
+            "--from",
+            "json",
+            "--brief",
+            "--field",
+            "missing",
+            "--field",
+            "id",
+            "--allow-missing-fields",
+        ])
+        .write_stdin(r#"[{"id":1,"name":"a"}]"#)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["field_count"], json!(2));
+    assert_eq!(actual["missing_fields"], json!(["$[\"missing\"]"]));
+    assert_eq!(brief_paths(&actual), vec!["$[\"id\"]"]);
+}
+
+#[test]
 fn profile_command_emit_pipeline_reports_qsv_stage_diagnostics() {
     let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
 id,Integer,1,3,4,1,4,2.333333,2,4\n\
@@ -362,4 +527,13 @@ fn parse_last_stderr_json(stderr: &[u8]) -> serde_json::Value {
         .find(|candidate| !candidate.trim().is_empty())
         .expect("non-empty stderr line");
     serde_json::from_str(line).expect("stderr json")
+}
+
+fn brief_paths(value: &serde_json::Value) -> Vec<&str> {
+    value["fields"]
+        .as_array()
+        .expect("fields array")
+        .iter()
+        .map(|field| field["path"].as_str().expect("path string"))
+        .collect()
 }

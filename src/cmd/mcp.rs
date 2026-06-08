@@ -23,6 +23,7 @@ use crate::engine::ingest as ingest_engine;
 use crate::engine::ingest::IngestDocInputFormat;
 use crate::engine::join::JoinHow;
 use crate::engine::merge::MergePolicy;
+use crate::engine::profile::ProfileBriefSortFields;
 use crate::io::{self, Format};
 
 const JSONRPC_VERSION: &str = "2.0";
@@ -1160,6 +1161,18 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
         Ok(value) => value,
         Err(message) => return input_usage_error(message),
     };
+    let brief = match parse_bool(args, &["brief"], false, "brief") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let max_fields = match parse_optional_usize(args, &["max_fields"], "max_fields") {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
+    let sort_fields = match parse_profile_sort_fields(args) {
+        Ok(value) => value,
+        Err(message) => return input_usage_error(message),
+    };
     let input = match parse_value_input(
         args,
         &["input_path", "input_file"],
@@ -1181,6 +1194,9 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
                     from,
                     fields: fields.clone(),
                     allow_missing_fields,
+                    brief,
+                    max_fields,
+                    sort_fields,
                 },
                 Cursor::new(Vec::new()),
             );
@@ -1198,6 +1214,9 @@ fn execute_profile(args: &Map<String, Value>) -> ToolExecution {
                     from: Some(Format::Json),
                     fields: fields.clone(),
                     allow_missing_fields,
+                    brief,
+                    max_fields,
+                    sort_fields,
                 },
                 Cursor::new(serialize_values_as_json_input(values)),
             );
@@ -2423,6 +2442,13 @@ fn tool_input_schema(tool_name: &str) -> Value {
                 "from": format_schema(),
                 "field": string_or_array_of_strings_schema(),
                 "allow_missing_fields": { "type": "boolean", "default": false },
+                "brief": { "type": "boolean", "default": false },
+                "max_fields": { "type": "integer", "minimum": 0 },
+                "sort_fields": {
+                    "type": "string",
+                    "enum": ["path", "unique_count", "null_ratio"],
+                    "default": "path"
+                },
                 "input": json_value_schema(),
                 "input_path": { "type": "string" }
             },
@@ -2780,13 +2806,24 @@ fn tool_examples(tool_name: &str) -> Vec<Value> {
                 "right": "preset:scan-text:scan-right.json"
             }
         })],
-        "dataq.profile" => vec![json!({
-            "name": "profile-inline",
-            "arguments": {
-                "input": [{"id": 1}, {"id": 2}],
-                "field": "id"
-            }
-        })],
+        "dataq.profile" => vec![
+            json!({
+                "name": "profile-inline",
+                "arguments": {
+                    "input": [{"id": 1}, {"id": 2}],
+                    "field": "id"
+                }
+            }),
+            json!({
+                "name": "profile-brief",
+                "arguments": {
+                    "input": [{"id": 1, "score": 10.0}, {"id": 2, "score": null}],
+                    "brief": true,
+                    "max_fields": 2,
+                    "sort_fields": "unique_count"
+                }
+            }),
+        ],
         "dataq.ingest.doc" => vec![json!({
             "name": "ingest-doc-inline",
             "arguments": {
@@ -3237,6 +3274,7 @@ const MACHINE_PARAM_NAMES: &[&str] = &[
     "base_dir",
     "base_path",
     "body",
+    "brief",
     "capabilities",
     "command",
     "emit_pipeline",
@@ -3260,6 +3298,7 @@ const MACHINE_PARAM_NAMES: &[&str] = &[
     "left_from",
     "left_path",
     "lock_path",
+    "max_fields",
     "max_matches",
     "metric",
     "method",
@@ -3287,6 +3326,7 @@ const MACHINE_PARAM_NAMES: &[&str] = &[
     "schema",
     "schema_path",
     "since",
+    "sort_fields",
     "sort_keys",
     "source",
     "strict",
@@ -3519,6 +3559,16 @@ fn parse_optional_format(
             .map_err(|error| format!("invalid format for `{label}`: {error}"))
     })
     .transpose()
+}
+
+fn parse_profile_sort_fields(args: &Map<String, Value>) -> Result<ProfileBriefSortFields, String> {
+    let raw = parse_optional_string(args, &["sort_fields"], "sort_fields")?;
+    match raw.as_deref().unwrap_or("path") {
+        "path" => Ok(ProfileBriefSortFields::Path),
+        "unique_count" => Ok(ProfileBriefSortFields::UniqueCount),
+        "null_ratio" => Ok(ProfileBriefSortFields::NullRatio),
+        _ => Err("`sort_fields` must be path|unique_count|null_ratio".to_string()),
+    }
 }
 
 fn parse_optional_normalize_mode(

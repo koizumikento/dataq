@@ -3,11 +3,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value};
 
 use crate::domain::report::{
-    ProfileFieldReport, ProfileNumericStats, ProfileReport, ProfileTypeDistribution,
+    ProfileBriefFieldReport, ProfileBriefReport, ProfileDominantType, ProfileFieldReport,
+    ProfileNumericStats, ProfileReport, ProfileTypeDistribution,
 };
 use crate::util::sort::sort_value_keys;
 
 const NUMERIC_STAT_SCALE: f64 = 1_000_000.0;
+
+/// Sort mode for compact profile fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileBriefSortFields {
+    Path,
+    UniqueCount,
+    NullRatio,
+}
 
 #[derive(Debug, Clone)]
 struct QsvColumns {
@@ -463,6 +472,89 @@ pub fn project_report(
         None
     };
     Ok(report)
+}
+
+/// Converts a full profile report into compact LLM-oriented output.
+pub fn brief_report(
+    report: ProfileReport,
+    max_fields: Option<usize>,
+    sort_fields: ProfileBriefSortFields,
+) -> ProfileBriefReport {
+    let mut fields: Vec<ProfileBriefFieldReport> = report
+        .fields
+        .into_iter()
+        .map(|(path, field)| ProfileBriefFieldReport {
+            path,
+            null_ratio: field.null_ratio,
+            unique_count: field.unique_count,
+            dominant_type: dominant_type(&field.type_distribution),
+            numeric: field.numeric_stats,
+        })
+        .collect();
+
+    sort_brief_fields(&mut fields, sort_fields);
+
+    let available_field_count = fields.len();
+    if let Some(max_fields) = max_fields {
+        fields.truncate(max_fields);
+    }
+
+    let truncated = available_field_count > fields.len();
+
+    ProfileBriefReport {
+        record_count: report.record_count,
+        field_count: report.field_count,
+        truncated,
+        fields,
+        missing_fields: report.missing_fields,
+    }
+}
+
+fn sort_brief_fields(fields: &mut [ProfileBriefFieldReport], sort_fields: ProfileBriefSortFields) {
+    match sort_fields {
+        ProfileBriefSortFields::Path => fields.sort_by(|left, right| left.path.cmp(&right.path)),
+        ProfileBriefSortFields::UniqueCount => fields.sort_by(|left, right| {
+            right
+                .unique_count
+                .cmp(&left.unique_count)
+                .then_with(|| left.path.cmp(&right.path))
+        }),
+        ProfileBriefSortFields::NullRatio => fields.sort_by(|left, right| {
+            right
+                .null_ratio
+                .total_cmp(&left.null_ratio)
+                .then_with(|| left.path.cmp(&right.path))
+        }),
+    }
+}
+
+fn dominant_type(distribution: &ProfileTypeDistribution) -> ProfileDominantType {
+    [
+        (ProfileDominantType::Boolean, distribution.boolean),
+        (ProfileDominantType::Number, distribution.number),
+        (ProfileDominantType::String, distribution.string),
+        (ProfileDominantType::Array, distribution.array),
+        (ProfileDominantType::Object, distribution.object),
+    ]
+    .into_iter()
+    .max_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| dominant_type_priority(left.0).cmp(&dominant_type_priority(right.0)))
+    })
+    .and_then(|(dominant_type, count)| (count > 0).then_some(dominant_type))
+    .unwrap_or(ProfileDominantType::Null)
+}
+
+fn dominant_type_priority(dominant_type: ProfileDominantType) -> usize {
+    match dominant_type {
+        ProfileDominantType::Boolean => 5,
+        ProfileDominantType::Number => 4,
+        ProfileDominantType::String => 3,
+        ProfileDominantType::Array => 2,
+        ProfileDominantType::Object => 1,
+        ProfileDominantType::Null => 0,
+    }
 }
 
 fn collect_record_samples(value: &Value, path: &str, out: &mut BTreeMap<String, Vec<Value>>) {

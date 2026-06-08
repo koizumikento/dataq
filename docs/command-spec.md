@@ -149,6 +149,9 @@ dataq [--emit-pipeline] <command> [options]
   - `dataq.profile`
     - `field`: string または string[]。CLI の `--field` と同じ projection 指定
     - `allow_missing_fields`: boolean。CLI の `--allow-missing-fields` と同じ欠損許可
+    - `brief`: boolean。CLI の `--brief` と同じ省コンテキスト出力
+    - `max_fields`: integer >= 0。CLI の `--max-fields` と同じ brief field 上限
+    - `sort_fields`: `path` / `unique_count` / `null_ratio`。CLI の `--sort-fields` と同じ brief field 順序
   - `dataq.ingest.doc`
   - `dataq.ingest.notes`
   - `dataq.ingest.book`
@@ -297,6 +300,11 @@ dataq [--emit-pipeline] <command> [options]
 - `--allow-missing-fields` 指定時は exit `0` とし、存在する field のみ返して `missing_fields` に欠損 canonical path をソート/重複排除済み配列で出力
 - 空の `--field`、または不正な canonical path は `--allow-missing-fields` 指定時でも exit `3`
 - `fields.<canonical-path>.numeric_stats` は後方互換な追加キー（数値サンプルが存在するときのみ出力）
+- `--brief` 指定時は LLM 向けの省コンテキストスキーマを返す。トップレベルは `record_count`, `field_count`, `truncated`, `fields` で、projection metadata が `ProfileReport` にある場合は `missing_fields` も出力する
+- brief の `fields` は配列で、各要素は `path`, `null_ratio`, `unique_count`, `dominant_type`, `numeric` を持つ。`numeric` は通常出力の `numeric_stats` と同じオブジェクト、数値統計がなければ `null`
+- `dominant_type` は `null|boolean|number|string|array|object`。非 null 型の最大カウントを採用し、同数なら `boolean`, `number`, `string`, `array`, `object` の順で優先する。非 null 型がすべて 0 の場合のみ `null`
+- `--sort-fields path` は canonical path 昇順、`unique_count` は `unique_count` 降順、`null_ratio` は `null_ratio` 降順。同値時はいずれも path 昇順
+- `--max-fields <n>` は projection と sort の後に brief field 配列へ適用する。`0` も有効。brief output は常に `truncated` を含み、利用可能 field 数が返却 field 数より多い場合のみ `true`
 - `--from csv` は通常CSV行の集計に加えて、qsv adapter 出力CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` 等）を同一スキーマへ正規化可能
 - projection は通常 profile と qsv adapter CSV 正規化後の profile の両方に適用
 - qsv adapter 正規化パスが使われた場合、`--emit-pipeline` で `stage_diagnostics` に `profile_qsv_normalize` を出力し、`external_tools` で `qsv.used=true` を記録

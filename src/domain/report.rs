@@ -25,6 +25,39 @@ pub struct ProfileFieldReport {
     pub numeric_stats: Option<ProfileNumericStats>,
 }
 
+/// Compact profile report for LLM-oriented context-efficient output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProfileBriefReport {
+    pub record_count: usize,
+    pub field_count: usize,
+    pub truncated: bool,
+    pub fields: Vec<ProfileBriefFieldReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_fields: Option<Vec<String>>,
+}
+
+/// Compact per-field profile statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProfileBriefFieldReport {
+    pub path: String,
+    pub null_ratio: f64,
+    pub unique_count: usize,
+    pub dominant_type: ProfileDominantType,
+    pub numeric: Option<ProfileNumericStats>,
+}
+
+/// Dominant non-null type for compact profile output.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProfileDominantType {
+    Null,
+    Boolean,
+    Number,
+    String,
+    Array,
+    Object,
+}
+
 /// Deterministic numeric statistics for one field path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProfileNumericStats {

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::domain::error::ProfileError;
 use crate::domain::report::{PipelineStageDiagnostic, ProfileReport};
 use crate::domain::value_path::ValuePath;
-use crate::engine::profile;
+use crate::engine::profile::{self, ProfileBriefSortFields};
 use crate::io::{self, Format};
 
 /// Input arguments for profile command execution API.
@@ -19,6 +19,9 @@ pub struct ProfileCommandArgs {
     pub from: Option<Format>,
     pub fields: Vec<String>,
     pub allow_missing_fields: bool,
+    pub brief: bool,
+    pub max_fields: Option<usize>,
+    pub sort_fields: ProfileBriefSortFields,
 }
 
 /// Structured command response that carries exit-code mapping and JSON payload.
@@ -53,26 +56,27 @@ pub fn run_with_stdin_and_trace<R: Read>(
     stdin: R,
 ) -> (ProfileCommandResponse, ProfilePipelineTrace) {
     let mut trace = ProfilePipelineTrace::default();
-    let response = match execute(args, stdin, &mut trace).and_then(serialize_report) {
-        Ok(payload) => ProfileCommandResponse {
-            exit_code: 0,
-            payload,
-        },
-        Err(ProfileError::SerializeReport { source: _ }) => ProfileCommandResponse {
-            exit_code: 1,
-            payload: json!({
-                "error": "internal_error",
-                "message": "failed to serialize profile report",
-            }),
-        },
-        Err(error) => ProfileCommandResponse {
-            exit_code: 3,
-            payload: json!({
-                "error": "input_usage_error",
-                "message": error.to_string(),
-            }),
-        },
-    };
+    let response =
+        match execute(args, stdin, &mut trace).and_then(|report| serialize_report(args, report)) {
+            Ok(payload) => ProfileCommandResponse {
+                exit_code: 0,
+                payload,
+            },
+            Err(ProfileError::SerializeReport { source: _ }) => ProfileCommandResponse {
+                exit_code: 1,
+                payload: json!({
+                    "error": "internal_error",
+                    "message": "failed to serialize profile report",
+                }),
+            },
+            Err(error) => ProfileCommandResponse {
+                exit_code: 3,
+                payload: json!({
+                    "error": "input_usage_error",
+                    "message": error.to_string(),
+                }),
+            },
+        };
     (response, trace)
 }
 
@@ -93,7 +97,19 @@ fn execute<R: Read>(
         .map_err(|fields| ProfileError::MissingProjectedFields { fields })
 }
 
-fn serialize_report(report: ProfileReport) -> Result<Value, ProfileError> {
+fn serialize_report(
+    args: &ProfileCommandArgs,
+    report: ProfileReport,
+) -> Result<Value, ProfileError> {
+    if args.brief {
+        return serde_json::to_value(profile::brief_report(
+            report,
+            args.max_fields,
+            args.sort_fields,
+        ))
+        .map_err(|source| ProfileError::SerializeReport { source });
+    }
+
     serde_json::to_value(report).map_err(|source| ProfileError::SerializeReport { source })
 }
 
@@ -205,6 +221,7 @@ mod tests {
     use serde_json::json;
 
     use super::{ProfileCommandArgs, run_with_stdin, run_with_stdin_and_trace};
+    use crate::engine::profile::ProfileBriefSortFields;
     use crate::io::Format;
 
     #[test]
@@ -214,6 +231,9 @@ mod tests {
             from: Some(Format::Json),
             fields: Vec::new(),
             allow_missing_fields: false,
+            brief: false,
+            max_fields: None,
+            sort_fields: ProfileBriefSortFields::Path,
         };
         let response = run_with_stdin(
             &args,
@@ -244,6 +264,9 @@ mod tests {
             from: Some(Format::Json),
             fields: Vec::new(),
             allow_missing_fields: false,
+            brief: false,
+            max_fields: None,
+            sort_fields: ProfileBriefSortFields::Path,
         };
         let response = run_with_stdin(&args, Cursor::new("{"));
 
@@ -258,6 +281,9 @@ mod tests {
             from: Some(Format::Csv),
             fields: Vec::new(),
             allow_missing_fields: false,
+            brief: false,
+            max_fields: None,
+            sort_fields: ProfileBriefSortFields::Path,
         };
         let input = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
 id,Integer,1,3,4,1,4,2.333333,2,4\n\

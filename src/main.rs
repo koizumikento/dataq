@@ -381,6 +381,15 @@ struct ProfileArgs {
 
     #[arg(long, default_value_t = false)]
     allow_missing_fields: bool,
+
+    #[arg(long, default_value_t = false)]
+    brief: bool,
+
+    #[arg(long)]
+    max_fields: Option<usize>,
+
+    #[arg(long, value_enum, default_value_t = CliProfileSortFields::Path)]
+    sort_fields: CliProfileSortFields,
 }
 
 #[derive(Debug, clap::Args)]
@@ -641,6 +650,15 @@ enum CliInputFormat {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliProfileSortFields {
+    Path,
+    #[value(name = "unique_count", alias = "unique-count")]
+    UniqueCount,
+    #[value(name = "null_ratio", alias = "null-ratio")]
+    NullRatio,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CanonOutputFormat {
     Json,
     Jsonl,
@@ -786,6 +804,16 @@ impl From<CliInputFormat> for Format {
             CliInputFormat::Yaml => Self::Yaml,
             CliInputFormat::Csv => Self::Csv,
             CliInputFormat::Jsonl => Self::Jsonl,
+        }
+    }
+}
+
+impl From<CliProfileSortFields> for dataq::engine::profile::ProfileBriefSortFields {
+    fn from(value: CliProfileSortFields) -> Self {
+        match value {
+            CliProfileSortFields::Path => Self::Path,
+            CliProfileSortFields::UniqueCount => Self::UniqueCount,
+            CliProfileSortFields::NullRatio => Self::NullRatio,
         }
     }
 }
@@ -2854,6 +2882,9 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
         from: input_format,
         fields: args.field.clone(),
         allow_missing_fields: args.allow_missing_fields,
+        brief: args.brief,
+        max_fields: args.max_fields,
+        sort_fields: args.sort_fields.into(),
     };
 
     let stdin = io::stdin();
@@ -5071,6 +5102,9 @@ mod tests {
             from: CliInputFormat::Json,
             field: Vec::new(),
             allow_missing_fields: false,
+            brief: false,
+            max_fields: None,
+            sort_fields: CliProfileSortFields::Path,
         };
         let profile_trace = profile::ProfilePipelineTrace::default();
         let profile_report =
@@ -5558,6 +5592,9 @@ mod tests {
                     from: CliInputFormat::Json,
                     field: Vec::new(),
                     allow_missing_fields: false,
+                    brief: false,
+                    max_fields: None,
+                    sort_fields: CliProfileSortFields::Path,
                 },
                 true,
             ),

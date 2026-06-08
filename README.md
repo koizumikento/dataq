@@ -97,7 +97,7 @@ dataq [--emit-pipeline] <command> [options]
 | `schema infer` | 表形式入力から `qsv` で JSON Schema を推定 | なし（`--input <path-or-stdin>` は任意） |
 | `sdiff` | 2データセットの構造差分を出力 | `--left <path>` `--right <path>` |
 | `diff source` | 2ソース（preset/path）を解決して構造差分を出力 | `--left <preset-or-path>` `--right <preset-or-path>` |
-| `profile` | フィールド統計を決定的JSONで出力 | `--from <format>`（`format`: `json` / `yaml` / `csv` / `jsonl`）, `--field <name-or-path>`（複数可）, `--allow-missing-fields` |
+| `profile` | フィールド統計を決定的JSONで出力 | `--from <format>`（`format`: `json` / `yaml` / `csv` / `jsonl`）, `--field <name-or-path>`（複数可）, `--allow-missing-fields`, `--brief`, `--max-fields <n>`, `--sort-fields <path\|unique_count\|null_ratio>` |
 | `ingest doc` | ドキュメントを共通JSONスキーマへ抽出 | `--input <path-or-stdin>` `--from <format>`（`format`: `md` / `html` / `docx` / `rst` / `latex`） |
 | `join` | 2入力をキー結合してJSON配列を出力 | `--left <path>` `--right <path>` `--on <field>` `--how <how>`（`how`: `inner` / `left`） |
 | `aggregate` | グループ単位の集計をJSON配列で出力 | `--input <path>` `--group-by <field>` `--metric <metric>`（`metric`: `count` / `sum` / `avg`） `--target <field>` |
@@ -158,6 +158,7 @@ dataq sdiff --left before.jsonl --right after.jsonl
 
 # 品質プロファイル
 dataq profile --from json --input out.jsonl
+dataq profile --from json --brief --sort-fields unique_count --max-fields 20
 
 # ドキュメント抽出（pandoc AST -> jq 投影）
 dataq ingest doc --input README.md --from md
@@ -535,6 +536,11 @@ mdBook ルートを解析し、`SUMMARY.md` と book メタデータを決定的
 - `--field <name-or-path>` は出力 `fields` を projection する。直接名は `$["name"]` に解決し、`$` で始まる値は canonical path として検証する
 - projection 時も `field_count` は入力全体のフィールドパス件数を維持し、`fields` は canonical path 順で返す
 - 欠損 projection は既定で exit `3` の `input_usage_error`。`--allow-missing-fields` 指定時は exit `0` で存在する field のみ返す
+- `--brief` は LLM 向けの省コンテキスト出力を返す。トップレベルは `record_count`, `field_count`, `truncated`, `fields` で、projection metadata がある場合は `missing_fields` も維持する
+- brief の `fields` は配列で、各要素は `path`, `null_ratio`, `unique_count`, `dominant_type`, `numeric` を持つ。`numeric` は通常出力の `numeric_stats` と同じ内容、数値統計がない場合は `null`
+- `dominant_type` は `null|boolean|number|string|array|object`。非 null 型の最多カウントを採用し、同数なら `boolean`, `number`, `string`, `array`, `object` の順で優先する
+- `--sort-fields` は brief の field 配列を制御する。`path` は canonical path 昇順、`unique_count` は降順、`null_ratio` は降順で、同値時はいずれも path 昇順
+- `--max-fields <n>` は projection と sort の後に brief field を切り詰める。`0` も有効で、返した field 数が利用可能 field 数より少ない場合は `truncated: true`
 - `--from csv` では通常CSV行の集計に加えて、qsv adapter の profile/stats CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` など）も受け取り、同一スキーマへ正規化
 - qsv adapter CSV 正規化パスが使われた場合、`--emit-pipeline` の `stage_diagnostics` に `profile_qsv_normalize` を出力し、`external_tools` に `qsv` を `used=true` で記録
 
@@ -800,6 +806,9 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `dataq.profile`
     - `field`: string または string[]。CLI の `--field` と同じ projection 指定
     - `allow_missing_fields`: boolean。CLI の `--allow-missing-fields` と同じ欠損許可
+    - `brief`: boolean。CLI の `--brief` と同じ省コンテキスト出力
+    - `max_fields`: integer >= 0。CLI の `--max-fields` と同じ brief field 上限
+    - `sort_fields`: `path` / `unique_count` / `null_ratio`。CLI の `--sort-fields` と同じ brief field 順序
   - `dataq.ingest.doc`
   - `dataq.ingest.notes`
   - `dataq.ingest.book`
