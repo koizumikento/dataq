@@ -4,4 +4,4 @@ interface:
   default_prompt: "Use $dataq to route to the right dataq command, verify output/exit-code contracts via contract/emit plan when supported, and use --emit-pipeline for deterministic diagnostics."
 
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

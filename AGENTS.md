@@ -1,4 +1,4 @@
-# AGENTS.md instructions for /Users/koizumikenjin/workspace/dataq
+# AGENTS.md instructions for /Users/koizumi/workspace/dataq
 
 ## Purpose
 
@@ -55,6 +55,8 @@ Core goals:
 ## Skill usage
 
 - Skill paths:
+  - `.agents/skills/dataq/`
+  - `.agents/skills/dataq-rules-recipes/`
   - `.agents/skills/feat-add/`
   - `.agents/skills/rev-pass/`
 - Invoke explicitly:
@@ -82,6 +84,17 @@ Core goals:
 - Prefer normal editing (without the skill) for tiny typo/docs-only changes.
 - Example prompt: `Use $feat-add as a sub-agent to add --strict mode to assert and update tests.`
 - Example prompt: `Use $rev-pass as a sub-agent to review this implementation; fix findings and re-run review until clean.`
+
+### Skill invocation matrix
+
+| Skill | Owned job | `allow_implicit_invocation` |
+| --- | --- | --- |
+| `$dataq` | Select, inspect, or run an existing dataq CLI or MCP workflow. | `true` |
+| `$dataq-rules-recipes` | Author or revise native assert rules and `dataq.recipe.v1` recipes. | `true` |
+| `$feat-add` | Implement exactly one dataq feature in an isolated branch and worktree. | `false` |
+| `$rev-pass` | Review one immutable, committed feature diff without editing it. | `false` |
+
+The matrix, skill frontmatter, metadata, and routing cases establish structural routing consistency only. They do not prove which skill a runtime model will select; treat runtime routing as unverified unless an actual routing harness is run.
 
 ## Rust baseline
 
