@@ -24,16 +24,16 @@ Require all of the following before inspecting the implementation:
 
 1. The feature specification and acceptance criteria, including intended behavior, non-goals, output shape, and exit-code behavior.
 2. The absolute feature worktree path, expected feature branch, and confirmation that the worktree is clean, including no untracked files.
-3. Immutable base and head commit SHAs that both resolve to committed objects, plus the exact committed diff range `<base>...<head>`. The worktree's current `HEAD` must equal the supplied head SHA.
+3. Immutable base and head commit SHAs that both resolve to committed objects, plus the exact committed diff range `<base>...<head>`. The supplied base must be an ancestor of head, `git merge-base <base> <head>` must equal the supplied base, and the worktree's current `HEAD` must equal the supplied head SHA.
 4. The authorized scope: expected changed paths and any explicitly excluded paths or known unrelated changes.
 5. Gate evidence tied to the supplied head SHA: exact command, exit status, and concise result for every required gate. An explicit `not run` is evidence, but a required unrun gate is a required finding.
 
-If any input is missing, ambiguous, internally inconsistent, or stale, stop before reviewing. A dirty worktree, non-commit endpoint, range other than the supplied committed `<base>...<head>`, or gate evidence for another SHA is invalid input. Return a concise list of the missing or invalid fields and request corrected inputs. Do not infer a range, expand scope, review only part of the diff, or emit a final verdict for a pass that did not run.
+If any input is missing, ambiguous, internally inconsistent, or stale, stop before reviewing. A dirty worktree, non-commit endpoint, non-ancestor base, merge base other than the supplied base, range other than the supplied committed `<base>...<head>`, or gate evidence for another SHA is invalid input. Return a concise list of the missing or invalid fields and request corrected inputs. Do not infer a range, expand scope, review only part of the diff, or emit a final verdict for a pass that did not run.
 
 ## Workflow
 
 1. Read the repository `AGENTS.md` files that govern the authorized scope.
-2. Verify the worktree root and current branch. Require empty porcelain status including untracked files, verify that base and head are commit objects, require current `HEAD` to equal head, and confirm that every gate result names that same head SHA. Stop as invalid input on any mismatch and emit no verdict.
+2. Verify the worktree root and current branch. Require empty porcelain status including untracked files, verify that base and head are commit objects, require current `HEAD` to equal head, and confirm that every gate result names that same head SHA. Run `git merge-base --is-ancestor <base> <head>` and require success, then require the output of `git merge-base <base> <head>` to equal the supplied base SHA. Stop as invalid input on any mismatch and emit no verdict.
 3. Inspect name-status for exactly the supplied committed `<base>...<head>` range. Stop on paths outside the authorized scope, an unexpected submodule or generated artifact, or reviewable commits omitted from the supplied range; report the mismatch as invalid input.
 4. Review only that immutable committed diff and the minimum surrounding code, tests, and documentation needed to validate it against the specification and repository rules. Do not edit files, run formatters in write mode, stage, commit, rebase, merge, or change branches.
 5. Apply the dataq checklist below. Treat a failed required gate or an explicitly unrun required gate as a required finding. This is one pass; do not fix findings or review a second time in the same invocation.
@@ -88,6 +88,7 @@ The final line of every completed pass must be exactly:
 - Remain read-only even when a fix is obvious; send required findings to the parent agent.
 - Never review `main`, an integration branch, or another feature lane as a substitute for the supplied feature worktree and range.
 - Never review staged, unstaged, or untracked changes; require them to be committed into the supplied range and the worktree to be clean.
+- Never review a three-dot range when the supplied base is not an ancestor of head or is not their merge base.
 - Never broaden scope to compensate for missing inputs, stale gate evidence, or unexpected changes.
 - Do not claim gates passed unless their supplied evidence is tied to the reviewed head SHA.
 - A parent may invoke this skill again after fixes, but the new invocation must provide a new head SHA, range, scope confirmation, and gate evidence.
