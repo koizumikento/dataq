@@ -4,4 +4,4 @@ interface:
   default_prompt: "Use $dataq-rules-recipes to author or refine a dataq assert rules file or dataq.recipe.v1 recipe, then verify it with the documented validation and replay loop."
 
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

@@ -1,3 +1,5 @@
+#[path = "integration/agent_skills_flow.rs"]
+mod agent_skills_flow;
 #[path = "integration/canon_assert_flow.rs"]
 mod canon_assert_flow;
 #[path = "integration/canon_flow.rs"]

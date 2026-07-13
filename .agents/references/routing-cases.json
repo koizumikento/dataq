@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "existing-command-selection",
+      "prompt": "Choose and run the existing dataq command that canonicalizes input.json with deterministic JSON output; do not change the CLI.",
+      "expect": ["dataq"],
+      "reject": ["dataq-rules-recipes", "feat-add", "rev-pass"],
+      "reason": "This is existing-command selection and execution, not rules authoring, implementation, or review."
+    },
+    {
+      "id": "native-rules-authoring",
+      "prompt": "Create a native dataq assert --rules file for required id and integer amount fields, then show the validation command.",
+      "expect": ["dataq-rules-recipes"],
+      "reject": ["dataq", "feat-add", "rev-pass"],
+      "reason": "The requested artifact is a native rules file, which is narrower than general command routing."
+    },
+    {
+      "id": "recipe-authoring-and-replay",
+      "prompt": "Author a dataq.recipe.v1 file with canon and assert steps, then verify it with recipe run, lock, and strict replay.",
+      "expect": ["dataq-rules-recipes"],
+      "reject": ["dataq", "feat-add", "rev-pass"],
+      "reason": "The requested artifact and verification loop are the recipe-authoring half of the rules and recipes skill."
+    },
+    {
+      "id": "single-feature-implementation",
+      "prompt": "Use $feat-add to implement one new --strict option, including tests and docs, in an isolated feature worktree.",
+      "expect": ["feat-add"],
+      "reject": ["dataq", "dataq-rules-recipes", "rev-pass"],
+      "reason": "This is one implementation feature and explicitly requires the feature workflow, not a read-only review."
+    },
+    {
+      "id": "immutable-diff-review",
+      "prompt": "Use $rev-pass for one read-only review of the committed BASE...HEAD feature diff and return the required-fixes verdict without editing files.",
+      "expect": ["rev-pass"],
+      "reject": ["dataq", "dataq-rules-recipes", "feat-add"],
+      "reason": "The task is a bounded review of an immutable diff, not implementation or dataq usage."
+    }
+  ]
+}
