@@ -358,6 +358,7 @@ Issue / Pull Request を歓迎します。開発ルールは `AGENTS.md` を参�
 - `--from` 省略時（stdin入力のみ）は固定順で自動判別: `JSONL -> JSON -> YAML -> CSV`
 - 非空行が1行のみで入力全体がJSONとして成立する場合は、曖昧さ回避のため `JSON` として扱う
 - 自動判別できない入力は `input_usage_error`（終了コード `3`）
+- CSVヘッダー名は完全一致・大文字小文字を区別して一意である必要があり、重複時は最初と重複側の0始まり列indexを含む `input_usage_error`（終了コード `3`）を返す
 - `--to jsonl` かつ JSONL入力ではレコード単位で逐次処理（入力順を保持）
 
 - キー順ソート

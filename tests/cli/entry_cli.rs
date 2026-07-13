@@ -80,6 +80,27 @@ fn canon_command_allows_disabling_key_sorting() {
 }
 
 #[test]
+fn canon_command_rejects_duplicate_csv_headers_without_partial_stdout() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .arg("canon")
+        .write_stdin("id,name,id\n1,A,shadowed\n2,B,discarded\n")
+        .output()
+        .expect("run canon command");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+
+    let error: Value = serde_json::from_slice(&output.stderr).expect("machine-readable stderr");
+    assert_eq!(error["error"], Value::from("input_usage_error"));
+    assert_eq!(error["code"], Value::from(3));
+    let message = error["message"].as_str().expect("error message");
+    assert!(message.contains("duplicate CSV header `id`"));
+    assert!(message.contains("first_index=0"));
+    assert!(message.contains("duplicate_index=2"));
+    assert!(message.contains("0-based column indices"));
+}
+
+#[test]
 fn assert_command_reports_validation_mismatch() {
     let dir = tempdir().expect("temp dir");
     let rules_path = dir.path().join("rules.json");
