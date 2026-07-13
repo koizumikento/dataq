@@ -1,7 +1,7 @@
 interface:
   display_name: "Review Pass"
-  short_description: "Single review pass sub-agent"
-  default_prompt: "Use $rev-pass as a sub-agent for one review pass and return severity-ordered findings with file and line references."
+  short_description: "Review one dataq feature diff without making changes"
+  default_prompt: "Use $rev-pass for one read-only pass. Require the feature spec, a clean absolute worktree on the expected branch, immutable committed base/head SHAs and BASE...HEAD range, authorized paths, and gate evidence tied to that HEAD; then return deterministic findings and end with REQUIRED_FIXES or NO_REQUIRED_FIXES."
 
 policy:
   allow_implicit_invocation: false
