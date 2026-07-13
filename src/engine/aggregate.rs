@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use num_bigint::BigInt;
 use serde_json::{Number, Value};
 use thiserror::Error;
 
@@ -219,31 +220,136 @@ fn metric_number(value: &Value, metric: AggregateMetric) -> Option<&Number> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum JsonInteger {
+    Signed(i64),
+    Unsigned(u64),
+}
+
 fn compare_numbers(left: &Number, right: &Number) -> Ordering {
-    if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
-        return left.cmp(&right);
+    match (json_integer(left), json_integer(right)) {
+        (Some(left), Some(right)) => compare_integers(left, right),
+        (Some(left), None) => compare_integer_to_number(left, right),
+        (None, Some(right)) => compare_integer_to_number(right, left).reverse(),
+        (None, None) => compare_non_integer_numbers(left, right),
     }
-    if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
-        return left.cmp(&right);
+}
+
+fn json_integer(number: &Number) -> Option<JsonInteger> {
+    number
+        .as_i64()
+        .map(JsonInteger::Signed)
+        .or_else(|| number.as_u64().map(JsonInteger::Unsigned))
+}
+
+fn compare_integers(left: JsonInteger, right: JsonInteger) -> Ordering {
+    match (left, right) {
+        (JsonInteger::Signed(left), JsonInteger::Signed(right)) => left.cmp(&right),
+        (JsonInteger::Unsigned(left), JsonInteger::Unsigned(right)) => left.cmp(&right),
+        (JsonInteger::Signed(left), JsonInteger::Unsigned(right)) => {
+            if left.is_negative() {
+                Ordering::Less
+            } else {
+                (left as u64).cmp(&right)
+            }
+        }
+        (JsonInteger::Unsigned(left), JsonInteger::Signed(right)) => {
+            if right.is_negative() {
+                Ordering::Greater
+            } else {
+                left.cmp(&(right as u64))
+            }
+        }
     }
-    if let (Some(left), Some(right)) = (left.as_i64(), right.as_u64()) {
-        return if left.is_negative() {
-            Ordering::Less
-        } else {
-            (left as u64).cmp(&right)
-        };
+}
+
+fn compare_integer_to_number(integer: JsonInteger, number: &Number) -> Ordering {
+    let Some(float) = number.as_f64() else {
+        return Ordering::Less;
+    };
+    compare_integer_to_float(integer, float)
+}
+
+fn compare_integer_to_float(integer: JsonInteger, float: f64) -> Ordering {
+    if float.is_nan() || float == f64::INFINITY {
+        return Ordering::Less;
     }
-    if let (Some(left), Some(right)) = (left.as_u64(), right.as_i64()) {
-        return if right.is_negative() {
-            Ordering::Greater
-        } else {
-            left.cmp(&(right as u64))
-        };
+    if float == f64::NEG_INFINITY {
+        return Ordering::Greater;
     }
 
+    let integer = match integer {
+        JsonInteger::Signed(value) => BigInt::from(value),
+        JsonInteger::Unsigned(value) => BigInt::from(value),
+    };
+    let (float_numerator, float_denominator) = finite_f64_rational(float);
+    (integer * float_denominator).cmp(&float_numerator)
+}
+
+fn finite_f64_rational(value: f64) -> (BigInt, BigInt) {
+    if value == 0.0 {
+        return (BigInt::from(0_u8), BigInt::from(1_u8));
+    }
+
+    let bits = value.to_bits();
+    let negative = (bits >> 63) == 1;
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let fraction_bits = bits & ((1_u64 << 52) - 1);
+    let (mantissa, exponent) = if exponent_bits == 0 {
+        (fraction_bits, 1 - 1023 - 52)
+    } else {
+        (fraction_bits | (1_u64 << 52), exponent_bits - 1023 - 52)
+    };
+
+    let mut numerator = BigInt::from(mantissa);
+    let mut denominator = BigInt::from(1_u8);
+    if exponent >= 0 {
+        numerator <<= exponent as usize;
+    } else {
+        denominator <<= (-exponent) as usize;
+    }
+    if negative {
+        numerator = -numerator;
+    }
+    (numerator, denominator)
+}
+
+fn compare_non_integer_numbers(left: &Number, right: &Number) -> Ordering {
     match (left.as_f64(), right.as_f64()) {
-        (Some(left), Some(right)) => left.total_cmp(&right),
-        _ => left.to_string().cmp(&right.to_string()),
+        (Some(left), Some(right)) => compare_floats(left, right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => left.to_string().cmp(&right.to_string()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FloatClass {
+    NegativeInfinity,
+    Finite,
+    PositiveInfinity,
+    Nan,
+}
+
+fn compare_floats(left: f64, right: f64) -> Ordering {
+    let left_class = float_class(left);
+    let right_class = float_class(right);
+    left_class.cmp(&right_class).then_with(|| match left_class {
+        FloatClass::Finite => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+        FloatClass::Nan => left.to_bits().cmp(&right.to_bits()),
+        FloatClass::NegativeInfinity | FloatClass::PositiveInfinity => Ordering::Equal,
+    })
+}
+
+fn float_class(value: f64) -> FloatClass {
+    if value.is_nan() {
+        FloatClass::Nan
+    } else if value == f64::NEG_INFINITY {
+        FloatClass::NegativeInfinity
+    } else if value == f64::INFINITY {
+        FloatClass::PositiveInfinity
+    } else {
+        FloatClass::Finite
     }
 }
 
@@ -423,6 +529,141 @@ mod tests {
             std::cmp::Ordering::Greater
         );
         assert_eq!(compare_numbers(&fraction, &two), std::cmp::Ordering::Less);
+
+        let minus_two = serde_json::Number::from(-2);
+        let minus_one = serde_json::Number::from(-1);
+        let negative_fraction = serde_json::Number::from_f64(-1.5).expect("finite number");
+        assert_eq!(
+            compare_numbers(&minus_two, &negative_fraction),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_numbers(&negative_fraction, &minus_one),
+            std::cmp::Ordering::Less
+        );
+
+        let zero = serde_json::Number::from(0);
+        let positive_zero = serde_json::Number::from_f64(0.0).expect("finite number");
+        let negative_zero = serde_json::Number::from_f64(-0.0).expect("finite number");
+        assert_eq!(
+            compare_numbers(&zero, &positive_zero),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_numbers(&zero, &negative_zero),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_numbers(&positive_zero, &negative_zero),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn mixed_integer_float_comparison_is_transitive_at_f64_boundary() {
+        let boundary_integer = serde_json::Number::from(9_007_199_254_740_992_u64);
+        let boundary_float =
+            serde_json::Number::from_f64(9_007_199_254_740_992.0).expect("finite number");
+        let next_integer = serde_json::Number::from(9_007_199_254_740_993_u64);
+
+        assert_eq!(
+            compare_numbers(&boundary_integer, &boundary_float),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_numbers(&boundary_float, &next_integer),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_numbers(&boundary_integer, &next_integer),
+            std::cmp::Ordering::Less
+        );
+
+        let minimum = serde_json::Number::from(i64::MIN);
+        let minimum_float = serde_json::Number::from_f64(i64::MIN as f64).expect("finite number");
+        let maximum = serde_json::Number::from(i64::MAX);
+        let maximum_float = serde_json::Number::from_f64(i64::MAX as f64).expect("finite number");
+        let unsigned_maximum = serde_json::Number::from(u64::MAX);
+        let unsigned_maximum_float =
+            serde_json::Number::from_f64(u64::MAX as f64).expect("finite number");
+
+        assert_eq!(
+            compare_numbers(&minimum, &minimum_float),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_numbers(&maximum, &maximum_float),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_numbers(&unsigned_maximum, &unsigned_maximum_float),
+            std::cmp::Ordering::Less
+        );
+        assert!(serde_json::Number::from_f64(f64::NAN).is_none());
+        assert!(serde_json::Number::from_f64(f64::INFINITY).is_none());
+    }
+
+    #[test]
+    fn metric_sort_orders_mixed_integer_float_values_above_f64_boundary() {
+        let rows = vec![
+            json!({"team": "b-boundary-int", "sum": 9_007_199_254_740_992_u64}),
+            json!({"team": "a-boundary-float", "sum": 9_007_199_254_740_992.0_f64}),
+            json!({"team": "c-next-int", "sum": 9_007_199_254_740_993_u64}),
+            json!({"team": "d-upper-float", "sum": 9_007_199_254_740_994.0_f64}),
+        ];
+
+        assert_eq!(
+            deterministic_rows(
+                rows.clone(),
+                "team",
+                AggregateMetric::Sum,
+                AggregateOptions {
+                    sort_by: AggregateSortBy::Metric,
+                    order: AggregateOrder::Asc,
+                    limit: None,
+                },
+            ),
+            vec![
+                json!({"sum": 9_007_199_254_740_992.0_f64, "team": "a-boundary-float"}),
+                json!({"sum": 9_007_199_254_740_992_u64, "team": "b-boundary-int"}),
+                json!({"sum": 9_007_199_254_740_993_u64, "team": "c-next-int"}),
+                json!({"sum": 9_007_199_254_740_994.0_f64, "team": "d-upper-float"}),
+            ]
+        );
+        assert_eq!(
+            deterministic_rows(
+                rows.clone(),
+                "team",
+                AggregateMetric::Sum,
+                AggregateOptions {
+                    sort_by: AggregateSortBy::Metric,
+                    order: AggregateOrder::Desc,
+                    limit: None,
+                },
+            ),
+            vec![
+                json!({"sum": 9_007_199_254_740_994.0_f64, "team": "d-upper-float"}),
+                json!({"sum": 9_007_199_254_740_993_u64, "team": "c-next-int"}),
+                json!({"sum": 9_007_199_254_740_992.0_f64, "team": "a-boundary-float"}),
+                json!({"sum": 9_007_199_254_740_992_u64, "team": "b-boundary-int"}),
+            ]
+        );
+        assert_eq!(
+            deterministic_rows(
+                rows,
+                "team",
+                AggregateMetric::Sum,
+                AggregateOptions {
+                    sort_by: AggregateSortBy::Metric,
+                    order: AggregateOrder::Desc,
+                    limit: Some(2),
+                },
+            ),
+            vec![
+                json!({"sum": 9_007_199_254_740_994.0_f64, "team": "d-upper-float"}),
+                json!({"sum": 9_007_199_254_740_993_u64, "team": "c-next-int"}),
+            ]
+        );
     }
 
     #[test]
