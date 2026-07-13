@@ -201,6 +201,26 @@ fn contract_profile_command_mentions_projection_fields() {
                 note.contains("exact dataset `record_count`") && note.contains("signed counters")
             })
     );
+    assert!(
+        payload["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note
+                .as_str()
+                .unwrap_or_default()
+                .contains("Float counters can omit NaN"))
+    );
+    assert!(
+        payload["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note
+                .as_str()
+                .unwrap_or_default()
+                .contains("canonical nonnegative decimal integers"))
+    );
 }
 
 #[test]

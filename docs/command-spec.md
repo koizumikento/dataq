@@ -340,7 +340,8 @@ dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, SU
 - `--sort-fields path` は canonical path 昇順、`unique_count` は `unique_count` 降順、`null_ratio` は `null_ratio` 降順。同値時はいずれも path 昇順
 - `--max-fields <n>` は projection と sort の後に brief field 配列へ適用する。`0` も有効。brief output は常に `truncated` を含み、利用可能 field 数が返却 field 数より多い場合のみ `true`
 - `--from csv` は通常CSV行の集計に加えて、qsv adapter 出力CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` 等）を同一スキーマへ正規化可能
-- qsv stats CSV の `record_count` はデータセット全体で 1 件に固定する。決定優先順は (1) `record_count|records|rows|row_count|total_rows`、(2) 全セルが非空の `n_negative+n_zero+n_positive+nullcount`。符号別カウンタの空セルは利用不能、リテラル `0` は有効値として扱う
+- qsv stats CSV の `record_count` はデータセット全体で 1 件に固定する。決定優先順は (1) `record_count|records|rows|row_count|total_rows`、(2) `Integer` 行で全セルが非空の `n_negative+n_zero+n_positive+nullcount`。`Float` の符号別カウンタは `NaN` 等を網羅しないため件数候補にしない。空セルは利用不能、リテラル `0` は有効値として扱う
+- qsv の件数セルは非負の10進整数表記だけを受け付ける。小数、指数表記、負数、`usize` 範囲外は exit `3` の `input_usage_error`
 - qsv の `sparsity` は既定の桁数へ丸められ、元の件数を一意に復元できないため、`record_count` や `nullcount` の導出には使わない。正規化対象の各行は非空の `nullcount` または `null_count` を持つ必要がある
 - 正確な件数を決定できない非空 qsv stats CSV、正確な候補同士の矛盾、または `nullcount > record_count` は exit `3` の `input_usage_error`。空データセットは `type=NULL`, `cardinality=0`, `nullcount=0` が全列で揃う場合のみ 0 件と証明できる
 - projection は通常 profile と qsv adapter CSV 正規化後の profile の両方に適用

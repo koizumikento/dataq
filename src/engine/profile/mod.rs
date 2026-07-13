@@ -279,7 +279,7 @@ const QSV_RECORD_COUNT_ALIASES: &str =
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum QsvRecordCountPriority {
     Explicit,
-    SignedCounters,
+    IntegerSignedCounters,
     EmptyProof,
 }
 
@@ -315,6 +315,11 @@ fn derive_qsv_record_count(
         columns.n_positive.as_deref(),
     ) {
         for (index, row) in rows.iter().enumerate() {
+            if !row_cell(row, &columns.value_type)
+                .is_some_and(qsv_integer_signed_counters_are_exhaustive)
+            {
+                continue;
+            }
             let counters = [
                 parse_qsv_counter(row, null_column, index)?,
                 parse_qsv_counter(row, negative_column, index)?,
@@ -333,8 +338,10 @@ fn derive_qsv_record_count(
                 })?;
             candidates.push(QsvRecordCountCandidate {
                 value,
-                priority: QsvRecordCountPriority::SignedCounters,
-                source: format!("qsv profile row {index} signed counters plus `{null_column}`"),
+                priority: QsvRecordCountPriority::IntegerSignedCounters,
+                source: format!(
+                    "qsv profile row {index} Integer signed counters plus `{null_column}`"
+                ),
             });
         }
     }
@@ -350,7 +357,7 @@ fn derive_qsv_record_count(
     candidates.sort_by_key(|candidate| candidate.priority);
     let Some(selected) = candidates.first() else {
         return Err(format!(
-            "failed to derive an exact dataset `record_count` from qsv profile rows; include one of the accepted count aliases ({QSV_RECORD_COUNT_ALIASES}) or a row with complete nonblank signed counters; rounded `sparsity` cannot prove a record count"
+            "failed to derive an exact dataset `record_count` from qsv profile rows; include one of the accepted count aliases ({QSV_RECORD_COUNT_ALIASES}) or an Integer row with complete nonblank signed counters; Float signed counters and rounded `sparsity` cannot prove a record count"
         ));
     };
     if let Some(conflict) = candidates
@@ -374,6 +381,13 @@ fn parse_qsv_counter(
 ) -> Result<Option<usize>, String> {
     parse_optional_usize(row_cell(row, column))
         .map_err(|message| format!("qsv profile row {index} `{column}` {message}"))
+}
+
+fn qsv_integer_signed_counters_are_exhaustive(value_type: &str) -> bool {
+    matches!(
+        value_type.trim().to_ascii_lowercase().as_str(),
+        "int" | "integer"
+    )
 }
 
 fn derive_qsv_null_count(
@@ -459,19 +473,16 @@ fn parse_optional_usize(value: Option<&str>) -> Result<Option<usize>, String> {
     let Some(value) = value else {
         return Ok(None);
     };
-    if value.trim().is_empty() {
+    let value = value.trim();
+    if value.is_empty() {
         return Ok(None);
     }
 
-    if let Ok(parsed) = value.parse::<usize>() {
-        return Ok(Some(parsed));
-    }
-    if let Ok(parsed) = value.parse::<f64>() {
-        if parsed.is_finite() && parsed >= 0.0 && parsed <= usize::MAX as f64 {
-            let rounded = parsed.round();
-            if (parsed - rounded).abs() < f64::EPSILON {
-                return Ok(Some(rounded as usize));
-            }
+    let is_canonical = value == "0"
+        || (!value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit()));
+    if is_canonical {
+        if let Ok(parsed) = value.parse::<usize>() {
+            return Ok(Some(parsed));
         }
     }
 
@@ -807,7 +818,7 @@ fn append_object_key_path(path: &str, key: &str) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{normalize_qsv_profile_rows, profile_values};
+    use super::{normalize_qsv_profile_rows, parse_optional_usize, profile_values};
 
     #[test]
     fn profiles_flat_fields_with_deterministic_counts() {
@@ -1095,6 +1106,61 @@ mod tests {
     }
 
     #[test]
+    fn qsv_normalization_rejects_float_signed_counters_with_nan_gap() {
+        let values = vec![json!({
+            "field": "value",
+            "type": "Float",
+            "nullcount": "0",
+            "cardinality": "2",
+            "n_negative": "0",
+            "n_zero": "0",
+            "n_positive": "3",
+            "sparsity": "0"
+        })];
+
+        let error = normalize_qsv_profile_rows(&values).expect_err("ambiguous Float counters");
+
+        assert!(error.contains("exact dataset `record_count`"));
+        assert!(error.contains("Float signed counters"));
+    }
+
+    #[test]
+    fn qsv_normalization_uses_integer_count_for_float_field_with_nan() {
+        let values = vec![
+            json!({
+                "field": "id",
+                "type": "Integer",
+                "nullcount": "0",
+                "cardinality": "4",
+                "n_negative": "0",
+                "n_zero": "0",
+                "n_positive": "4",
+                "sparsity": "0"
+            }),
+            json!({
+                "field": "value",
+                "type": "Float",
+                "nullcount": "0",
+                "cardinality": "2",
+                "n_negative": "0",
+                "n_zero": "0",
+                "n_positive": "3",
+                "sparsity": "0"
+            }),
+        ];
+
+        let report = normalize_qsv_profile_rows(&values)
+            .expect("qsv normalization")
+            .expect("qsv profile rows");
+
+        assert_eq!(report.record_count, 4);
+        let value = report.fields.get("$[\"value\"]").expect("value field");
+        assert_eq!(value.type_distribution.number, 4);
+        assert_eq!(value.type_distribution.null, 0);
+        assert_eq!(value.null_ratio, 0.0);
+    }
+
+    #[test]
     fn qsv_normalization_ignores_rounded_sparsity_when_signed_counts_are_exact() {
         let values = vec![json!({
             "field": "value",
@@ -1254,6 +1320,47 @@ mod tests {
                 .number,
             0
         );
+    }
+
+    #[test]
+    fn qsv_counter_parser_accepts_only_exact_canonical_integers() {
+        assert_eq!(parse_optional_usize(None), Ok(None));
+        assert_eq!(parse_optional_usize(Some("")), Ok(None));
+        assert_eq!(parse_optional_usize(Some(" 42 ")), Ok(Some(42)));
+        assert_eq!(
+            parse_optional_usize(Some(&usize::MAX.to_string())),
+            Ok(Some(usize::MAX))
+        );
+
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            parse_optional_usize(Some("9007199254740993")),
+            Ok(Some(9_007_199_254_740_993))
+        );
+    }
+
+    #[test]
+    fn qsv_counter_parser_rejects_fraction_precision_loss_and_overflow() {
+        let overflow = (usize::MAX as u128 + 1).to_string();
+        for invalid in [
+            "-1",
+            "+1",
+            "01",
+            "1.5",
+            "1.0",
+            "1e3",
+            "9007199254740993.0",
+            overflow.as_str(),
+        ] {
+            let error = parse_optional_usize(Some(invalid)).expect_err("invalid counter");
+            assert!(
+                error.contains("invalid integer value"),
+                "{invalid}: {error}"
+            );
+        }
+
+        #[cfg(target_pointer_width = "64")]
+        assert!(parse_optional_usize(Some("18446744073709551616")).is_err());
     }
 
     #[test]

@@ -5,6 +5,10 @@ const QSV_20_1_EVERYTHING_MIXED: &str =
     include_str!("../fixtures/input/profile_qsv_20_1_everything_mixed.csv");
 const QSV_20_1_EVERYTHING_ALL_STRING: &str =
     include_str!("../fixtures/input/profile_qsv_20_1_everything_all_string.csv");
+const QSV_20_1_EVERYTHING_NAN_SINGLE: &str =
+    include_str!("../fixtures/input/profile_qsv_20_1_everything_nan_single.csv");
+const QSV_20_1_EVERYTHING_NAN_MIXED: &str =
+    include_str!("../fixtures/input/profile_qsv_20_1_everything_nan_mixed.csv");
 
 #[test]
 fn profile_command_returns_expected_json_for_json_input() {
@@ -261,6 +265,42 @@ fn profile_command_rejects_ambiguous_real_qsv_20_1_all_string_rows() {
         .stderr(predicate::str::contains(
             "`record_count`, `records`, `rows`, `row_count`, or `total_rows`",
         ));
+}
+
+#[test]
+fn profile_command_rejects_real_qsv_float_nan_signed_only_count() {
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "csv"])
+        .write_stdin(QSV_20_1_EVERYTHING_NAN_SINGLE)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""))
+        .stderr(predicate::str::contains("Float signed counters"));
+}
+
+#[test]
+fn profile_command_uses_integer_count_for_real_qsv_float_nan_field() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "csv"])
+        .write_stdin(QSV_20_1_EVERYTHING_NAN_MIXED)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["record_count"], json!(4));
+    assert_eq!(actual["field_count"], json!(2));
+    assert_eq!(
+        actual["fields"]["$[\"value\"]"]["type_distribution"]["number"],
+        json!(4)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"value\"]"]["type_distribution"]["null"],
+        json!(0)
+    );
+    assert_eq!(actual["fields"]["$[\"value\"]"]["null_ratio"], json!(0.0));
 }
 
 #[test]
