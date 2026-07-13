@@ -1,9 +1,10 @@
 use std::io::Cursor;
 
-use dataq::io::Format;
+use dataq::io::format::csv::looks_like_csv;
 use dataq::io::format::jsonl::write_jsonl_value;
 use dataq::io::reader::{read_jsonl_stream, read_values};
 use dataq::io::writer::write_values;
+use dataq::io::{Format, IoError};
 use serde_json::json;
 
 #[test]
@@ -44,6 +45,40 @@ fn csv_roundtrip_for_object_rows() {
     write_values(&mut out, Format::Csv, &values).expect("write csv");
     let read_back = read_values(Cursor::new(out), Format::Csv).expect("read csv");
     assert_eq!(read_back, values);
+}
+
+#[test]
+fn header_only_csv_reports_first_duplicate_with_zero_based_indices() {
+    let error = read_values(Cursor::new(b"a,b,b,a\n"), Format::Csv)
+        .expect_err("duplicate header-only CSV should fail");
+
+    match error {
+        IoError::DuplicateCsvHeader {
+            name,
+            first_index,
+            duplicate_index,
+        } => {
+            assert_eq!(name, "b");
+            assert_eq!(first_index, 1);
+            assert_eq!(duplicate_index, 2);
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn csv_header_comparison_is_case_sensitive() {
+    let rows = read_values(Cursor::new(b"id,ID\n1,2\n"), Format::Csv)
+        .expect("case-distinct CSV headers should be accepted");
+
+    assert_eq!(rows, vec![json!({"id": "1", "ID": "2"})]);
+}
+
+#[test]
+fn csv_autodetect_shape_check_accepts_duplicate_headers() {
+    let input = b"id,name,id\n1,A,shadowed\n";
+
+    assert!(looks_like_csv(input));
 }
 
 #[test]

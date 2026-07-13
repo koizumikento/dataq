@@ -519,6 +519,7 @@ dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, SU
   - `JSONL -> JSON -> YAML -> CSV`
 - 非空行が1行のみで入力全体がJSONとして成立する場合は `JSON` を優先（JSON/JSONLの曖昧さ回避）
 - 自動判別失敗は `input_usage_error` で終了コード `3`
+- CSVヘッダー名は完全一致・大文字小文字を区別して一意でなければならない。重複は行変換前に拒否し、最初と重複側の0始まり列indexをエラーメッセージに含めた `input_usage_error`（終了コード `3`）とする
 
 ### 終了コード
 
