@@ -593,6 +593,9 @@ mdBook ルートを解析し、`SUMMARY.md` と book メタデータを決定的
 - `--sort-fields` は brief の field 配列を制御する。`path` は canonical path 昇順、`unique_count` は降順、`null_ratio` は降順で、同値時はいずれも path 昇順
 - `--max-fields <n>` は projection と sort の後に brief field を切り詰める。`0` も有効で、返した field 数が利用可能 field 数より少ない場合は `truncated: true`
 - `--from csv` では通常CSV行の集計に加えて、qsv adapter の profile/stats CSV（`field`, `type`, `cardinality`, `nullcount`, `record_count` など）も受け取り、同一スキーマへ正規化
+- qsv stats CSV のデータセット件数は、明示的な `record_count|records|rows|row_count|total_rows`、または全セルが非空の `n_negative+n_zero+n_positive+nullcount` から決定し、全フィールドで同じ件数を使う。符号別カウンタの空セルは利用不能、リテラル `0` は有効値として扱い、文字列列を 0 件とはみなさない
+- qsv の `sparsity` は既定で丸められるため、件数や欠損件数の導出には使わない。正規化する各行には非空の `nullcount` または `null_count` が必要
+- 正確な件数を決定できない qsv stats CSV（例: 非空の文字列列のみで null がない出力）、候補同士の矛盾、または `nullcount > record_count` は exit `3` の `input_usage_error` とする
 - qsv adapter CSV 正規化パスが使われた場合、`--emit-pipeline` の `stage_diagnostics` に `profile_qsv_normalize` を出力し、`external_tools` に `qsv` を `used=true` で記録
 
 `numeric_stats` の決定性ルール:

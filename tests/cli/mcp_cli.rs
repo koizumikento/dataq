@@ -927,12 +927,8 @@ fn profile_tool_missing_projected_field_is_input_usage_error_by_default() {
 
 #[test]
 fn profile_emit_pipeline_marks_qsv_used_for_qsv_csv_input() {
-    let dir = tempdir().expect("tempdir");
-    let input_path = dir.path().join("qsv-profile.csv");
-    let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
-id,Integer,1,3,4,1,4,2.333333,2,4\n\
-flag,String,2,2,4,,,,,\n";
-    fs::write(&input_path, qsv_rows).expect("write qsv csv");
+    let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/input/profile_qsv_20_1_everything_mixed.csv");
 
     let request = tool_call_request(
         31,
@@ -940,7 +936,9 @@ flag,String,2,2,4,,,,,\n";
         json!({
             "emit_pipeline": true,
             "from": "csv",
-            "input_path": input_path
+            "input_path": input_path,
+            "field": "name",
+            "brief": true
         }),
     );
 
@@ -952,6 +950,14 @@ flag,String,2,2,4,,,,,\n";
         response["result"]["structuredContent"]["exit_code"],
         Value::from(0)
     );
+    let payload = &response["result"]["structuredContent"]["payload"];
+    assert_eq!(payload["record_count"], Value::from(4));
+    assert_eq!(payload["field_count"], Value::from(4));
+    assert_eq!(payload["fields"].as_array().expect("fields").len(), 1);
+    assert_eq!(payload["fields"][0]["path"], Value::from("$[\"name\"]"));
+    assert_eq!(payload["fields"][0]["null_ratio"], Value::from(0.25));
+    assert_eq!(payload["fields"][0]["dominant_type"], Value::from("string"));
+    assert_eq!(payload["fields"][0]["numeric"], Value::Null);
 
     let tools = response["result"]["structuredContent"]["pipeline"]["external_tools"]
         .as_array()
@@ -969,6 +975,48 @@ flag,String,2,2,4,,,,,\n";
         .expect("qsv stage");
     assert_eq!(stage["step"], Value::from("profile_qsv_normalize"));
     assert_eq!(stage["tool"], Value::from("qsv"));
+}
+
+#[test]
+fn profile_tool_reports_ambiguous_real_qsv_rows_as_structured_exit_three() {
+    let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/input/profile_qsv_20_1_everything_all_string.csv");
+    let request = tool_call_request(
+        305,
+        "dataq.profile",
+        json!({
+            "emit_pipeline": true,
+            "from": "csv",
+            "input_path": input_path
+        }),
+    );
+
+    let output = run_mcp(&request, None);
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"]["error"],
+        Value::from("input_usage_error")
+    );
+    assert!(
+        response["result"]["structuredContent"]["payload"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("`record_count`, `records`, `rows`, `row_count`, or `total_rows`")
+    );
+    let stage = response["result"]["structuredContent"]["pipeline"]["stage_diagnostics"]
+        .as_array()
+        .expect("stage diagnostics")
+        .first()
+        .expect("qsv stage");
+    assert_eq!(stage["step"], Value::from("profile_qsv_normalize"));
+    assert_eq!(stage["status"], Value::from("error"));
 }
 
 #[test]

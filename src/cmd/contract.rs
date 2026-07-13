@@ -185,6 +185,7 @@ const PROFILE_NOTES: &[&str] = &[
     "`returned_field_count` is emitted only when projection is requested.",
     "`missing_fields` is emitted when `--allow-missing-fields` is used.",
     "`--from csv` can normalize qsv adapter profile/stats CSV rows into the same output schema.",
+    "qsv normalization requires one exact dataset `record_count` from `record_count|records|rows|row_count|total_rows`, complete signed counters, or provably empty metadata; rounded sparsity is never used to derive counts, and every row requires nonblank nullcount.",
     "`--brief` emits compact LLM-oriented fields with `path`, `null_ratio`, `unique_count`, `dominant_type`, and nullable `numeric`.",
     "`--max-fields` caps brief fields after projection and sorting; brief output always includes `truncated`.",
     "`--sort-fields` accepts `path`, `unique_count`, or `null_ratio` for brief field ordering.",

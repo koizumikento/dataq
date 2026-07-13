@@ -191,6 +191,16 @@ fn contract_profile_command_mentions_projection_fields() {
                 .unwrap_or_default()
                 .contains("large JSON numbers"))
     );
+    assert!(
+        payload["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| {
+                let note = note.as_str().unwrap_or_default();
+                note.contains("exact dataset `record_count`") && note.contains("signed counters")
+            })
+    );
 }
 
 #[test]

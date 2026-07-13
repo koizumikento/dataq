@@ -1,6 +1,11 @@
 use predicates::prelude::predicate;
 use serde_json::json;
 
+const QSV_20_1_EVERYTHING_MIXED: &str =
+    include_str!("../fixtures/input/profile_qsv_20_1_everything_mixed.csv");
+const QSV_20_1_EVERYTHING_ALL_STRING: &str =
+    include_str!("../fixtures/input/profile_qsv_20_1_everything_all_string.csv");
+
 #[test]
 fn profile_command_returns_expected_json_for_json_input() {
     let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
@@ -203,6 +208,62 @@ flag,String,2,2,4,,,,,\n";
 }
 
 #[test]
+fn profile_command_normalizes_real_qsv_20_1_mixed_rows() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "csv"])
+        .write_stdin(QSV_20_1_EVERYTHING_MIXED)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["record_count"], json!(4));
+    assert_eq!(actual["field_count"], json!(4));
+    assert_eq!(actual["fields"]["$[\"name\"]"]["null_ratio"], json!(0.25));
+    assert_eq!(
+        actual["fields"]["$[\"name\"]"]["type_distribution"]["string"],
+        json!(3)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"name\"]"]["type_distribution"]["null"],
+        json!(1)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"id\"]"]["numeric_stats"]["count"],
+        json!(4)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"score\"]"]["numeric_stats"]["count"],
+        json!(3)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"status\"]"]["type_distribution"]["string"],
+        json!(4)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"status\"]"]["type_distribution"]["null"],
+        json!(0)
+    );
+    assert_eq!(actual["fields"]["$[\"status\"]"]["null_ratio"], json!(0.0));
+}
+
+#[test]
+fn profile_command_rejects_ambiguous_real_qsv_20_1_all_string_rows() {
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "csv"])
+        .write_stdin(QSV_20_1_EVERYTHING_ALL_STRING)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""))
+        .stderr(predicate::str::contains("exact dataset `record_count`"))
+        .stderr(predicate::str::contains(
+            "`record_count`, `records`, `rows`, `row_count`, or `total_rows`",
+        ));
+}
+
+#[test]
 fn profile_command_projects_requested_fields_in_canonical_order() {
     let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args([
@@ -339,6 +400,27 @@ flag,String,2,2,4,,,,,\n";
     assert_eq!(actual["returned_field_count"], json!(1));
     assert_eq!(actual["fields"]["$[\"flag\"]"]["null_ratio"], json!(0.5));
     assert!(actual["fields"].get("$[\"id\"]").is_none());
+}
+
+#[test]
+fn profile_command_preserves_projection_and_brief_for_real_qsv_rows() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "csv", "--field", "name", "--brief"])
+        .write_stdin(QSV_20_1_EVERYTHING_MIXED)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["record_count"], json!(4));
+    assert_eq!(actual["field_count"], json!(4));
+    assert_eq!(actual["fields"].as_array().expect("fields array").len(), 1);
+    assert_eq!(actual["fields"][0]["path"], json!("$[\"name\"]"));
+    assert_eq!(actual["fields"][0]["null_ratio"], json!(0.25));
+    assert_eq!(actual["fields"][0]["dominant_type"], json!("string"));
+    assert_eq!(actual["fields"][0]["numeric"], json!(null));
 }
 
 #[test]
@@ -508,13 +590,9 @@ fn profile_command_brief_applies_projection_before_sort_and_preserves_missing_me
 
 #[test]
 fn profile_command_emit_pipeline_reports_qsv_stage_diagnostics() {
-    let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
-id,Integer,1,3,4,1,4,2.333333,2,4\n\
-flag,String,2,2,4,,,,,\n";
-
     let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["profile", "--emit-pipeline", "--from", "csv"])
-        .write_stdin(qsv_rows)
+        .write_stdin(QSV_20_1_EVERYTHING_MIXED)
         .output()
         .expect("run profile");
 
