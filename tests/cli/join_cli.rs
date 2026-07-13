@@ -272,6 +272,46 @@ fn aggregate_command_preserves_large_integer_sum_and_top_k_order() {
 }
 
 #[test]
+fn aggregate_command_rejects_out_of_range_raw_integer_without_partial_output() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"first","price":1},{"team":"overflow-number","price":1}]"#,
+    )
+    .expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "sum",
+            "--target",
+            "price",
+        ])
+        .output()
+        .expect("run aggregate command");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        output.stdout.is_empty(),
+        "must not emit partial aggregate rows"
+    );
+    let error = parse_last_stderr_json(&output.stderr);
+    assert_eq!(error["error"], Value::from("input_usage_error"));
+    let message = error["message"].as_str().expect("error message");
+    assert!(message.contains("18446744073709551617"));
+    assert!(message.contains("outside the supported JSON integer range"));
+}
+
+#[test]
 fn aggregate_command_group_desc_reverses_group_order() {
     let dir = tempdir().expect("tempdir");
     let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
@@ -691,6 +731,10 @@ if [ "$mode" = "stats1" ]; then
     exit 0
   fi
   if [ "$action" = "sum" ]; then
+    if printf '%s' "$stdin_payload" | grep -q '"team":"overflow-number"'; then
+      printf '[{"team":"first","price_sum":1},{"team":"overflow-number","price_sum":18446744073709551617}]'
+      exit 0
+    fi
     if printf '%s' "$stdin_payload" | grep -q '"price":9007199254740991' &&
        printf '%s' "$stdin_payload" | grep -q '"team":"z","price":2'; then
       printf '[{"team":"a","price_sum":"9007199254740992"},{"team":"z","price_sum":"9007199254740993"}]'

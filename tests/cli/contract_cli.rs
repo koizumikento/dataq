@@ -209,6 +209,10 @@ fn contract_aggregate_command_mentions_exact_integer_sum_and_sort() {
         let note = note.as_str().unwrap_or_default();
         note.contains("i64/u64") && note.contains("without f64 precision loss")
     }));
+    assert!(notes.iter().any(|note| {
+        let note = note.as_str().unwrap_or_default();
+        note.contains("input/representation errors") && note.contains("rounded to f64")
+    }));
 }
 
 #[test]

@@ -537,6 +537,40 @@ fn aggregate_tool_preserves_large_integer_sum_and_top_k_order() {
 }
 
 #[test]
+fn aggregate_tool_rejects_out_of_range_integer_string_without_partial_output() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        245,
+        "dataq.aggregate",
+        json!({
+            "input": [
+                {"team":"first","price":1},
+                {"team":"overflow-string","price":1}
+            ],
+            "group_by": "team",
+            "metric": "sum",
+            "target": "price"
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(true));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(3)
+    );
+    let payload = &response["result"]["structuredContent"]["payload"];
+    assert_eq!(payload["error"], Value::from("input_usage_error"));
+    assert!(payload.as_array().is_none(), "must not return partial rows");
+    let message = payload["message"].as_str().expect("error message");
+    assert!(message.contains("18446744073709551617"));
+    assert!(message.contains("outside the supported JSON integer range"));
+}
+
+#[test]
 fn aggregate_tool_rejects_invalid_sort_order_and_limit_values() {
     let invalid_cases = [
         (
@@ -1828,6 +1862,10 @@ if [ "$mode" = "stats1" ]; then
     exit 0
   fi
   if [ "$action" = "sum" ]; then
+    if printf '%s' "$stdin_payload" | grep -q '"team":"overflow-string"'; then
+      printf '[{"team":"first","price_sum":"1"},{"team":"overflow-string","price_sum":"18446744073709551617"}]'
+      exit 0
+    fi
     if printf '%s' "$stdin_payload" | grep -q '"price":9007199254740991' &&
        printf '%s' "$stdin_payload" | grep -q '"team":"z","price":2'; then
       printf '[{"team":"a","price_sum":"9007199254740992"},{"team":"z","price_sum":"9007199254740993"}]'

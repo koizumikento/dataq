@@ -266,6 +266,7 @@ dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, SU
   - metric sort の同点は group キー literal 昇順、さらに同点なら canonical row literal 昇順で決定する
 - 異常時契約:
   - 入力不正または集計実行失敗は exit `3`
+  - 構文上整数の `sum` が JSON の `i64` / `u64` 範囲外の場合は、`f64` へ丸めず representation error として exit `3`（小数・指数表記は有限な `f64` として受理）
 - 実行方式:
   - `mlr` を明示的引数配列で実行（シェル展開なし）
   - `--emit-pipeline` で `stage_diagnostics` に `aggregate_mlr_execute` を出力（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）
