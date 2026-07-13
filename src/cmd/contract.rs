@@ -400,6 +400,7 @@ fn command_contract(command: ContractCommand) -> CommandContract<'static> {
                 "Output is a JSON array of grouped aggregate rows.",
                 "Row fields depend on `--group-by`, `--metric`, and `--target`.",
                 "`--sort-by metric --order desc --limit <n>` returns top-k groups by aggregate metric.",
+                "`sum` preserves exact integral `mlr` results in the JSON i64/u64 range, and metric sorting compares those integers without f64 precision loss.",
                 "`mlr` performs the aggregate stage with explicit argument-array invocation.",
             ],
         },

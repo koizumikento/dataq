@@ -251,7 +251,7 @@ dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, SU
 - 出力: JSON 配列（stdout）
 - 出力フィールド:
   - `--metric count` のとき集計列は `count`
-  - `--metric sum` のとき集計列は `sum`
+  - `--metric sum` のとき集計列は `sum`。`mlr` が正確な整数を返した場合は JSON の `i64` / `u64` 範囲で整数精度を保持し、小数は浮動小数として返す
   - `--metric avg` のとき集計列は `avg`
 - 入力要件:
   - 各レコードは object
@@ -262,6 +262,7 @@ dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, SU
   - `--order <asc|desc>` の既定値は `asc`
   - `--limit <n>` は任意で、`0` は `[]`
   - `--sort-by metric --order desc --limit 10` は集計metric上位10件を返す
+  - 整数metricは `f64` に変換せず比較し、`2^53` を超える整数でも正確に順位付けする。整数と小数の混在時も決定的に比較する
   - metric sort の同点は group キー literal 昇順、さらに同点なら canonical row literal 昇順で決定する
 - 異常時契約:
   - 入力不正または集計実行失敗は exit `3`

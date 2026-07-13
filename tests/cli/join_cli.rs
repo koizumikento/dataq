@@ -228,6 +228,50 @@ fn aggregate_command_sorts_by_metric_desc_and_limits_top_k() {
 }
 
 #[test]
+fn aggregate_command_preserves_large_integer_sum_and_top_k_order() {
+    let dir = tempdir().expect("tempdir");
+    let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
+
+    let input = dir.path().join("input.json");
+    fs::write(
+        &input,
+        r#"[{"team":"a","price":9007199254740991},{"team":"a","price":1},{"team":"z","price":9007199254740991},{"team":"z","price":2}]"#,
+    )
+    .expect("write input");
+
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .env("DATAQ_MLR_BIN", &mlr_bin)
+        .args([
+            "aggregate",
+            "--input",
+            input.to_str().expect("utf8 input path"),
+            "--group-by",
+            "team",
+            "--metric",
+            "sum",
+            "--target",
+            "price",
+            "--sort-by",
+            "metric",
+            "--order",
+            "desc",
+            "--limit",
+            "1",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let output_json: Value = serde_json::from_slice(&output).expect("parse output");
+    assert_eq!(
+        output_json,
+        json!([{"sum": 9_007_199_254_740_993_u64, "team": "z"}])
+    );
+}
+
+#[test]
 fn aggregate_command_group_desc_reverses_group_order() {
     let dir = tempdir().expect("tempdir");
     let mlr_bin = write_fake_mlr_script(dir.path().join("fake-mlr"));
@@ -647,6 +691,11 @@ if [ "$mode" = "stats1" ]; then
     exit 0
   fi
   if [ "$action" = "sum" ]; then
+    if printf '%s' "$stdin_payload" | grep -q '"price":9007199254740991' &&
+       printf '%s' "$stdin_payload" | grep -q '"team":"z","price":2'; then
+      printf '[{"team":"a","price_sum":"9007199254740992"},{"team":"z","price_sum":"9007199254740993"}]'
+      exit 0
+    fi
     if printf '%s' "$stdin_payload" | grep -q '"team":"c"'; then
       printf '[{"team":"c","price_sum":"15.0"},{"team":"a","price_sum":"15.0"},{"team":"b","price_sum":"7.0"}]'
       exit 0

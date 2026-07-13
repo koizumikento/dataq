@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use serde_json::Value;
+use serde_json::{Number, Value};
 use thiserror::Error;
 
 use crate::adapters::mlr;
@@ -178,12 +178,9 @@ fn compare_rows_by_metric(
     metric: AggregateMetric,
     order: AggregateOrder,
 ) -> Ordering {
-    compare_with_order(
-        metric_value(left, metric).total_cmp(&metric_value(right, metric)),
-        order,
-    )
-    .then_with(|| key_field_literal(left, key_field).cmp(&key_field_literal(right, key_field)))
-    .then_with(|| canonical_row_literal(left).cmp(&canonical_row_literal(right)))
+    compare_with_order(compare_metric_values(left, right, metric), order)
+        .then_with(|| key_field_literal(left, key_field).cmp(&key_field_literal(right, key_field)))
+        .then_with(|| canonical_row_literal(left).cmp(&canonical_row_literal(right)))
 }
 
 fn compare_with_order(ordering: Ordering, order: AggregateOrder) -> Ordering {
@@ -203,13 +200,50 @@ fn key_field_literal(value: &Value, key_field: &str) -> String {
     }
 }
 
-fn metric_value(value: &Value, metric: AggregateMetric) -> f64 {
+fn compare_metric_values(left: &Value, right: &Value, metric: AggregateMetric) -> Ordering {
+    let left = metric_number(left, metric);
+    let right = metric_number(right, metric);
+
+    match (left, right) {
+        (Some(left), Some(right)) => compare_numbers(left, right),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn metric_number(value: &Value, metric: AggregateMetric) -> Option<&Number> {
     match value {
-        Value::Object(map) => map
-            .get(metric.as_str())
-            .and_then(Value::as_f64)
-            .unwrap_or(f64::NAN),
-        _ => f64::NAN,
+        Value::Object(map) => map.get(metric.as_str()).and_then(Value::as_number),
+        _ => None,
+    }
+}
+
+fn compare_numbers(left: &Number, right: &Number) -> Ordering {
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+        return left.cmp(&right);
+    }
+    if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
+        return left.cmp(&right);
+    }
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_u64()) {
+        return if left.is_negative() {
+            Ordering::Less
+        } else {
+            (left as u64).cmp(&right)
+        };
+    }
+    if let (Some(left), Some(right)) = (left.as_u64(), right.as_i64()) {
+        return if right.is_negative() {
+            Ordering::Greater
+        } else {
+            left.cmp(&(right as u64))
+        };
+    }
+
+    match (left.as_f64(), right.as_f64()) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        _ => left.to_string().cmp(&right.to_string()),
     }
 }
 
@@ -227,7 +261,7 @@ mod tests {
 
     use super::{
         AggregateError, AggregateMetric, AggregateOptions, AggregateOrder, AggregateSortBy,
-        aggregate_values, deterministic_rows,
+        aggregate_values, compare_numbers, deterministic_rows,
     };
 
     #[test]
@@ -314,6 +348,81 @@ mod tests {
                 json!({"sum": 15.0, "team": "c"})
             ]
         );
+    }
+
+    #[test]
+    fn metric_sort_orders_adjacent_large_integer_sums_exactly() {
+        let rows = vec![
+            json!({"team": "middle", "sum": 9_007_199_254_740_992_u64}),
+            json!({"team": "highest", "sum": 9_007_199_254_740_993_u64}),
+            json!({"team": "lowest", "sum": 9_007_199_254_740_991_u64}),
+        ];
+
+        assert_eq!(
+            deterministic_rows(
+                rows.clone(),
+                "team",
+                AggregateMetric::Sum,
+                AggregateOptions {
+                    sort_by: AggregateSortBy::Metric,
+                    order: AggregateOrder::Asc,
+                    limit: None,
+                },
+            ),
+            vec![
+                json!({"sum": 9_007_199_254_740_991_u64, "team": "lowest"}),
+                json!({"sum": 9_007_199_254_740_992_u64, "team": "middle"}),
+                json!({"sum": 9_007_199_254_740_993_u64, "team": "highest"}),
+            ]
+        );
+        assert_eq!(
+            deterministic_rows(
+                rows.clone(),
+                "team",
+                AggregateMetric::Sum,
+                AggregateOptions {
+                    sort_by: AggregateSortBy::Metric,
+                    order: AggregateOrder::Desc,
+                    limit: None,
+                },
+            ),
+            vec![
+                json!({"sum": 9_007_199_254_740_993_u64, "team": "highest"}),
+                json!({"sum": 9_007_199_254_740_992_u64, "team": "middle"}),
+                json!({"sum": 9_007_199_254_740_991_u64, "team": "lowest"}),
+            ]
+        );
+        assert_eq!(
+            deterministic_rows(
+                rows,
+                "team",
+                AggregateMetric::Sum,
+                AggregateOptions {
+                    sort_by: AggregateSortBy::Metric,
+                    order: AggregateOrder::Desc,
+                    limit: Some(1),
+                },
+            ),
+            vec![json!({"sum": 9_007_199_254_740_993_u64, "team": "highest"})]
+        );
+    }
+
+    #[test]
+    fn numeric_comparison_handles_signed_unsigned_and_fractional_values() {
+        let negative = serde_json::Number::from(-1);
+        let largest_unsigned = serde_json::Number::from(u64::MAX);
+        let fraction = serde_json::Number::from_f64(1.5).expect("finite number");
+        let two = serde_json::Number::from(2);
+
+        assert_eq!(
+            compare_numbers(&negative, &largest_unsigned),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_numbers(&largest_unsigned, &negative),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(compare_numbers(&fraction, &two), std::cmp::Ordering::Less);
     }
 
     #[test]

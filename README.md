@@ -623,6 +623,8 @@ mdBook ルートを解析し、`SUMMARY.md` と book メタデータを決定的
 - `sum` / `avg` は `--target` が数値であることを要求
 - 入力レコードは object であること、および `group-by`/`target` キーが全レコードに存在することが必須
 - 出力は JSON 配列固定（メトリクス列は `count` / `sum` / `avg`）
+- `sum` は `mlr` が正確な整数を返した場合、JSON の `i64` / `u64` 範囲で整数精度を保持する（`avg` と小数の `sum` は浮動小数）
+- metric sort は整数メトリクスを `f64` に変換せず比較するため、`2^53` を超える整数でも正確に順位付けする
 - `--sort-by metric --order desc --limit 10` で集計metric上位10件を1コマンドで返す。同点は group キー literal 昇順で決定する
 - 実行は `mlr` を明示的引数配列で呼び出し、`--emit-pipeline` 時に stage 診断（`input_records`, `output_records`, `input_bytes`, `output_bytes`, `duration_ms`(固定 `0`), `status`）を出力
 

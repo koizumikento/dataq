@@ -500,6 +500,43 @@ fn aggregate_tool_sorts_by_metric_desc_and_limits_top_k() {
 }
 
 #[test]
+fn aggregate_tool_preserves_large_integer_sum_and_top_k_order() {
+    let toolchain = FakeToolchain::new();
+    let request = tool_call_request(
+        241,
+        "dataq.aggregate",
+        json!({
+            "input": [
+                {"team":"a","price":9_007_199_254_740_991_u64},
+                {"team":"a","price":1},
+                {"team":"z","price":9_007_199_254_740_991_u64},
+                {"team":"z","price":2}
+            ],
+            "group_by": "team",
+            "metric": "sum",
+            "target": "price",
+            "sort_by": "metric",
+            "order": "desc",
+            "limit": 1
+        }),
+    );
+
+    let output = run_mcp(&request, Some(&toolchain));
+    assert_eq!(output.status.code(), Some(0));
+
+    let response = parse_stdout_json(&output.stdout);
+    assert_eq!(response["result"]["isError"], Value::Bool(false));
+    assert_eq!(
+        response["result"]["structuredContent"]["exit_code"],
+        Value::from(0)
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["payload"],
+        json!([{"sum": 9_007_199_254_740_993_u64, "team": "z"}])
+    );
+}
+
+#[test]
 fn aggregate_tool_rejects_invalid_sort_order_and_limit_values() {
     let invalid_cases = [
         (
@@ -1791,6 +1828,11 @@ if [ "$mode" = "stats1" ]; then
     exit 0
   fi
   if [ "$action" = "sum" ]; then
+    if printf '%s' "$stdin_payload" | grep -q '"price":9007199254740991' &&
+       printf '%s' "$stdin_payload" | grep -q '"team":"z","price":2'; then
+      printf '[{"team":"a","price_sum":"9007199254740992"},{"team":"z","price_sum":"9007199254740993"}]'
+      exit 0
+    fi
     if printf '%s' "$stdin_payload" | grep -q '"team":"c"'; then
       printf '[{"team":"c","price_sum":"15.0"},{"team":"a","price_sum":"15.0"},{"team":"b","price_sum":"7.0"}]'
       exit 0

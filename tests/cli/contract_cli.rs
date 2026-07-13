@@ -194,6 +194,24 @@ fn contract_profile_command_mentions_projection_fields() {
 }
 
 #[test]
+fn contract_aggregate_command_mentions_exact_integer_sum_and_sort() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["contract", "--command", "aggregate"])
+        .output()
+        .expect("run contract aggregate");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    let notes = payload["notes"].as_array().expect("notes array");
+    assert!(notes.iter().any(|note| {
+        let note = note.as_str().unwrap_or_default();
+        note.contains("i64/u64") && note.contains("without f64 precision loss")
+    }));
+}
+
+#[test]
 fn contract_command_unknown_value_returns_exit_three() {
     assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["contract", "--command", "unknown"])

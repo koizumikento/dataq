@@ -289,10 +289,28 @@ fn normalize_metric_value(
 ) -> Result<Value, MlrError> {
     match metric {
         MlrAggregateMetric::Count => normalize_integer_value(index, field, value),
-        MlrAggregateMetric::Sum | MlrAggregateMetric::Avg => {
-            normalize_float_value(index, field, value)
+        MlrAggregateMetric::Sum => normalize_sum_value(index, field, value),
+        MlrAggregateMetric::Avg => normalize_float_value(index, field, value),
+    }
+}
+
+fn normalize_sum_value(index: usize, field: &str, value: Value) -> Result<Value, MlrError> {
+    if let Some(number) = value.as_i64() {
+        return Ok(Value::from(number));
+    }
+    if let Some(number) = value.as_u64() {
+        return Ok(Value::from(number));
+    }
+    if let Some(text) = value.as_str() {
+        if let Ok(parsed) = text.parse::<i64>() {
+            return Ok(Value::from(parsed));
+        }
+        if let Ok(parsed) = text.parse::<u64>() {
+            return Ok(Value::from(parsed));
         }
     }
+
+    normalize_float_value(index, field, value)
 }
 
 fn normalize_integer_value(index: usize, field: &str, value: Value) -> Result<Value, MlrError> {
@@ -382,7 +400,7 @@ mod tests {
 
     use super::{
         MlrAggregateMetric, MlrError, MlrJoinHow, aggregate_rows_with_bin, join_rows_with_bin,
-        run_sort_with_bin,
+        normalize_metric_value, run_sort_with_bin,
     };
 
     #[test]
@@ -534,6 +552,41 @@ printf '[{"region":"apac","price_mean":"12.5"}]'"#,
         )
         .expect("aggregate should succeed");
         assert_eq!(rows[0]["avg"], serde_json::json!(12.5));
+    }
+
+    #[test]
+    fn sum_preserves_integral_numbers_and_strings_beyond_f64_precision() {
+        let exact_number = serde_json::json!(9_007_199_254_740_993_u64);
+        assert_eq!(
+            normalize_metric_value(0, "sum", MlrAggregateMetric::Sum, exact_number.clone())
+                .expect("exact numeric sum"),
+            exact_number
+        );
+
+        assert_eq!(
+            normalize_metric_value(
+                0,
+                "sum",
+                MlrAggregateMetric::Sum,
+                serde_json::Value::String(u64::MAX.to_string()),
+            )
+            .expect("exact string sum"),
+            serde_json::json!(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn sum_and_avg_keep_fractional_results() {
+        assert_eq!(
+            normalize_metric_value(0, "sum", MlrAggregateMetric::Sum, serde_json::json!("12.5"),)
+                .expect("fractional sum"),
+            serde_json::json!(12.5)
+        );
+        assert_eq!(
+            normalize_metric_value(0, "avg", MlrAggregateMetric::Avg, serde_json::json!("12.5"),)
+                .expect("fractional average"),
+            serde_json::json!(12.5)
+        );
     }
 
     fn write_test_script(path: PathBuf, body: &str) -> PathBuf {
