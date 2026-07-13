@@ -119,5 +119,5 @@ For runtime reports, inspect `steps`, `deterministic_guards`, `external_tools`, 
 ## Guardrails
 
 - Pass user-provided values as explicit argv entries or structured MCP arguments; never interpolate them into shell source.
-- Do not change data, command behavior, or output schema while using this skill.
+- Let `dataq` produce transformed output, but treat source inputs as read-only unless a command explicitly documents in-place mutation; do not change the CLI implementation, contract, or schema with this usage skill.
 - Stop on an unknown route, profile, contract identifier, plan identifier, or MCP tool and inspect the authoritative help/list response.
