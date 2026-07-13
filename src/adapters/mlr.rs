@@ -30,6 +30,16 @@ pub enum MlrError {
     OutputFieldMissing { index: usize, field: String },
     #[error("mlr output row {index} has non-numeric field `{field}`")]
     OutputFieldNotNumeric { index: usize, field: String },
+    #[error(
+        "mlr output row {index} field `{field}` has syntactically integral value `{value}` outside the supported JSON integer range (i64/u64)"
+    )]
+    OutputIntegerOutOfRange {
+        index: usize,
+        field: String,
+        value: String,
+    },
+    #[error("failed to inspect mlr output number representation: {0}")]
+    OutputRepresentation(String),
     #[error("failed to serialize mlr input: {0}")]
     Serialize(serde_json::Error),
     #[error("failed to create temporary mlr input file: {0}")]
@@ -190,7 +200,12 @@ fn aggregate_rows_with_bin(
         group_by.to_string(),
     ];
 
-    let rows = run_mlr_with_stdin_values(values, &args, bin)?;
+    let stdout = run_mlr_with_stdin_values_output(values, &args, bin)?;
+    if matches!(metric, MlrAggregateMetric::Sum) {
+        let source_field = format!("{}_{}", target, metric.source_field_suffix());
+        reject_out_of_range_integral_field_tokens(&stdout, &source_field)?;
+    }
+    let rows = parse_mlr_rows(&stdout)?;
     normalize_aggregate_rows(rows, metric, target)
 }
 
@@ -199,6 +214,15 @@ fn run_mlr_with_stdin_values(
     args: &[String],
     bin: &str,
 ) -> Result<Vec<Value>, MlrError> {
+    let stdout = run_mlr_with_stdin_values_output(values, args, bin)?;
+    parse_mlr_rows(&stdout)
+}
+
+fn run_mlr_with_stdin_values_output(
+    values: &[Value],
+    args: &[String],
+    bin: &str,
+) -> Result<Vec<u8>, MlrError> {
     let input = serde_json::to_vec(values).map_err(MlrError::Serialize)?;
     let mut child = spawn_mlr(bin, args)?;
 
@@ -214,7 +238,7 @@ fn run_mlr_with_stdin_values(
         ));
     }
 
-    wait_and_collect_rows(child)
+    wait_and_collect_stdout(child)
 }
 
 fn spawn_mlr(bin: &str, args: &[String]) -> Result<Child, MlrError> {
@@ -231,7 +255,7 @@ fn spawn_mlr(bin: &str, args: &[String]) -> Result<Child, MlrError> {
     }
 }
 
-fn wait_and_collect_rows(child: Child) -> Result<Vec<Value>, MlrError> {
+fn wait_and_collect_stdout(child: Child) -> Result<Vec<u8>, MlrError> {
     let output = child.wait_with_output().map_err(MlrError::Spawn)?;
     if !output.status.success() {
         let stderr = String::from_utf8(output.stderr)
@@ -239,11 +263,156 @@ fn wait_and_collect_rows(child: Child) -> Result<Vec<Value>, MlrError> {
         return Err(MlrError::Execution(stderr.trim().to_string()));
     }
 
-    let parsed: Value = serde_json::from_slice(&output.stdout).map_err(MlrError::Parse)?;
+    Ok(output.stdout)
+}
+
+fn parse_mlr_rows(stdout: &[u8]) -> Result<Vec<Value>, MlrError> {
+    let parsed: Value = serde_json::from_slice(stdout).map_err(MlrError::Parse)?;
     match parsed {
         Value::Array(rows) => Ok(rows),
         _ => Err(MlrError::OutputShape),
     }
+}
+
+fn reject_out_of_range_integral_field_tokens(stdout: &[u8], field: &str) -> Result<(), MlrError> {
+    // `serde_json::Number` stores integer tokens beyond `u64` as `f64`. Inspect the
+    // aggregate field in the original stdout before parsing can discard its lexeme.
+    let tokens =
+        top_level_object_field_tokens(stdout, field).map_err(MlrError::OutputRepresentation)?;
+    for (index, token) in tokens {
+        if is_json_integral_token(&token)
+            && token.parse::<i64>().is_err()
+            && token.parse::<u64>().is_err()
+        {
+            return Err(MlrError::OutputIntegerOutOfRange {
+                index,
+                field: field.to_string(),
+                value: token,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn top_level_object_field_tokens(
+    stdout: &[u8],
+    field: &str,
+) -> Result<Vec<(usize, String)>, String> {
+    let mut tokens = Vec::new();
+    for (row_index, row) in json_container_items(stdout, b'[', b']')?
+        .into_iter()
+        .enumerate()
+    {
+        let row = trim_json_whitespace(row);
+        if row.first() != Some(&b'{') {
+            continue;
+        }
+
+        let mut found = None;
+        for member in json_container_items(row, b'{', b'}')? {
+            let (raw_key, raw_value) = object_member_parts(member)?;
+            let key: String = serde_json::from_slice(trim_json_whitespace(raw_key))
+                .map_err(|error| format!("failed to decode object key: {error}"))?;
+            if key == field {
+                found = Some(
+                    std::str::from_utf8(trim_json_whitespace(raw_value))
+                        .map_err(|error| format!("field token is not UTF-8: {error}"))?
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(token) = found {
+            tokens.push((row_index, token));
+        }
+    }
+    Ok(tokens)
+}
+
+fn json_container_items(input: &[u8], open: u8, close: u8) -> Result<Vec<&[u8]>, String> {
+    let input = trim_json_whitespace(input);
+    if input.first() != Some(&open) || input.last() != Some(&close) {
+        return Err(format!(
+            "expected JSON container delimited by `{}` and `{}`",
+            char::from(open),
+            char::from(close)
+        ));
+    }
+
+    let content = &input[1..input.len() - 1];
+    if trim_json_whitespace(content).is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut items = Vec::new();
+    let mut start = 0_usize;
+    let mut closing_stack = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in content.iter().copied().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'{' => closing_stack.push(b'}'),
+            b'[' => closing_stack.push(b']'),
+            b'}' | b']' => {
+                if closing_stack.pop() != Some(byte) {
+                    return Err(format!("mismatched JSON delimiter at byte {index}"));
+                }
+            }
+            b',' if closing_stack.is_empty() => {
+                items.push(trim_json_whitespace(&content[start..index]));
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if in_string || !closing_stack.is_empty() {
+        return Err("unterminated JSON string or container".to_string());
+    }
+    items.push(trim_json_whitespace(&content[start..]));
+    Ok(items)
+}
+
+fn object_member_parts(member: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in member.iter().copied().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b':' {
+            return Ok((&member[..index], &member[index + 1..]));
+        }
+    }
+    Err("JSON object member is missing `:`".to_string())
+}
+
+fn trim_json_whitespace(mut input: &[u8]) -> &[u8] {
+    while matches!(input.first(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        input = &input[1..];
+    }
+    while matches!(input.last(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        input = &input[..input.len() - 1];
+    }
+    input
 }
 
 fn write_temp_values_file(values: &[Value]) -> Result<NamedTempFile, MlrError> {
@@ -289,10 +458,51 @@ fn normalize_metric_value(
 ) -> Result<Value, MlrError> {
     match metric {
         MlrAggregateMetric::Count => normalize_integer_value(index, field, value),
-        MlrAggregateMetric::Sum | MlrAggregateMetric::Avg => {
-            normalize_float_value(index, field, value)
+        MlrAggregateMetric::Sum => normalize_sum_value(index, field, value),
+        MlrAggregateMetric::Avg => normalize_float_value(index, field, value),
+    }
+}
+
+fn normalize_sum_value(index: usize, field: &str, value: Value) -> Result<Value, MlrError> {
+    if let Some(number) = value.as_i64() {
+        return Ok(Value::from(number));
+    }
+    if let Some(number) = value.as_u64() {
+        return Ok(Value::from(number));
+    }
+    if let Some(text) = value.as_str() {
+        if let Ok(parsed) = text.parse::<i64>() {
+            return Ok(Value::from(parsed));
+        }
+        if let Ok(parsed) = text.parse::<u64>() {
+            return Ok(Value::from(parsed));
+        }
+        if is_syntactically_integral(text) {
+            return Err(MlrError::OutputIntegerOutOfRange {
+                index,
+                field: field.to_string(),
+                value: text.to_string(),
+            });
         }
     }
+
+    normalize_float_value(index, field, value)
+}
+
+fn is_syntactically_integral(text: &str) -> bool {
+    let digits = text
+        .strip_prefix('-')
+        .or_else(|| text.strip_prefix('+'))
+        .unwrap_or(text)
+        .as_bytes();
+    !digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
+}
+
+fn is_json_integral_token(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text).as_bytes();
+    !digits.is_empty()
+        && digits.iter().all(u8::is_ascii_digit)
+        && (digits.len() == 1 || digits.first() != Some(&b'0'))
 }
 
 fn normalize_integer_value(index: usize, field: &str, value: Value) -> Result<Value, MlrError> {
@@ -382,7 +592,7 @@ mod tests {
 
     use super::{
         MlrAggregateMetric, MlrError, MlrJoinHow, aggregate_rows_with_bin, join_rows_with_bin,
-        run_sort_with_bin,
+        normalize_metric_value, run_sort_with_bin,
     };
 
     #[test]
@@ -534,6 +744,128 @@ printf '[{"region":"apac","price_mean":"12.5"}]'"#,
         )
         .expect("aggregate should succeed");
         assert_eq!(rows[0]["avg"], serde_json::json!(12.5));
+    }
+
+    #[test]
+    fn sum_preserves_integral_numbers_and_strings_beyond_f64_precision() {
+        let exact_number = serde_json::json!(9_007_199_254_740_993_u64);
+        assert_eq!(
+            normalize_metric_value(0, "sum", MlrAggregateMetric::Sum, exact_number.clone())
+                .expect("exact numeric sum"),
+            exact_number
+        );
+
+        assert_eq!(
+            normalize_metric_value(
+                0,
+                "sum",
+                MlrAggregateMetric::Sum,
+                serde_json::Value::String(u64::MAX.to_string()),
+            )
+            .expect("exact string sum"),
+            serde_json::json!(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn sum_rejects_integral_string_outside_i64_u64_range() {
+        let err = normalize_metric_value(
+            3,
+            "sum",
+            MlrAggregateMetric::Sum,
+            serde_json::Value::String("18446744073709551617".to_string()),
+        )
+        .expect_err("out-of-range integral string must fail");
+
+        assert!(matches!(
+            err,
+            MlrError::OutputIntegerOutOfRange {
+                index: 3,
+                ref field,
+                ref value,
+            } if field == "sum" && value == "18446744073709551617"
+        ));
+    }
+
+    #[test]
+    fn aggregate_rejects_raw_integral_token_outside_i64_u64_range() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = write_test_script(
+            dir.path().join("fake-mlr"),
+            r#"cat >/dev/null
+printf '[{"region":"first","price_sum":1},{"region":"overflow","price_sum":18446744073709551617}]'"#,
+        );
+
+        let err = aggregate_rows_with_bin(
+            &[serde_json::json!({"region":"overflow","price":1})],
+            "region",
+            MlrAggregateMetric::Sum,
+            "price",
+            bin.to_str().expect("utf8 path"),
+        )
+        .expect_err("out-of-range raw integer must fail");
+
+        assert!(matches!(
+            err,
+            MlrError::OutputIntegerOutOfRange {
+                index: 1,
+                ref field,
+                ref value,
+            } if field == "price_sum" && value == "18446744073709551617"
+        ));
+    }
+
+    #[test]
+    fn aggregate_keeps_supported_raw_integer_fractional_and_exponent_tokens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = write_test_script(
+            dir.path().join("fake-mlr"),
+            r#"cat >/dev/null
+printf '[{"region":"maximum","price_sum":18446744073709551615},{"region":"fraction,quoted","metadata":{"items":[1,2]},"price_sum":18446744073709551617.0},{"region":"exponent","price_sum":1e3}]'"#,
+        );
+
+        let rows = aggregate_rows_with_bin(
+            &[serde_json::json!({"region":"fraction,quoted","price":1.0})],
+            "region",
+            MlrAggregateMetric::Sum,
+            "price",
+            bin.to_str().expect("utf8 path"),
+        )
+        .expect("finite fractional and exponent sums");
+
+        assert_eq!(rows[0]["sum"], serde_json::json!(u64::MAX));
+        assert!(rows[1]["sum"].as_f64().is_some());
+        assert_eq!(rows[2]["sum"], serde_json::json!(1000.0));
+    }
+
+    #[test]
+    fn sum_and_avg_keep_fractional_results() {
+        assert_eq!(
+            normalize_metric_value(0, "sum", MlrAggregateMetric::Sum, serde_json::json!("12.5"),)
+                .expect("fractional sum"),
+            serde_json::json!(12.5)
+        );
+        assert_eq!(
+            normalize_metric_value(0, "avg", MlrAggregateMetric::Avg, serde_json::json!("12.5"),)
+                .expect("fractional average"),
+            serde_json::json!(12.5)
+        );
+        assert_eq!(
+            normalize_metric_value(0, "sum", MlrAggregateMetric::Sum, serde_json::json!("1e3"),)
+                .expect("exponent sum"),
+            serde_json::json!(1000.0)
+        );
+        assert!(
+            normalize_metric_value(
+                0,
+                "sum",
+                MlrAggregateMetric::Sum,
+                serde_json::json!("18446744073709551617.0"),
+            )
+            .expect("finite fractional representation")
+            .as_f64()
+            .is_some()
+        );
     }
 
     fn write_test_script(path: PathBuf, body: &str) -> PathBuf {
