@@ -108,7 +108,7 @@ Do not substitute the MCP process exit code for the embedded tool exit code.
 - MCP: pass `"emit_pipeline": true` in tool arguments; diagnostics are returned as `structuredContent.pipeline`.
 - Static planning: `dataq emit plan` returns predicted stages and tools without consuming input; it is not a runtime report.
 
-For runtime reports, inspect `steps`, `deterministic_guards`, `external_tools`, `stage_diagnostics`, and `fingerprint`. Keep stage order intact and do not merge stderr diagnostics into functional CLI stdout.
+For runtime reports, inspect `steps`, `deterministic_guards`, `external_tools`, `stage_diagnostics`, and `fingerprint` when present. Keep stage order intact and do not merge stderr diagnostics into functional CLI stdout.
 
 ## Output
 
