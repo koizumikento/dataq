@@ -206,7 +206,8 @@ dataq [--emit-pipeline] <command> [options]
   - `invalid_params[*]` は `name`, `reason` を持つ
 - `mcp` モードのプロセス終了コード:
   - JSON-RPCレスポンスを書き出せた場合は tool `exit_code` に関係なく `0`
-  - レスポンス出力不能な致命的I/O時のみ `3`
+  - stdout の `BrokenPipe` は consumer-closed の正常終了として `0`
+  - `BrokenPipe` 以外の stdout write/flush 失敗は `1`、stdin 読み取り失敗は `3`
 
 ## LLM / agent quickstart
 
@@ -531,6 +532,12 @@ dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, SU
 - `2`: 検証失敗（期待仕様に不一致）
 - `3`: 入力不正（フォーマット不正、必須引数不足など）、`doctor` の要件未達（`--profile` 未指定時は `jq|yq|mlr` 不足/起動不可、指定時は profile 要件未達）、`ingest doc` の `pandoc`/parse 失敗、`ingest tabular` の `csvkit` 不足/変換失敗、または `codex install-skill` のルート解決/コピー失敗
 - `1`: その他実行時エラー
+
+stdout write/flush は全コマンドで共通に扱う。後段が stdout を閉じたことによる
+`BrokenPipe` は consumer-closed の正常終了として終了コード `0` に正規化し、コマンド本来の
+結果が検証不一致の `2` でも `0` を返す。この場合は panic や `internal_error` を stderr に
+出さない。`BrokenPipe` 以外の stdout write/flush 失敗は `internal_error` の終了コード `1`
+とし、stdout を使わない入力・使用エラーおよび stderr 診断の契約は変更しない。
 
 ## `doctor` コマンド契約（MVP）
 

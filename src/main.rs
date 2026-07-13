@@ -1025,44 +1025,137 @@ struct CliError<'a> {
     details: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StdoutWriteState {
+    Ready,
+    BrokenPipe,
+    Failed {
+        kind: io::ErrorKind,
+        message: String,
+    },
+}
+
+struct CliStdout<W> {
+    writer: W,
+    state: StdoutWriteState,
+}
+
+impl<W: Write> CliStdout<W> {
+    fn new(writer: W) -> Self {
+        Self {
+            writer,
+            state: StdoutWriteState::Ready,
+        }
+    }
+
+    fn finish(mut self, command_exit_code: i32) -> i32 {
+        let _ = self.flush();
+        match self.state {
+            StdoutWriteState::Ready => command_exit_code,
+            StdoutWriteState::BrokenPipe => 0,
+            StdoutWriteState::Failed { kind, message } => {
+                emit_error(
+                    "internal_error",
+                    format!("failed to write stdout: {message}"),
+                    json!({"kind": format!("{kind:?}")}),
+                    1,
+                );
+                1
+            }
+        }
+    }
+
+    fn record_error(&mut self, error: io::Error) {
+        self.state = if error.kind() == io::ErrorKind::BrokenPipe {
+            StdoutWriteState::BrokenPipe
+        } else {
+            StdoutWriteState::Failed {
+                kind: error.kind(),
+                message: error.to_string(),
+            }
+        };
+    }
+}
+
+impl<W: Write> Write for CliStdout<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if !matches!(self.state, StdoutWriteState::Ready) {
+            return Ok(buffer.len());
+        }
+
+        match self.writer.write(buffer) {
+            Ok(0) if !buffer.is_empty() => {
+                self.record_error(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "stdout writer accepted zero bytes",
+                ));
+                Ok(buffer.len())
+            }
+            Ok(written) => Ok(written),
+            Err(error) => {
+                self.record_error(error);
+                Ok(buffer.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !matches!(self.state, StdoutWriteState::Ready) {
+            return Ok(());
+        }
+
+        if let Err(error) = self.writer.flush() {
+            self.record_error(error);
+        }
+        Ok(())
+    }
+}
+
 fn main() {
     process::exit(run());
 }
 
 fn run() -> i32 {
+    let stdout = io::stdout();
+    let mut output = CliStdout::new(stdout.lock());
+    let exit_code = run_with_stdout(&mut output);
+    output.finish(exit_code)
+}
+
+fn run_with_stdout(output: &mut dyn Write) -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
-        Err(error) => return handle_parse_error(error),
+        Err(error) => return handle_parse_error(error, output),
     };
 
     let emit_pipeline = cli.emit_pipeline;
     match cli.command {
-        Commands::Canon(args) => run_canon(args, emit_pipeline),
-        Commands::Ingest(args) => run_ingest(args, emit_pipeline),
-        Commands::Assert(args) => run_assert(args, emit_pipeline),
-        Commands::Gate(args) => run_gate(args, emit_pipeline),
-        Commands::Schema(args) => run_schema(args, emit_pipeline),
-        Commands::Sdiff(args) => run_sdiff(args, emit_pipeline),
-        Commands::Diff(args) => run_diff(args, emit_pipeline),
-        Commands::Profile(args) => run_profile(args, emit_pipeline),
-        Commands::Join(args) => run_join(args, emit_pipeline),
-        Commands::Aggregate(args) => run_aggregate(args, emit_pipeline),
-        Commands::Transform(args) => run_transform(args, emit_pipeline),
-        Commands::Scan(args) => run_scan(args, emit_pipeline),
-        Commands::Merge(args) => run_merge(args, emit_pipeline),
-        Commands::Recipe(args) => run_recipe(args, emit_pipeline),
-        Commands::Doctor(args) => run_doctor(args, emit_pipeline),
-        Commands::Contract(args) => run_contract(args, emit_pipeline),
-        Commands::Emit(args) => run_emit(args, emit_pipeline),
-        Commands::Codex(args) => run_codex(args, emit_pipeline),
-        Commands::Mcp => run_mcp(),
+        Commands::Canon(args) => run_canon(args, emit_pipeline, output),
+        Commands::Ingest(args) => run_ingest(args, emit_pipeline, output),
+        Commands::Assert(args) => run_assert(args, emit_pipeline, output),
+        Commands::Gate(args) => run_gate(args, emit_pipeline, output),
+        Commands::Schema(args) => run_schema(args, emit_pipeline, output),
+        Commands::Sdiff(args) => run_sdiff(args, emit_pipeline, output),
+        Commands::Diff(args) => run_diff(args, emit_pipeline, output),
+        Commands::Profile(args) => run_profile(args, emit_pipeline, output),
+        Commands::Join(args) => run_join(args, emit_pipeline, output),
+        Commands::Aggregate(args) => run_aggregate(args, emit_pipeline, output),
+        Commands::Transform(args) => run_transform(args, emit_pipeline, output),
+        Commands::Scan(args) => run_scan(args, emit_pipeline, output),
+        Commands::Merge(args) => run_merge(args, emit_pipeline, output),
+        Commands::Recipe(args) => run_recipe(args, emit_pipeline, output),
+        Commands::Doctor(args) => run_doctor(args, emit_pipeline, output),
+        Commands::Contract(args) => run_contract(args, emit_pipeline, output),
+        Commands::Emit(args) => run_emit(args, emit_pipeline, output),
+        Commands::Codex(args) => run_codex(args, emit_pipeline, output),
+        Commands::Mcp => run_mcp(output),
     }
 }
 
-fn handle_parse_error(error: clap::Error) -> i32 {
+fn handle_parse_error(error: clap::Error, output: &mut dyn Write) -> i32 {
     match error.kind() {
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
-            print!("{error}");
+            let _ = write!(output, "{error}");
             0
         }
         _ => {
@@ -1077,7 +1170,7 @@ fn handle_parse_error(error: clap::Error) -> i32 {
     }
 }
 
-fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
+fn run_canon(args: CanonArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let output_format = args.to.map(Into::into).unwrap_or(Format::Json);
     let options = canon::CanonCommandOptions {
         sort_keys: args.sort_keys,
@@ -1085,8 +1178,6 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
     };
     let mut input_format = args.from.map(Into::into);
 
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
     let mut fingerprint_context = FingerprintContext::default();
     let exit_code = if let Some(path) = args.input.as_ref() {
         if input_format.is_none() {
@@ -1123,7 +1214,7 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
                     }]);
                 match run_canon_with_format(
                     Cursor::new(bytes),
-                    &mut output,
+                    &mut *output,
                     resolved_input_format,
                     output_format,
                     options,
@@ -1157,7 +1248,7 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
                 let stdin = io::stdin();
                 match run_canon_with_format(
                     stdin.lock(),
-                    &mut output,
+                    &mut *output,
                     resolved_input_format,
                     output_format,
                     options,
@@ -1177,7 +1268,7 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
             }
             None => {
                 if output_format == Format::Jsonl {
-                    match run_canon_jsonl_autodetect_stdin(&mut output, options) {
+                    match run_canon_jsonl_autodetect_stdin(&mut *output, options) {
                         Ok(detected) => {
                             input_format = Some(detected);
                             0
@@ -1227,7 +1318,7 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
                                     }]);
                                 match run_canon_with_format(
                                     Cursor::new(input),
-                                    &mut output,
+                                    &mut *output,
                                     detected,
                                     output_format,
                                     options,
@@ -1268,7 +1359,7 @@ fn run_canon(args: CanonArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
+fn run_assert(args: AssertArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let input = args.input.clone();
     let normalize_mode = args.normalize.map(Into::into);
     let schema_dispatch = assert_schema_dispatch_args(&args);
@@ -1310,14 +1401,14 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
             "rust_native_execution".to_string(),
             "assert_help_payload_static_schema".to_string(),
         ];
-        emit_assert_rules_help()
+        emit_assert_rules_help(output)
     } else if args.schema_help {
         steps = vec!["emit_assert_schema_help".to_string()];
         deterministic_guards = vec![
             "rust_native_execution".to_string(),
             "assert_help_payload_static_schema".to_string(),
         ];
-        emit_assert_schema_help()
+        emit_assert_schema_help(output)
     } else {
         let command_args = r#assert::AssertCommandArgs {
             input: input.clone(),
@@ -1342,7 +1433,7 @@ fn run_assert(args: AssertArgs, emit_pipeline: bool) -> i32 {
 
         match response.exit_code {
             0 | 2 => {
-                if emit_json_stdout(&response.payload) {
+                if emit_json_stdout(output, &response.payload) {
                     response.exit_code
                 } else {
                     emit_error(
@@ -1430,19 +1521,19 @@ fn run_assert_with_dispatch<R: Read>(
     )
 }
 
-fn run_ingest(args: IngestArgs, emit_pipeline: bool) -> i32 {
+fn run_ingest(args: IngestArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     match args.command {
-        IngestSubcommand::Api(api_args) => run_ingest_api(api_args, emit_pipeline),
-        IngestSubcommand::YamlJobs(args) => run_ingest_yaml_jobs(args, emit_pipeline),
-        IngestSubcommand::Jc(args) => run_ingest_jc(args, emit_pipeline),
-        IngestSubcommand::Tabular(args) => run_ingest_tabular(args, emit_pipeline),
-        IngestSubcommand::Notes(args) => run_ingest_notes(args, emit_pipeline),
-        IngestSubcommand::Doc(args) => run_ingest_doc(args, emit_pipeline),
-        IngestSubcommand::Book(args) => run_ingest_book(args, emit_pipeline),
+        IngestSubcommand::Api(api_args) => run_ingest_api(api_args, emit_pipeline, output),
+        IngestSubcommand::YamlJobs(args) => run_ingest_yaml_jobs(args, emit_pipeline, output),
+        IngestSubcommand::Jc(args) => run_ingest_jc(args, emit_pipeline, output),
+        IngestSubcommand::Tabular(args) => run_ingest_tabular(args, emit_pipeline, output),
+        IngestSubcommand::Notes(args) => run_ingest_notes(args, emit_pipeline, output),
+        IngestSubcommand::Doc(args) => run_ingest_doc(args, emit_pipeline, output),
+        IngestSubcommand::Book(args) => run_ingest_book(args, emit_pipeline, output),
     }
 }
 
-fn run_ingest_api(args: IngestApiArgs, emit_pipeline: bool) -> i32 {
+fn run_ingest_api(args: IngestApiArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let command_args = ingest_api::IngestApiCommandArgs {
         url: args.url.clone(),
         method: args.method.into(),
@@ -1454,7 +1545,7 @@ fn run_ingest_api(args: IngestApiArgs, emit_pipeline: bool) -> i32 {
     let (response, trace) = ingest_api::run_with_trace(&command_args);
     let exit_code = match response.exit_code {
         0 | 2 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 response.exit_code
             } else {
                 emit_error(
@@ -1498,7 +1589,11 @@ fn run_ingest_api(args: IngestApiArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_ingest_yaml_jobs(args: IngestYamlJobsArgs, emit_pipeline: bool) -> i32 {
+fn run_ingest_yaml_jobs(
+    args: IngestYamlJobsArgs,
+    emit_pipeline: bool,
+    output: &mut dyn Write,
+) -> i32 {
     let mode: IngestYamlJobsMode = args.mode.into();
     let input_is_stdin = ingest_yaml_jobs::path_is_stdin(args.input.as_path());
     let command_args = ingest_yaml_jobs::IngestYamlJobsCommandArgs {
@@ -1515,7 +1610,7 @@ fn run_ingest_yaml_jobs(args: IngestYamlJobsArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -1558,7 +1653,7 @@ fn run_ingest_yaml_jobs(args: IngestYamlJobsArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_ingest_jc(args: IngestJcArgs, emit_pipeline: bool) -> i32 {
+fn run_ingest_jc(args: IngestJcArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let input_path = if args.input == "-" {
         None
     } else {
@@ -1575,7 +1670,7 @@ fn run_ingest_jc(args: IngestJcArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -1619,7 +1714,7 @@ fn run_ingest_jc(args: IngestJcArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_ingest_tabular(args: IngestTabularArgs, emit_pipeline: bool) -> i32 {
+fn run_ingest_tabular(args: IngestTabularArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let input_path = if args.input == "-" {
         None
     } else {
@@ -1634,7 +1729,7 @@ fn run_ingest_tabular(args: IngestTabularArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -1678,7 +1773,7 @@ fn run_ingest_tabular(args: IngestTabularArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_ingest_notes(args: IngestNotesArgs, emit_pipeline: bool) -> i32 {
+fn run_ingest_notes(args: IngestNotesArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let time_range =
         match ingest_engine::resolve_time_range(args.since.as_deref(), args.until.as_deref()) {
             Ok(value) => value,
@@ -1703,7 +1798,7 @@ fn run_ingest_notes(args: IngestNotesArgs, emit_pipeline: bool) -> i32 {
     let exit_code = match response.exit_code {
         0 => match (args.to, &response.payload) {
             (CliIngestNotesOutput::Json, _) => {
-                if emit_json_stdout(&response.payload) {
+                if emit_json_stdout(output, &response.payload) {
                     0
                 } else {
                     emit_error(
@@ -1716,7 +1811,7 @@ fn run_ingest_notes(args: IngestNotesArgs, emit_pipeline: bool) -> i32 {
                 }
             }
             (CliIngestNotesOutput::Jsonl, Value::Array(values)) => {
-                if emit_jsonl_stdout(values) {
+                if emit_jsonl_stdout(output, values) {
                     0
                 } else {
                     emit_error(
@@ -1770,7 +1865,7 @@ fn run_ingest_notes(args: IngestNotesArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_ingest_doc(args: IngestDocArgs, emit_pipeline: bool) -> i32 {
+fn run_ingest_doc(args: IngestDocArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let from: ingest::IngestDocInputFormat = args.from.into();
     let input_path = if args.input == "-" {
         None
@@ -1787,7 +1882,7 @@ fn run_ingest_doc(args: IngestDocArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -1831,7 +1926,7 @@ fn run_ingest_doc(args: IngestDocArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_ingest_book(args: IngestBookArgs, emit_pipeline: bool) -> i32 {
+fn run_ingest_book(args: IngestBookArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let (response, trace) = ingest::run_book_with_trace(&ingest::IngestBookCommandArgs {
         root: args.root.clone(),
         include_files: args.include_files,
@@ -1840,7 +1935,7 @@ fn run_ingest_book(args: IngestBookArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -1884,8 +1979,8 @@ fn run_ingest_book(args: IngestBookArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn emit_assert_rules_help() -> i32 {
-    if emit_json_stdout(&r#assert::rules_help_payload()) {
+fn emit_assert_rules_help(output: &mut dyn Write) -> i32 {
+    if emit_json_stdout(output, &r#assert::rules_help_payload()) {
         0
     } else {
         emit_error(
@@ -1898,8 +1993,8 @@ fn emit_assert_rules_help() -> i32 {
     }
 }
 
-fn emit_assert_schema_help() -> i32 {
-    if emit_json_stdout(&r#assert::schema_help_payload()) {
+fn emit_assert_schema_help(output: &mut dyn Write) -> i32 {
+    if emit_json_stdout(output, &r#assert::schema_help_payload()) {
         0
     } else {
         emit_error(
@@ -1912,20 +2007,20 @@ fn emit_assert_schema_help() -> i32 {
     }
 }
 
-fn run_gate(args: GateArgs, emit_pipeline: bool) -> i32 {
+fn run_gate(args: GateArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     match args.command {
-        GateSubcommand::Schema(schema_args) => run_gate_schema(schema_args, emit_pipeline),
-        GateSubcommand::Policy(policy_args) => run_gate_policy(policy_args, emit_pipeline),
+        GateSubcommand::Schema(schema_args) => run_gate_schema(schema_args, emit_pipeline, output),
+        GateSubcommand::Policy(policy_args) => run_gate_policy(policy_args, emit_pipeline, output),
     }
 }
 
-fn run_schema(args: SchemaArgs, emit_pipeline: bool) -> i32 {
+fn run_schema(args: SchemaArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     match args.command {
-        SchemaSubcommand::Infer(infer_args) => run_schema_infer(infer_args, emit_pipeline),
+        SchemaSubcommand::Infer(infer_args) => run_schema_infer(infer_args, emit_pipeline, output),
     }
 }
 
-fn run_schema_infer(args: SchemaInferArgs, emit_pipeline: bool) -> i32 {
+fn run_schema_infer(args: SchemaInferArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let command_args = schema::SchemaInferCommandArgs {
         input: args.input.clone(),
     };
@@ -1935,7 +2030,7 @@ fn run_schema_infer(args: SchemaInferArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -1979,7 +2074,7 @@ fn run_schema_infer(args: SchemaInferArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_gate_schema(args: GateSchemaArgs, emit_pipeline: bool) -> i32 {
+fn run_gate_schema(args: GateSchemaArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let schema_format = dataq_io::resolve_input_format(None, Some(args.schema.as_path())).ok();
     let preset = gate::resolve_preset(args.from.as_deref()).ok().flatten();
     let input_is_stdin = args
@@ -2012,7 +2107,7 @@ fn run_gate_schema(args: GateSchemaArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 | 2 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 response.exit_code
             } else {
                 emit_error(
@@ -2062,7 +2157,7 @@ fn run_gate_schema(args: GateSchemaArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_gate_policy(args: GatePolicyArgs, emit_pipeline: bool) -> i32 {
+fn run_gate_policy(args: GatePolicyArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let rules_format = dataq_io::resolve_input_format(None, Some(args.rules.as_path())).ok();
     let input_is_stdin = args
         .input
@@ -2089,7 +2184,7 @@ fn run_gate_policy(args: GatePolicyArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 | 2 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 response.exit_code
             } else {
                 emit_error(
@@ -2139,7 +2234,7 @@ fn run_gate_policy(args: GatePolicyArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
+fn run_merge(args: MergeArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let base_format = dataq_io::resolve_input_format(None, Some(args.base.as_path())).ok();
     let overlay_formats: Vec<Option<Format>> = args
         .overlay
@@ -2157,7 +2252,7 @@ fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -2199,7 +2294,7 @@ fn run_merge(args: MergeArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_join(args: JoinArgs, emit_pipeline: bool) -> i32 {
+fn run_join(args: JoinArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let left_format = dataq_io::resolve_input_format(None, Some(args.left.as_path())).ok();
     let right_format = dataq_io::resolve_input_format(None, Some(args.right.as_path())).ok();
     let command_args = join::JoinCommandArgs {
@@ -2212,7 +2307,7 @@ fn run_join(args: JoinArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -2255,7 +2350,7 @@ fn run_join(args: JoinArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_aggregate(args: AggregateArgs, emit_pipeline: bool) -> i32 {
+fn run_aggregate(args: AggregateArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let input_format = dataq_io::resolve_input_format(None, Some(args.input.as_path())).ok();
     let command_args = aggregate::AggregateCommandArgs {
         input: aggregate::AggregateCommandInput::Path(args.input.clone()),
@@ -2272,7 +2367,7 @@ fn run_aggregate(args: AggregateArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -2315,20 +2410,20 @@ fn run_aggregate(args: AggregateArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_scan(args: ScanArgs, emit_pipeline: bool) -> i32 {
+fn run_scan(args: ScanArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     match args.command {
-        ScanSubcommand::Text(text_args) => run_scan_text(text_args, emit_pipeline),
+        ScanSubcommand::Text(text_args) => run_scan_text(text_args, emit_pipeline, output),
     }
 }
 
-fn run_transform(args: TransformArgs, emit_pipeline: bool) -> i32 {
+fn run_transform(args: TransformArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     match args.command {
         TransformSubcommand::Rowset(rowset_args) => {
             let (rowset_args, emit_pipeline) =
                 normalize_transform_rowset_global_flags(rowset_args, emit_pipeline);
-            run_transform_rowset(rowset_args, emit_pipeline)
+            run_transform_rowset(rowset_args, emit_pipeline, output)
         }
-        TransformSubcommand::Sql(sql_args) => run_transform_sql(sql_args, emit_pipeline),
+        TransformSubcommand::Sql(sql_args) => run_transform_sql(sql_args, emit_pipeline, output),
     }
 }
 
@@ -2348,7 +2443,11 @@ fn normalize_transform_rowset_global_flags(
     (args, resolved_emit_pipeline)
 }
 
-fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {
+fn run_transform_rowset(
+    args: TransformRowsetArgs,
+    emit_pipeline: bool,
+    output: &mut dyn Write,
+) -> i32 {
     let (input, input_format) = if args.input == "-" {
         let stdin = io::stdin();
         let mut bytes = Vec::new();
@@ -2432,7 +2531,7 @@ fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -2476,7 +2575,7 @@ fn run_transform_rowset(args: TransformRowsetArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
+fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let (input, input_format, stdin_input) = if args.input == "-" {
         let stdin = io::stdin();
         let mut bytes = Vec::new();
@@ -2564,7 +2663,7 @@ fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -2608,7 +2707,7 @@ fn run_transform_sql(args: TransformSqlArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_scan_text(args: ScanTextArgs, emit_pipeline: bool) -> i32 {
+fn run_scan_text(args: ScanTextArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let path = args.path.clone().unwrap_or_else(|| PathBuf::from("."));
     let command_args = scan::ScanTextCommandArgs {
         pattern: args.pattern.clone(),
@@ -2622,7 +2721,7 @@ fn run_scan_text(args: ScanTextArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 | 2 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 response.exit_code
             } else {
                 emit_error(
@@ -2665,7 +2764,7 @@ fn run_scan_text(args: ScanTextArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
+fn run_sdiff(args: SdiffArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let options =
         match sdiff::parse_options(args.value_diff_cap, args.key.as_deref(), &args.ignore_path) {
             Ok(options) => options,
@@ -2791,20 +2890,16 @@ fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
     } else {
         0
     };
-    let exit_code = match serde_json::to_string(&report) {
-        Ok(serialized) => {
-            println!("{serialized}");
-            success_exit_code
-        }
-        Err(error) => {
-            emit_error(
-                "internal_error",
-                format!("failed to serialize diff report: {error}"),
-                json!({"command": "sdiff"}),
-                1,
-            );
-            1
-        }
+    let exit_code = if emit_json_stdout(output, &report) {
+        success_exit_code
+    } else {
+        emit_error(
+            "internal_error",
+            "failed to serialize diff report".to_string(),
+            json!({"command": "sdiff"}),
+            1,
+        );
+        1
     };
 
     if emit_pipeline {
@@ -2835,13 +2930,13 @@ fn run_sdiff(args: SdiffArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_diff(args: DiffArgs, emit_pipeline: bool) -> i32 {
+fn run_diff(args: DiffArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     match args.command {
-        DiffSubcommand::Source(source_args) => run_diff_source(source_args, emit_pipeline),
+        DiffSubcommand::Source(source_args) => run_diff_source(source_args, emit_pipeline, output),
     }
 }
 
-fn run_diff_source(args: DiffSourceArgs, emit_pipeline: bool) -> i32 {
+fn run_diff_source(args: DiffSourceArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let execution = match diff::execute(&args.left, &args.right) {
         Ok(execution) => execution,
         Err(error) => {
@@ -2868,20 +2963,16 @@ fn run_diff_source(args: DiffSourceArgs, emit_pipeline: bool) -> i32 {
         0
     };
     let response_payload = diff::DiffSourceReport::new(execution.report, execution.sources);
-    let exit_code = match serde_json::to_string(&response_payload) {
-        Ok(serialized) => {
-            println!("{serialized}");
-            success_exit_code
-        }
-        Err(error) => {
-            emit_error(
-                "internal_error",
-                format!("failed to serialize diff source report: {error}"),
-                json!({"command": "diff.source"}),
-                1,
-            );
-            1
-        }
+    let exit_code = if emit_json_stdout(output, &response_payload) {
+        success_exit_code
+    } else {
+        emit_error(
+            "internal_error",
+            "failed to serialize diff source report".to_string(),
+            json!({"command": "diff.source"}),
+            1,
+        );
+        1
     };
 
     if emit_pipeline {
@@ -2920,7 +3011,7 @@ fn run_diff_source(args: DiffSourceArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
+fn run_profile(args: ProfileArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let input_format = Some(args.from.into());
 
     let command_args = profile::ProfileCommandArgs {
@@ -2938,7 +3029,7 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -2981,7 +3072,7 @@ fn run_profile(args: ProfileArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_doctor(args: DoctorArgs, emit_pipeline: bool) -> i32 {
+fn run_doctor(args: DoctorArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let command_input = doctor::DoctorCommandInput {
         capabilities: args.capabilities,
         profile: args.profile.map(Into::into),
@@ -2989,7 +3080,7 @@ fn run_doctor(args: DoctorArgs, emit_pipeline: bool) -> i32 {
     let (response, trace) = doctor::run_with_input_and_trace(command_input);
     let exit_code = match response.exit_code {
         0 | 3 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 response.exit_code
             } else {
                 emit_error(
@@ -3036,15 +3127,17 @@ fn run_doctor(args: DoctorArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_recipe(args: RecipeArgs, emit_pipeline: bool) -> i32 {
+fn run_recipe(args: RecipeArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     match args.command {
-        RecipeSubcommand::Run(run_args) => run_recipe_run(run_args, emit_pipeline),
-        RecipeSubcommand::Lock(lock_args) => run_recipe_lock(lock_args, emit_pipeline),
-        RecipeSubcommand::Replay(replay_args) => run_recipe_replay(replay_args, emit_pipeline),
+        RecipeSubcommand::Run(run_args) => run_recipe_run(run_args, emit_pipeline, output),
+        RecipeSubcommand::Lock(lock_args) => run_recipe_lock(lock_args, emit_pipeline, output),
+        RecipeSubcommand::Replay(replay_args) => {
+            run_recipe_replay(replay_args, emit_pipeline, output)
+        }
     }
 }
 
-fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool) -> i32 {
+fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let recipe_format = dataq_io::resolve_input_format(None, Some(args.file.as_path())).ok();
     let command_args = recipe::RecipeCommandArgs {
         file_path: Some(args.file.clone()),
@@ -3055,7 +3148,7 @@ fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 | 2 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 response.exit_code
             } else {
                 emit_error(
@@ -3098,7 +3191,7 @@ fn run_recipe_run(args: RecipeRunArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_recipe_lock(args: RecipeLockArgs, emit_pipeline: bool) -> i32 {
+fn run_recipe_lock(args: RecipeLockArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let recipe_format = dataq_io::resolve_input_format(None, Some(args.file.as_path())).ok();
     let command_args = recipe::RecipeLockCommandArgs {
         file_path: args.file.clone(),
@@ -3124,7 +3217,7 @@ fn run_recipe_lock(args: RecipeLockArgs, emit_pipeline: bool) -> i32 {
                             3
                         }
                     }
-                } else if emit_bytes_stdout(serialized_lock.as_slice()) {
+                } else if emit_bytes_stdout(output, serialized_lock.as_slice()) {
                     0
                 } else {
                     emit_error(
@@ -3185,7 +3278,7 @@ fn run_recipe_lock(args: RecipeLockArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_recipe_replay(args: RecipeReplayArgs, emit_pipeline: bool) -> i32 {
+fn run_recipe_replay(args: RecipeReplayArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let recipe_format = dataq_io::resolve_input_format(None, Some(args.file.as_path())).ok();
     let lock_format = dataq_io::resolve_input_format(None, Some(args.lock.as_path())).ok();
     let command_args = recipe::RecipeReplayCommandArgs {
@@ -3197,7 +3290,7 @@ fn run_recipe_replay(args: RecipeReplayArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 | 2 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 response.exit_code
             } else {
                 emit_error(
@@ -3241,13 +3334,12 @@ fn run_recipe_replay(args: RecipeReplayArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_mcp() -> i32 {
+fn run_mcp(output: &mut dyn Write) -> i32 {
     let stdin = io::stdin();
-    let stdout = io::stdout();
-    mcp::run_single_request(stdin.lock(), stdout.lock())
+    mcp::run_single_request(stdin.lock(), output)
 }
 
-fn run_contract(args: ContractArgs, emit_pipeline: bool) -> i32 {
+fn run_contract(args: ContractArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let response = if args.all {
         contract::run_all()
     } else if let Some(command) = args.command {
@@ -3264,7 +3356,7 @@ fn run_contract(args: ContractArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -3308,13 +3400,13 @@ fn run_contract(args: ContractArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_emit(args: EmitArgs, emit_pipeline: bool) -> i32 {
+fn run_emit(args: EmitArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     match args.command {
-        EmitSubcommand::Plan(plan_args) => run_emit_plan(plan_args, emit_pipeline),
+        EmitSubcommand::Plan(plan_args) => run_emit_plan(plan_args, emit_pipeline, output),
     }
 }
 
-fn run_emit_plan(args: EmitPlanArgs, emit_pipeline: bool) -> i32 {
+fn run_emit_plan(args: EmitPlanArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     let parsed_args = match emit::parse_args_json(args.args.as_deref()) {
         Ok(values) => values,
         Err(message) => {
@@ -3338,7 +3430,7 @@ fn run_emit_plan(args: EmitPlanArgs, emit_pipeline: bool) -> i32 {
 
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -3381,15 +3473,19 @@ fn run_emit_plan(args: EmitPlanArgs, emit_pipeline: bool) -> i32 {
     exit_code
 }
 
-fn run_codex(args: CodexArgs, emit_pipeline: bool) -> i32 {
+fn run_codex(args: CodexArgs, emit_pipeline: bool, output: &mut dyn Write) -> i32 {
     match args.command {
         CodexSubcommand::InstallSkill(install_skill_args) => {
-            run_codex_install_skill(install_skill_args, emit_pipeline)
+            run_codex_install_skill(install_skill_args, emit_pipeline, output)
         }
     }
 }
 
-fn run_codex_install_skill(args: CodexInstallSkillArgs, emit_pipeline: bool) -> i32 {
+fn run_codex_install_skill(
+    args: CodexInstallSkillArgs,
+    emit_pipeline: bool,
+    output: &mut dyn Write,
+) -> i32 {
     let command_args = codex::CodexInstallSkillCommandArgs {
         dest_root: args.dest.clone(),
         force: args.force,
@@ -3397,7 +3493,7 @@ fn run_codex_install_skill(args: CodexInstallSkillArgs, emit_pipeline: bool) -> 
     let (response, trace) = codex::install_skill_with_trace(&command_args);
     let exit_code = match response.exit_code {
         0 => {
-            if emit_json_stdout(&response.payload) {
+            if emit_json_stdout(output, &response.payload) {
                 0
             } else {
                 emit_error(
@@ -4522,20 +4618,12 @@ fn status_label(code: Option<i32>) -> String {
         .unwrap_or_else(|| "terminated by signal".to_string())
 }
 
-fn emit_json_stdout(value: &Value) -> bool {
-    match serde_json::to_string(value) {
-        Ok(serialized) => {
-            println!("{serialized}");
-            true
-        }
-        Err(_) => false,
-    }
+fn emit_json_stdout<T: Serialize + ?Sized, W: Write + ?Sized>(output: &mut W, value: &T) -> bool {
+    serde_json::to_writer(&mut *output, value).is_ok() && output.write_all(b"\n").is_ok()
 }
 
-fn emit_jsonl_stdout(values: &[Value]) -> bool {
-    let stdout = io::stdout();
-    let mut writer = stdout.lock();
-    dataq_io::format::jsonl::write_jsonl(&mut writer, values).is_ok()
+fn emit_jsonl_stdout<W: Write + ?Sized>(output: &mut W, values: &[Value]) -> bool {
+    dataq_io::format::jsonl::write_jsonl(output, values).is_ok()
 }
 
 fn emit_json_stderr(value: &Value) -> bool {
@@ -4548,10 +4636,8 @@ fn emit_json_stderr(value: &Value) -> bool {
     }
 }
 
-fn emit_bytes_stdout(bytes: &[u8]) -> bool {
-    let stdout = io::stdout();
-    let mut writer = stdout.lock();
-    writer.write_all(bytes).is_ok() && writer.write_all(b"\n").is_ok()
+fn emit_bytes_stdout<W: Write + ?Sized>(output: &mut W, bytes: &[u8]) -> bool {
+    output.write_all(bytes).is_ok() && output.write_all(b"\n").is_ok()
 }
 
 fn emit_pipeline_report(report: &PipelineReport) {
@@ -4982,10 +5068,66 @@ mod tests {
         assert_eq!(first_non_empty_line(b"\n\t\n"), None);
         assert_eq!(first_non_empty_line(&[0xff, 0xfe]), None);
 
-        assert!(emit_json_stdout(&json!({"ok": true})));
+        let mut output = Vec::new();
+        assert!(emit_json_stdout(&mut output, &json!({"ok": true})));
         assert!(emit_json_stderr(&json!({"ok": true})));
-        assert!(emit_jsonl_stdout(&[json!({"id": 1}), json!({"id": 2})]));
-        assert!(emit_bytes_stdout(br#"{"ok":true}"#));
+        assert!(emit_jsonl_stdout(
+            &mut output,
+            &[json!({"id": 1}), json!({"id": 2})]
+        ));
+        assert!(emit_bytes_stdout(&mut output, br#"{"ok":true}"#));
+    }
+
+    #[test]
+    fn cli_stdout_maps_write_and_flush_failures_to_stable_exit_codes() {
+        #[derive(Clone, Copy)]
+        enum FailurePoint {
+            Write(io::ErrorKind),
+            Flush(io::ErrorKind),
+        }
+
+        struct FailingWriter(FailurePoint);
+
+        impl Write for FailingWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                match self.0 {
+                    FailurePoint::Write(kind) => Err(io::Error::new(kind, "write failed")),
+                    FailurePoint::Flush(_) => Ok(buffer.len()),
+                }
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                match self.0 {
+                    FailurePoint::Write(_) => Ok(()),
+                    FailurePoint::Flush(kind) => Err(io::Error::new(kind, "flush failed")),
+                }
+            }
+        }
+
+        for failure in [
+            FailurePoint::Write(io::ErrorKind::BrokenPipe),
+            FailurePoint::Flush(io::ErrorKind::BrokenPipe),
+        ] {
+            let mut output = CliStdout::new(FailingWriter(failure));
+            assert!(emit_bytes_stdout(&mut output, b"consumer-closed"));
+            assert_eq!(output.finish(2), 0);
+        }
+
+        for failure in [
+            FailurePoint::Write(io::ErrorKind::PermissionDenied),
+            FailurePoint::Flush(io::ErrorKind::PermissionDenied),
+        ] {
+            let mut output = CliStdout::new(FailingWriter(failure));
+            assert!(emit_json_stdout(&mut output, &json!({"ok": true})));
+            assert_eq!(output.finish(0), 1);
+        }
+
+        let mut output = CliStdout::new(Vec::new());
+        assert!(emit_jsonl_stdout(
+            &mut output,
+            &[json!({"id": 1}), json!({"id": 2})]
+        ));
+        assert_eq!(output.finish(2), 2);
     }
 
     #[test]
@@ -5412,6 +5554,7 @@ mod tests {
     fn run_assert_dispatch_with_schema_engine_flags_preserves_exit_mapping() {
         let schema_path = PathBuf::from("/definitely-missing/schema.json");
         let input_path = PathBuf::from("/definitely-missing/input.json");
+        let mut output = io::sink();
         let legacy_exit = run_assert(
             AssertArgs {
                 rules: None,
@@ -5426,6 +5569,7 @@ mod tests {
                 schema_help: false,
             },
             false,
+            &mut output,
         );
         let flagged_exit = run_assert(
             AssertArgs {
@@ -5441,6 +5585,7 @@ mod tests {
                 schema_help: false,
             },
             false,
+            &mut output,
         );
         assert_eq!(legacy_exit, 3);
         assert_eq!(flagged_exit, legacy_exit);
@@ -5448,6 +5593,7 @@ mod tests {
 
     #[test]
     fn run_wrappers_cover_input_usage_exit_paths() {
+        let mut output = io::sink();
         assert_eq!(
             run_ingest_notes(
                 IngestNotesArgs {
@@ -5457,6 +5603,7 @@ mod tests {
                     to: CliIngestNotesOutput::Json,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5468,6 +5615,7 @@ mod tests {
                     input: "/definitely-missing/ingest-jc-input.txt".to_string(),
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5479,6 +5627,7 @@ mod tests {
                     from: CliIngestDocFormat::Md,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5490,6 +5639,7 @@ mod tests {
                     include_files: false,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5502,6 +5652,7 @@ mod tests {
                     from: None,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5514,6 +5665,7 @@ mod tests {
                     source: Some(CliGatePolicySource::ScanText),
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5524,6 +5676,7 @@ mod tests {
                     input: Some(PathBuf::from("/definitely-missing/input.csv")),
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5537,6 +5690,7 @@ mod tests {
                     policy_path: Vec::new(),
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5550,6 +5704,7 @@ mod tests {
                     how: CliJoinHow::Inner,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5566,6 +5721,7 @@ mod tests {
                     limit: None,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5581,6 +5737,7 @@ mod tests {
                     jq_project: false,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5594,6 +5751,7 @@ mod tests {
                     mlr: vec!["cat".to_string()],
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5606,6 +5764,7 @@ mod tests {
                     input: "/definitely-missing/input.json".to_string(),
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5621,6 +5780,7 @@ mod tests {
                     value_diff_cap: sdiff::DEFAULT_VALUE_DIFF_CAP,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5633,6 +5793,7 @@ mod tests {
                     fail_on_diff: false,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5649,6 +5810,7 @@ mod tests {
                     sort_fields: CliProfileSortFields::Path,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5659,6 +5821,7 @@ mod tests {
                     file: PathBuf::from("/definitely-missing/recipe.txt"),
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5670,6 +5833,7 @@ mod tests {
                     out: None,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5682,6 +5846,7 @@ mod tests {
                     strict: true,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5693,6 +5858,7 @@ mod tests {
                     all: false,
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5704,6 +5870,7 @@ mod tests {
                     args: Some("not-json".to_string()),
                 },
                 true,
+                &mut output,
             ),
             3
         );
@@ -5716,6 +5883,7 @@ mod tests {
                     force: false,
                 },
                 true,
+                &mut output,
             ),
             0
         );
@@ -5723,6 +5891,7 @@ mod tests {
 
     #[test]
     fn subcommand_dispatchers_route_to_command_handlers() {
+        let mut output = io::sink();
         let ingest_exit = run_ingest(
             IngestArgs {
                 command: IngestSubcommand::Doc(IngestDocArgs {
@@ -5731,6 +5900,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(ingest_exit, 3);
 
@@ -5742,6 +5912,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(ingest_jc_exit, 3);
 
@@ -5754,6 +5925,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(gate_exit, 3);
 
@@ -5764,6 +5936,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(schema_exit, 3);
 
@@ -5777,6 +5950,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(transform_exit, 3);
 
@@ -5789,6 +5963,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(transform_sql_exit, 3);
 
@@ -5804,6 +5979,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(scan_exit, 3);
 
@@ -5816,6 +5992,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(diff_exit, 3);
 
@@ -5826,6 +6003,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(recipe_exit, 3);
 
@@ -5837,6 +6015,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(emit_exit, 3);
 
@@ -5849,6 +6028,7 @@ mod tests {
                 }),
             },
             false,
+            &mut output,
         );
         assert_eq!(codex_exit, 0);
     }

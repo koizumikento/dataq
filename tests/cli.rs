@@ -36,5 +36,7 @@ mod scan_cli;
 mod schema_cli;
 #[path = "cli/sdiff_cli.rs"]
 mod sdiff_cli;
+#[path = "cli/stdout_cli.rs"]
+mod stdout_cli;
 #[path = "cli/transform_cli.rs"]
 mod transform_cli;
