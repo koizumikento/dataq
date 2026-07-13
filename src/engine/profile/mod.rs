@@ -678,18 +678,37 @@ fn compute_numeric_stats(samples: &[f64]) -> Option<ProfileNumericStats> {
     sorted_samples.sort_by(f64::total_cmp);
 
     let count = sorted_samples.len();
-    let mean = sorted_samples.iter().sum::<f64>() / count as f64;
+    let mean = numeric_mean(&sorted_samples);
     let p50 = nearest_rank_percentile(&sorted_samples, 50);
     let p95 = nearest_rank_percentile(&sorted_samples, 95);
 
     Some(ProfileNumericStats {
         count,
-        min: round_numeric_stat(sorted_samples[0]),
-        max: round_numeric_stat(sorted_samples[count - 1]),
-        mean: round_numeric_stat(mean),
-        p50: round_numeric_stat(p50),
-        p95: round_numeric_stat(p95),
+        min: round_native_numeric_stat(sorted_samples[0]),
+        max: round_native_numeric_stat(sorted_samples[count - 1]),
+        mean: round_native_numeric_stat(mean),
+        p50: round_native_numeric_stat(p50),
+        p95: round_native_numeric_stat(p95),
     })
+}
+
+fn numeric_mean(samples: &[f64]) -> f64 {
+    let direct_sum = samples.iter().sum::<f64>();
+    if direct_sum.is_finite() {
+        return direct_sum / samples.len() as f64;
+    }
+
+    let max_abs = samples
+        .iter()
+        .map(|sample| sample.abs())
+        .fold(0.0, f64::max);
+    if max_abs == 0.0 {
+        return 0.0;
+    }
+
+    let normalized_sum = samples.iter().map(|sample| sample / max_abs).sum::<f64>();
+    let normalized_mean = (normalized_sum / samples.len() as f64).clamp(-1.0, 1.0);
+    normalized_mean * max_abs
 }
 
 fn nearest_rank_percentile(sorted_samples: &[f64], percentile: usize) -> f64 {
@@ -701,6 +720,16 @@ fn nearest_rank_percentile(sorted_samples: &[f64], percentile: usize) -> f64 {
 
 fn round_numeric_stat(value: f64) -> f64 {
     let rounded = (value * NUMERIC_STAT_SCALE).round() / NUMERIC_STAT_SCALE;
+    if rounded == 0.0 { 0.0 } else { rounded }
+}
+
+fn round_native_numeric_stat(value: f64) -> f64 {
+    let scaled = value * NUMERIC_STAT_SCALE;
+    let rounded = if scaled.is_finite() {
+        scaled.round() / NUMERIC_STAT_SCALE
+    } else {
+        value
+    };
     if rounded == 0.0 { 0.0 } else { rounded }
 }
 
@@ -801,6 +830,49 @@ mod tests {
         assert_eq!(numeric.mean, 26.583333);
         assert_eq!(numeric.p50, 2.0);
         assert_eq!(numeric.p95, 100.0);
+    }
+
+    #[test]
+    fn profiles_large_finite_numeric_stats_without_intermediate_overflow() {
+        let cases = [
+            (vec![1e308], 1e308, 1e308, 1e308),
+            (vec![1e308, 1e308], 1e308, 1e308, 1e308),
+            (vec![-1e308, -1e308], -1e308, -1e308, -1e308),
+            (vec![-1e308, -1e308, 1e308, 1e308], -1e308, 1e308, 0.0),
+        ];
+
+        for (samples, expected_min, expected_max, expected_mean) in cases {
+            let values: Vec<_> = samples
+                .into_iter()
+                .map(|score| json!({"score": score}))
+                .collect();
+            let report = profile_values(&values);
+            let numeric = report.fields["$[\"score\"]"]
+                .numeric_stats
+                .as_ref()
+                .expect("numeric stats");
+
+            assert_eq!(numeric.min, expected_min);
+            assert_eq!(numeric.max, expected_max);
+            assert_eq!(numeric.mean, expected_mean);
+            assert!(numeric.min.is_finite());
+            assert!(numeric.max.is_finite());
+            assert!(numeric.mean.is_finite());
+            assert!(numeric.p50.is_finite());
+            assert!(numeric.p95.is_finite());
+        }
+    }
+
+    #[test]
+    fn native_numeric_rounding_normalizes_negative_zero() {
+        let report = profile_values(&[json!({"score": -0.0000001})]);
+        let numeric = report.fields["$[\"score\"]"]
+            .numeric_stats
+            .as_ref()
+            .expect("numeric stats");
+
+        assert_eq!(numeric.mean, 0.0);
+        assert!(numeric.mean.is_sign_positive());
     }
 
     #[test]

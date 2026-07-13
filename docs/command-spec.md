@@ -351,6 +351,8 @@ dataq transform sql --input orders.json --engine duckdb --query 'SELECT team, SU
   - `rank = ceil(p * n)`（`p` は 0.50 / 0.95）
   - `index = rank - 1`（0始まり）
 - `numeric_stats` の浮動小数は小数点以下6桁に丸めて出力
+- native profile は丸め用のスケール乗算や平均の単純加算で overflow する大きな有限 JSON number でも、表現可能な統計値を有限 JSON number として出力する
+- JSON number として表現不能な入力は `input_usage_error`（exit `3`）とし、統計値を `null` に置換しない
 
 ## `ingest doc` コマンド契約（MVP）
 

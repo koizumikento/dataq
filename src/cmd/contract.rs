@@ -180,6 +180,7 @@ const DIFF_SOURCE_NOTES: &[&str] = &[
 const PROFILE_NOTES: &[&str] = &[
     "`fields` keys are canonical JSON paths in deterministic order.",
     "`numeric_stats` is omitted when no numeric samples exist.",
+    "Native `numeric_stats` retain finite, representable large JSON numbers without intermediate rounding or mean overflow.",
     "`--field` projects `fields` after profile computation; `field_count` remains the total input field count.",
     "`returned_field_count` is emitted only when projection is requested.",
     "`missing_fields` is emitted when `--allow-missing-fields` is used.",
