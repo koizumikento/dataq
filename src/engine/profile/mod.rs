@@ -161,7 +161,7 @@ pub fn normalize_qsv_profile_rows(values: &[Value]) -> Result<Option<ProfileRepo
         }
 
         let numeric_stats = if matches!(normalized_type_bucket(type_name), QsvTypeBucket::Number) {
-            parse_qsv_numeric_stats(row, &columns, non_null_count)
+            parse_qsv_numeric_stats(row, &columns, index, non_null_count)?
         } else {
             None
         };
@@ -226,36 +226,101 @@ fn normalized_type_bucket(type_name: &str) -> QsvTypeBucket {
 fn parse_qsv_numeric_stats(
     row: &Map<String, Value>,
     columns: &QsvColumns,
-    non_null_count: usize,
-) -> Option<ProfileNumericStats> {
-    if non_null_count == 0 {
-        return None;
+    index: usize,
+    field_non_null_count: usize,
+) -> Result<Option<ProfileNumericStats>, String> {
+    let Some(sample_count) = qsv_numeric_sample_count(row, columns, index)? else {
+        return Ok(None);
+    };
+    if sample_count == 0 {
+        return Ok(None);
+    }
+    if sample_count > field_non_null_count {
+        return Err(format!(
+            "qsv profile row {index} numeric sample count {sample_count} exceeds field non-null count {field_non_null_count}"
+        ));
     }
 
-    let min = parse_float(row_cell_opt(row, columns.min.as_deref())?).ok()?;
-    let max = parse_float(row_cell_opt(row, columns.max.as_deref())?).ok()?;
-    let mean = parse_float(row_cell_opt(row, columns.mean.as_deref())?).ok()?;
+    let Some(min) =
+        row_cell_opt(row, columns.min.as_deref()).and_then(|value| parse_float(value).ok())
+    else {
+        return Ok(None);
+    };
+    let Some(max) =
+        row_cell_opt(row, columns.max.as_deref()).and_then(|value| parse_float(value).ok())
+    else {
+        return Ok(None);
+    };
+    let Some(mean) =
+        row_cell_opt(row, columns.mean.as_deref()).and_then(|value| parse_float(value).ok())
+    else {
+        return Ok(None);
+    };
     let p50 = if let Some(value) = row_cell_opt(row, columns.p50.as_deref()) {
-        parse_float(value).ok()?
+        let Ok(value) = parse_float(value) else {
+            return Ok(None);
+        };
+        value
     } else {
-        let percentiles = row_cell_opt(row, columns.percentiles.as_deref())?;
-        parse_percentile_value(percentiles, 50)?
+        let Some(percentiles) = row_cell_opt(row, columns.percentiles.as_deref()) else {
+            return Ok(None);
+        };
+        let Some(value) = parse_percentile_value(percentiles, 50) else {
+            return Ok(None);
+        };
+        value
     };
     let p95 = if let Some(value) = row_cell_opt(row, columns.p95.as_deref()) {
-        parse_float(value).ok()?
+        let Ok(value) = parse_float(value) else {
+            return Ok(None);
+        };
+        value
     } else {
-        let percentiles = row_cell_opt(row, columns.percentiles.as_deref())?;
-        parse_percentile_value(percentiles, 95)?
+        let Some(percentiles) = row_cell_opt(row, columns.percentiles.as_deref()) else {
+            return Ok(None);
+        };
+        let Some(value) = parse_percentile_value(percentiles, 95) else {
+            return Ok(None);
+        };
+        value
     };
 
-    Some(ProfileNumericStats {
-        count: non_null_count,
+    Ok(Some(ProfileNumericStats {
+        count: sample_count,
         min: round_numeric_stat(min),
         max: round_numeric_stat(max),
         mean: round_numeric_stat(mean),
         p50: round_numeric_stat(p50),
         p95: round_numeric_stat(p95),
-    })
+    }))
+}
+
+fn qsv_numeric_sample_count(
+    row: &Map<String, Value>,
+    columns: &QsvColumns,
+    index: usize,
+) -> Result<Option<usize>, String> {
+    let (Some(negative_column), Some(zero_column), Some(positive_column)) = (
+        columns.n_negative.as_deref(),
+        columns.n_zero.as_deref(),
+        columns.n_positive.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let counters = [
+        parse_qsv_counter(row, negative_column, index)?,
+        parse_qsv_counter(row, zero_column, index)?,
+        parse_qsv_counter(row, positive_column, index)?,
+    ];
+    if counters.iter().any(Option::is_none) {
+        return Ok(None);
+    }
+    counters
+        .into_iter()
+        .flatten()
+        .try_fold(0usize, usize::checked_add)
+        .ok_or_else(|| format!("qsv profile row {index} numeric sample counters overflow"))
+        .map(Some)
 }
 
 fn parse_percentile_value(text: &str, percentile: usize) -> Option<f64> {
@@ -818,7 +883,9 @@ fn append_object_key_path(path: &str, key: &str) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{normalize_qsv_profile_rows, parse_optional_usize, profile_values};
+    use super::{
+        ProfileTypeDistribution, normalize_qsv_profile_rows, parse_optional_usize, profile_values,
+    };
 
     #[test]
     fn profiles_flat_fields_with_deterministic_counts() {
@@ -960,6 +1027,9 @@ mod tests {
                 "nullcount": "1",
                 "cardinality": "3",
                 "record_count": "4",
+                "n_negative": "0",
+                "n_zero": "0",
+                "n_positive": "3",
                 "min": "1",
                 "max": "4",
                 "mean": "2.3333333",
@@ -972,6 +1042,9 @@ mod tests {
                 "nullcount": "2",
                 "cardinality": "2",
                 "record_count": "4",
+                "n_negative": "",
+                "n_zero": "",
+                "n_positive": "",
                 "min": "",
                 "max": "",
                 "mean": "",
@@ -1135,7 +1208,12 @@ mod tests {
                 "n_negative": "0",
                 "n_zero": "0",
                 "n_positive": "4",
-                "sparsity": "0"
+                "sparsity": "0",
+                "min": "1",
+                "max": "4",
+                "mean": "2.5",
+                "q2_median": "2.5",
+                "p95": "4"
             }),
             json!({
                 "field": "value",
@@ -1145,7 +1223,12 @@ mod tests {
                 "n_negative": "0",
                 "n_zero": "0",
                 "n_positive": "3",
-                "sparsity": "0"
+                "sparsity": "0",
+                "min": "1",
+                "max": "3",
+                "mean": "2",
+                "q2_median": "2",
+                "p95": "3"
             }),
         ];
 
@@ -1158,6 +1241,86 @@ mod tests {
         assert_eq!(value.type_distribution.number, 4);
         assert_eq!(value.type_distribution.null, 0);
         assert_eq!(value.null_ratio, 0.0);
+        let numeric = value.numeric_stats.as_ref().expect("numeric stats");
+        assert_eq!(numeric.count, 3);
+        assert_eq!(numeric.mean, 2.0);
+        assert_eq!(numeric.p95, 3.0);
+    }
+
+    #[test]
+    fn qsv_normalization_omits_numeric_stats_without_exact_row_sample_count() {
+        let values = vec![json!({
+            "field": "value",
+            "type": "Float",
+            "nullcount": "0",
+            "cardinality": "4",
+            "record_count": "4",
+            "n_negative": "",
+            "n_zero": "0",
+            "n_positive": "3",
+            "min": "1",
+            "max": "3",
+            "mean": "2",
+            "q2_median": "2",
+            "p95": "3"
+        })];
+
+        let report = normalize_qsv_profile_rows(&values)
+            .expect("qsv normalization")
+            .expect("qsv profile rows");
+
+        let value = report.fields.get("$[\"value\"]").expect("value field");
+        assert_eq!(value.type_distribution.number, 4);
+        assert!(value.numeric_stats.is_none());
+    }
+
+    #[test]
+    fn qsv_normalization_rejects_numeric_sample_counter_overflow() {
+        let max = usize::MAX.to_string();
+        let values = vec![json!({
+            "field": "value",
+            "type": "Float",
+            "nullcount": "0",
+            "cardinality": "1",
+            "record_count": max,
+            "n_negative": usize::MAX.to_string(),
+            "n_zero": "1",
+            "n_positive": "0",
+            "min": "-1",
+            "max": "0",
+            "mean": "-0.5",
+            "q2_median": "-1",
+            "p95": "0"
+        })];
+
+        let error = normalize_qsv_profile_rows(&values).expect_err("overflowing sample count");
+
+        assert!(error.contains("numeric sample counters overflow"));
+    }
+
+    #[test]
+    fn qsv_normalization_rejects_numeric_sample_count_above_field_non_null_count() {
+        let values = vec![json!({
+            "field": "value",
+            "type": "Float",
+            "nullcount": "0",
+            "cardinality": "2",
+            "record_count": "2",
+            "n_negative": "0",
+            "n_zero": "0",
+            "n_positive": "3",
+            "min": "1",
+            "max": "3",
+            "mean": "2",
+            "q2_median": "2",
+            "p95": "3"
+        })];
+
+        let error =
+            normalize_qsv_profile_rows(&values).expect_err("sample count above non-null count");
+
+        assert!(error.contains("numeric sample count 3"));
+        assert!(error.contains("field non-null count 2"));
     }
 
     #[test]
@@ -1320,6 +1483,93 @@ mod tests {
                 .number,
             0
         );
+    }
+
+    #[test]
+    fn qsv_normalization_proves_single_null_metadata_row_is_empty() {
+        let values = vec![json!({
+            "field": "name",
+            "type": "NULL",
+            "nullcount": "0",
+            "cardinality": "0",
+            "percentiles": ""
+        })];
+
+        let report = normalize_qsv_profile_rows(&values)
+            .expect("qsv normalization")
+            .expect("qsv profile rows");
+
+        assert_eq!(report.record_count, 0);
+        assert_eq!(report.field_count, 1);
+        let name = report.fields.get("$[\"name\"]").expect("name field");
+        assert_eq!(name.null_ratio, 0.0);
+        assert_eq!(name.type_distribution, ProfileTypeDistribution::default());
+        assert_eq!(name.unique_count, 0);
+    }
+
+    #[test]
+    fn qsv_normalization_proves_multiple_null_metadata_rows_are_empty() {
+        let values = vec![
+            json!({
+                "field": "name",
+                "type": "NULL",
+                "nullcount": "0",
+                "cardinality": "0",
+                "percentiles": ""
+            }),
+            json!({
+                "field": "city",
+                "type": "NULL",
+                "nullcount": "0",
+                "cardinality": "0"
+            }),
+        ];
+
+        let report = normalize_qsv_profile_rows(&values)
+            .expect("qsv normalization")
+            .expect("qsv profile rows");
+
+        assert_eq!(report.record_count, 0);
+        assert_eq!(report.field_count, 2);
+        for field in report.fields.values() {
+            assert_eq!(field.null_ratio, 0.0);
+            assert_eq!(field.type_distribution, ProfileTypeDistribution::default());
+            assert_eq!(field.unique_count, 0);
+        }
+    }
+
+    #[test]
+    fn qsv_normalization_does_not_treat_nonempty_null_field_as_empty_proof() {
+        let values = vec![
+            json!({
+                "field": "id",
+                "type": "Integer",
+                "nullcount": "0",
+                "cardinality": "2",
+                "n_negative": "0",
+                "n_zero": "0",
+                "n_positive": "2"
+            }),
+            json!({
+                "field": "empty",
+                "type": "NULL",
+                "nullcount": "2",
+                "cardinality": "1",
+                "n_negative": "",
+                "n_zero": "",
+                "n_positive": ""
+            }),
+        ];
+
+        let report = normalize_qsv_profile_rows(&values)
+            .expect("qsv normalization")
+            .expect("qsv profile rows");
+
+        assert_eq!(report.record_count, 2);
+        let empty = report.fields.get("$[\"empty\"]").expect("empty field");
+        assert_eq!(empty.null_ratio, 1.0);
+        assert_eq!(empty.type_distribution.null, 2);
+        assert_eq!(empty.unique_count, 1);
     }
 
     #[test]

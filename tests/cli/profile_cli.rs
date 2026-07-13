@@ -9,6 +9,10 @@ const QSV_20_1_EVERYTHING_NAN_SINGLE: &str =
     include_str!("../fixtures/input/profile_qsv_20_1_everything_nan_single.csv");
 const QSV_20_1_EVERYTHING_NAN_MIXED: &str =
     include_str!("../fixtures/input/profile_qsv_20_1_everything_nan_mixed.csv");
+const QSV_20_1_EVERYTHING_EMPTY: &str =
+    include_str!("../fixtures/input/profile_qsv_20_1_everything_empty.csv");
+const QSV_20_1_EVERYTHING_NULL_MIXED: &str =
+    include_str!("../fixtures/input/profile_qsv_20_1_everything_null_mixed.csv");
 
 #[test]
 fn profile_command_returns_expected_json_for_json_input() {
@@ -179,9 +183,9 @@ fn profile_command_csv_type_distribution_is_stable() {
 
 #[test]
 fn profile_command_normalizes_qsv_csv_rows() {
-    let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
-id,Integer,1,3,4,1,4,2.333333,2,4\n\
-flag,String,2,2,4,,,,,\n";
+    let qsv_rows = "field,type,nullcount,cardinality,record_count,n_negative,n_zero,n_positive,min,max,mean,q2_median,p95\n\
+id,Integer,1,3,4,0,0,3,1,4,2.333333,2,4\n\
+flag,String,2,2,4,,,,,,,,\n";
 
     let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["profile", "--from", "csv"])
@@ -290,17 +294,85 @@ fn profile_command_uses_integer_count_for_real_qsv_float_nan_field() {
         .clone();
 
     let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
-    assert_eq!(actual["record_count"], json!(4));
+    assert_eq!(actual["record_count"], json!(21));
     assert_eq!(actual["field_count"], json!(2));
     assert_eq!(
         actual["fields"]["$[\"value\"]"]["type_distribution"]["number"],
-        json!(4)
+        json!(21)
     );
     assert_eq!(
         actual["fields"]["$[\"value\"]"]["type_distribution"]["null"],
         json!(0)
     );
     assert_eq!(actual["fields"]["$[\"value\"]"]["null_ratio"], json!(0.0));
+    assert_eq!(
+        actual["fields"]["$[\"value\"]"]["numeric_stats"]["count"],
+        json!(20)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"value\"]"]["numeric_stats"]["mean"],
+        json!(10.5)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"value\"]"]["numeric_stats"]["p95"],
+        json!(20.0)
+    );
+}
+
+#[test]
+fn profile_command_normalizes_real_qsv_20_1_empty_rows() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "csv"])
+        .write_stdin(QSV_20_1_EVERYTHING_EMPTY)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["record_count"], json!(0));
+    assert_eq!(actual["field_count"], json!(2));
+    for path in ["$[\"city\"]", "$[\"name\"]"] {
+        assert_eq!(actual["fields"][path]["null_ratio"], json!(0.0));
+        assert_eq!(actual["fields"][path]["unique_count"], json!(0));
+        assert_eq!(
+            actual["fields"][path]["type_distribution"],
+            json!({
+                "null": 0,
+                "boolean": 0,
+                "number": 0,
+                "string": 0,
+                "array": 0,
+                "object": 0
+            })
+        );
+    }
+}
+
+#[test]
+fn profile_command_does_not_treat_nonempty_null_field_as_empty_proof() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "csv"])
+        .write_stdin(QSV_20_1_EVERYTHING_NULL_MIXED)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    assert_eq!(actual["record_count"], json!(2));
+    assert_eq!(actual["field_count"], json!(2));
+    assert_eq!(
+        actual["fields"]["$[\"empty\"]"]["type_distribution"]["null"],
+        json!(2)
+    );
+    assert_eq!(
+        actual["fields"]["$[\"empty\"]"]["type_distribution"]["number"],
+        json!(0)
+    );
+    assert_eq!(actual["fields"]["$[\"empty\"]"]["null_ratio"], json!(1.0));
 }
 
 #[test]
@@ -422,9 +494,9 @@ fn profile_command_rejects_empty_or_invalid_projection_field() {
 
 #[test]
 fn profile_command_projects_qsv_normalized_profile_rows() {
-    let qsv_rows = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
-id,Integer,1,3,4,1,4,2.333333,2,4\n\
-flag,String,2,2,4,,,,,\n";
+    let qsv_rows = "field,type,nullcount,cardinality,record_count,n_negative,n_zero,n_positive,min,max,mean,q2_median,p95\n\
+id,Integer,1,3,4,0,0,3,1,4,2.333333,2,4\n\
+flag,String,2,2,4,,,,,,,,\n";
 
     let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
         .args(["profile", "--from", "csv", "--field", "flag"])
