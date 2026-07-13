@@ -181,6 +181,16 @@ fn contract_profile_command_mentions_projection_fields() {
             .iter()
             .any(|note| note.as_str().unwrap_or_default().contains("--brief"))
     );
+    assert!(
+        payload["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note
+                .as_str()
+                .unwrap_or_default()
+                .contains("large JSON numbers"))
+    );
 }
 
 #[test]

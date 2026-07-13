@@ -105,6 +105,35 @@ fn profile_command_numeric_stats_respect_null_mixing_and_non_numeric_fields() {
 }
 
 #[test]
+fn profile_command_keeps_large_finite_numeric_stats_as_json_numbers() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "json"])
+        .write_stdin(r#"[{"score":1e308},{"score":1e308}]"#)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    let actual: serde_json::Value = serde_json::from_slice(&output).expect("parse profile output");
+    let numeric = &actual["fields"]["$[\"score\"]"]["numeric_stats"];
+    for name in ["min", "max", "mean", "p50", "p95"] {
+        assert_eq!(numeric[name].as_f64(), Some(1e308), "statistic {name}");
+    }
+}
+
+#[test]
+fn profile_command_rejects_unrepresentable_json_numbers() {
+    assert_cmd::cargo::cargo_bin_cmd!("dataq")
+        .args(["profile", "--from", "json"])
+        .write_stdin(r#"[{"score":1e400}]"#)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("\"error\":\"input_usage_error\""))
+        .stderr(predicate::str::contains("number out of range"));
+}
+
+#[test]
 fn profile_command_csv_type_distribution_is_stable() {
     let input = "id,flag\n1,true\n2,\n3,false\n";
     let first_output = assert_cmd::cargo::cargo_bin_cmd!("dataq")

@@ -594,6 +594,8 @@ mdBook ルートを解析し、`SUMMARY.md` と book メタデータを決定的
 - 数値サンプルは JSON number 型のみを対象（null/文字列/真偽値などは対象外）
 - `p50` / `p95` は nearest-rank 方式（`rank = ceil(p * n)`、`index = rank - 1`、0始まり配列で評価）
 - `numeric_stats` の浮動小数は小数点以下6桁へ丸め（`round half away from zero` 相当）
+- native profile では、6桁丸めの途中計算や単純加算が overflow する大きな有限 JSON number も、表現可能な `min` / `max` / `mean` / `p50` / `p95` を有限 JSON number のまま保持
+- JSON number として表現不能な入力は `input_usage_error`（exit `3`）として拒否
 
 ### 6. `join`
 
