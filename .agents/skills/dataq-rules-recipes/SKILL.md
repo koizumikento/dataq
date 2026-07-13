@@ -48,7 +48,7 @@ Author deterministic dataq rules and recipes, then prove them with the CLI's mac
    - `extends` accepts one path or a path list. Relative paths resolve from the file that declares them.
    - Parents apply in list order, followed by the current file.
    - `required_keys` and `forbid_keys` form deterministic unions; later `fields` entries win by field path; the last defined `count` wins.
-   - Rule paths use dot-separated object keys. Empty segments and array-index syntax are invalid.
+   - Rule paths use dot-delimited object keys. Empty paths and empty dot segments are invalid. Array traversal/index notation is unsupported; bracket text such as `items[0]` is treated as a literal object-key segment rather than parsed as an array index, so bracket notation alone is not exit `3`.
 6. Treat constraint mismatches as expected exit `2`. Unknown keys at any rule-schema level, malformed paths or constraints, missing/cyclic `extends`, and invalid input are exit `3`.
 
 ## Recipe Authoring Workflow
