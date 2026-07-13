@@ -121,6 +121,12 @@ dataq [--emit-pipeline] <command> [options]
 - `-h, --help`: ヘルプ
 - `-V, --version`: バージョン
 
+stdout のパイプ契約:
+
+- 後段プロセスが stdout を閉じたことによる `BrokenPipe` は、consumer-closed の正常終了として扱い、コマンド本来の終了コードが `2` でもプロセス終了コードは `0` にする
+- `BrokenPipe` では panic や `internal_error` を stderr に出さない。`--emit-pipeline` など明示的に要求された stderr 診断は stdout と分離したまま維持する
+- `BrokenPipe` 以外の stdout write/flush 失敗は `internal_error` として終了コード `1` にする。stdout を使わない入力・使用エラーの終了コード `3` は従来どおり
+
 ## LLM / agent quickstart
 
 LLM やエージェントに `dataq` を使わせるときは、長い README 全体を読むより、最初に環境・契約・データ形状を短く確認すると失敗を切り分けやすくなります。探索中の一時的な加工は `jq` / `yq` / `mlr` で構いませんが、再利用するパイプラインは `dataq` の固定コマンドと出力契約に寄せます。
@@ -914,7 +920,8 @@ MCP (Model Context Protocol) の単発JSON-RPC 2.0 リクエストを処理し�
   - `-32603` internal error
 - `mcp` モードのプロセス終了コード:
   - レスポンスを書き出せた場合は、ツール実行結果に関係なく `0`
-  - レスポンス出力不能な致命的I/O時のみ `3`
+  - stdout の `BrokenPipe` は consumer-closed の正常終了として `0`
+  - `BrokenPipe` 以外の stdout write/flush 失敗は `1`、stdin 読み取り失敗は `3`
 
 ### 20. `codex install-skill`
 
