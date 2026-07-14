@@ -10,17 +10,29 @@ use serde_json::Value;
 use tempfile::tempdir;
 
 fn run_with_closed_stdout(args: &[&str], stdin: &[u8]) -> Output {
+    run_with_closed_stdout_with_env(args, stdin, &[])
+}
+
+fn run_with_closed_stdout_with_env(
+    args: &[&str],
+    stdin: &[u8],
+    envs: &[(&str, &std::path::Path)],
+) -> Output {
     let (read_end, write_end) = UnixStream::pair().expect("stdout socket pair");
     drop(read_end);
     let write_end = OwnedFd::from(write_end);
 
-    let mut child = Command::new(assert_cmd::cargo::cargo_bin!("dataq"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("dataq"));
+    command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(write_end))
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn dataq");
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+
+    let mut child = command.spawn().expect("spawn dataq");
 
     let mut child_stdin = child.stdin.take().expect("child stdin");
     child_stdin.write_all(stdin).expect("write child stdin");
@@ -30,7 +42,12 @@ fn run_with_closed_stdout(args: &[&str], stdin: &[u8]) -> Output {
 }
 
 fn assert_consumer_closed_success(output: &Output) {
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         output.stderr.is_empty(),
         "stderr: {}",
@@ -95,8 +112,15 @@ fn recipe_lock_byte_output_accepts_a_closed_consumer() {
     let dir = tempdir().expect("temp dir");
     let recipe = dir.path().join("recipe.json");
     fs::write(&recipe, r#"{"version":"dataq.recipe.v1","steps":[]}"#).expect("write recipe");
+    let dataq_bin = assert_cmd::cargo::cargo_bin!("dataq");
+    // Use dataq's successful nonempty --version to isolate probes from host tool installs.
+    let tool_envs = [
+        ("DATAQ_JQ_BIN", dataq_bin),
+        ("DATAQ_YQ_BIN", dataq_bin),
+        ("DATAQ_MLR_BIN", dataq_bin),
+    ];
 
-    let output = run_with_closed_stdout(
+    let output = run_with_closed_stdout_with_env(
         &[
             "recipe",
             "lock",
@@ -104,6 +128,7 @@ fn recipe_lock_byte_output_accepts_a_closed_consumer() {
             recipe.to_str().expect("recipe path utf8"),
         ],
         b"",
+        &tool_envs,
     );
     assert_consumer_closed_success(&output);
 }
