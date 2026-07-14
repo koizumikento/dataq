@@ -224,6 +224,11 @@ mod tests {
     use crate::engine::profile::ProfileBriefSortFields;
     use crate::io::Format;
 
+    const QSV_20_1_EVERYTHING_MIXED: &str =
+        include_str!("../../tests/fixtures/input/profile_qsv_20_1_everything_mixed.csv");
+    const QSV_20_1_EVERYTHING_ALL_STRING: &str =
+        include_str!("../../tests/fixtures/input/profile_qsv_20_1_everything_all_string.csv");
+
     #[test]
     fn profile_api_success_with_json_stdin() {
         let args = ProfileCommandArgs {
@@ -285,20 +290,64 @@ mod tests {
             max_fields: None,
             sort_fields: ProfileBriefSortFields::Path,
         };
-        let input = "field,type,nullcount,cardinality,record_count,min,max,mean,q2_median,p95\n\
-id,Integer,1,3,4,1,4,2.333333,2,4\n\
-flag,String,2,2,4,,,,,\n";
-        let (response, trace) = run_with_stdin_and_trace(&args, Cursor::new(input));
+        let (response, trace) =
+            run_with_stdin_and_trace(&args, Cursor::new(QSV_20_1_EVERYTHING_MIXED));
 
         assert_eq!(response.exit_code, 0);
         assert_eq!(response.payload["record_count"], json!(4));
+        assert_eq!(response.payload["field_count"], json!(4));
         assert_eq!(
             response.payload["fields"]["$[\"id\"]"]["type_distribution"]["number"],
+            json!(4)
+        );
+        assert_eq!(
+            response.payload["fields"]["$[\"name\"]"]["type_distribution"]["string"],
             json!(3)
+        );
+        assert_eq!(
+            response.payload["fields"]["$[\"status\"]"]["type_distribution"]["string"],
+            json!(4)
+        );
+        assert_eq!(
+            response.payload["fields"]["$[\"status\"]"]["type_distribution"]["null"],
+            json!(0)
+        );
+        assert_eq!(
+            response.payload["fields"]["$[\"status\"]"]["null_ratio"],
+            json!(0.0)
         );
         assert_eq!(trace.used_tools, vec!["qsv".to_string()]);
         assert_eq!(trace.stage_diagnostics.len(), 1);
         assert_eq!(trace.stage_diagnostics[0].step, "profile_qsv_normalize");
         assert_eq!(trace.stage_diagnostics[0].status, "ok");
+    }
+
+    #[test]
+    fn profile_api_reports_ambiguous_qsv_rows_with_failure_trace() {
+        let args = ProfileCommandArgs {
+            input: None,
+            from: Some(Format::Csv),
+            fields: Vec::new(),
+            allow_missing_fields: false,
+            brief: false,
+            max_fields: None,
+            sort_fields: ProfileBriefSortFields::Path,
+        };
+
+        let (response, trace) =
+            run_with_stdin_and_trace(&args, Cursor::new(QSV_20_1_EVERYTHING_ALL_STRING));
+
+        assert_eq!(response.exit_code, 3);
+        assert_eq!(response.payload["error"], json!("input_usage_error"));
+        assert!(
+            response.payload["message"]
+                .as_str()
+                .expect("error message")
+                .contains("`record_count`, `records`, `rows`, `row_count`, or `total_rows`")
+        );
+        assert_eq!(trace.used_tools, vec!["qsv".to_string()]);
+        assert_eq!(trace.stage_diagnostics.len(), 1);
+        assert_eq!(trace.stage_diagnostics[0].step, "profile_qsv_normalize");
+        assert_eq!(trace.stage_diagnostics[0].status, "error");
     }
 }
