@@ -19,6 +19,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: publish-package-repository-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   publish-tap:
     name: Update tap formula

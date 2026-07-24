@@ -292,6 +292,17 @@ brew install koizumikento/stray-tools/dataq
 
 詳細な設定手順は `docs/homebrew-tap.md` を参照してください。
 
+#### Scoop（Windows）
+
+```powershell
+scoop bucket add stray-tools https://github.com/koizumikento/stray-tools
+scoop install stray-tools/dataq
+```
+
+Scoop manifest は Windows x86_64 用の `dataq.exe` を導入します。Homebrew formula と異なり、連携ツールは自動では導入しません。
+
+公開設定と制約の詳細は `docs/scoop-bucket.md` を参照してください。
+
 #### Claude Code plugin
 
 このリポジトリは Claude Code plugin 構成も含みます。
@@ -340,6 +351,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80 --fail-under-reg
 - タグ名に `-` を含む場合（例: `v0.1.0-rc.1`）は GitHub Pre-release として公開します
 - この workflow は `crates.io` 公開を行いません（将来は別 workflow で分離予定）
 - Release 公開後、`publish-homebrew-tap.yml` により tap リポジトリの `Formula/dataq.rb` を自動更新できます（設定手順: `docs/homebrew-tap.md`）
+- Release 公開後、`publish-scoop-bucket.yml` により Scoop bucket リポジトリの `bucket/dataq.json` を自動更新できます（設定手順: [`docs/scoop-bucket.md`](docs/scoop-bucket.md)）
 
 ### コントリビュート
 
