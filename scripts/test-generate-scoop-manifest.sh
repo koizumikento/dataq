@@ -56,7 +56,51 @@ cmp "${output}" "${test_dir}/second.json"
   --repo example-org/dataq \
   --windows-sha "${sha}" \
   --output "${test_dir}/prerelease.json"
-grep -F '"version": "2.0.0-rc.1"' "${test_dir}/prerelease.json" >/dev/null
+
+cat > "${test_dir}/expected-prerelease.json" <<'EOF'
+{
+  "version": "2.0.0-rc.1",
+  "description": "Rust-native CLI for deterministic data preprocessing",
+  "homepage": "https://github.com/example-org/dataq",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/example-org/dataq/releases/download/v2.0.0-rc.1/dataq-v2.0.0-rc.1-x86_64-pc-windows-msvc.zip",
+      "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  },
+  "bin": "dataq.exe",
+  "checkver": {
+    "github": "https://github.com/example-org/dataq"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/example-org/dataq/releases/download/v$version/dataq-v$version-x86_64-pc-windows-msvc.zip"
+      }
+    }
+  }
+}
+EOF
+
+cmp "${test_dir}/expected-prerelease.json" "${test_dir}/prerelease.json"
+"${generator}" \
+  --tag v2.0.0-rc.1 \
+  --repo example-org/dataq \
+  --windows-sha "${sha}" \
+  --output "${test_dir}/prerelease-second.json"
+cmp "${test_dir}/prerelease.json" "${test_dir}/prerelease-second.json"
+
+"${generator}" \
+  --tag v1.2.3-0 \
+  --repo koizumikento/dataq \
+  --windows-sha "${sha}" \
+  --output "${test_dir}/numeric-zero-prerelease.json"
+"${generator}" \
+  --tag v1.2.3-01a \
+  --repo koizumikento/dataq \
+  --windows-sha "${sha}" \
+  --output "${test_dir}/alphanumeric-prerelease.json"
 
 expect_usage_error() {
   local name="$1"
@@ -91,6 +135,10 @@ expect_usage_error invalid_tag \
   --tag 1.2.3 --repo koizumikento/dataq --windows-sha "${sha}" --output "${test_dir}/invalid.json"
 expect_usage_error invalid_tag_shape \
   --tag v01.2.3 --repo koizumikento/dataq --windows-sha "${sha}" --output "${test_dir}/invalid.json"
+expect_usage_error numeric_prerelease_leading_zero \
+  --tag v1.2.3-01 --repo koizumikento/dataq --windows-sha "${sha}" --output "${test_dir}/invalid.json"
+expect_usage_error dotted_numeric_prerelease_leading_zero \
+  --tag v1.2.3-rc.01 --repo koizumikento/dataq --windows-sha "${sha}" --output "${test_dir}/invalid.json"
 expect_usage_error whitespace_tag \
   --tag 'v1.2.3 rc.1' --repo koizumikento/dataq --windows-sha "${sha}" --output "${test_dir}/invalid.json"
 expect_usage_error slash_path_tag \

@@ -62,11 +62,14 @@ jobs:
             echo "release tag could not be resolved" >&2
             exit 1
           fi
-          semver_tag_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
-          if ! [[ "${release_tag}" =~ ${semver_tag_regex} ]]; then
-            echo "invalid release tag: ${release_tag}" >&2
-            exit 1
-          fi
+
+          validation_manifest="${RUNNER_TEMP}/dataq-scoop-tag-validation.json"
+          ./scripts/generate-scoop-manifest.sh \
+            --tag "${release_tag}" \
+            --repo "${SOURCE_REPO}" \
+            --windows-sha "0000000000000000000000000000000000000000000000000000000000000000" \
+            --output "${validation_manifest}"
+          rm -f "${validation_manifest}"
           echo "RELEASE_TAG=${release_tag}" >> "$GITHUB_ENV"
 
           if [[ -n "${SCOOP_BUCKET_REPO_CONFIG}" ]]; then
@@ -84,25 +87,28 @@ jobs:
           fi
           echo "BUCKET_REPO=${bucket_repo}" >> "$GITHUB_ENV"
 
-      - name: Download Windows checksum asset
+      - name: Download Windows release assets
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p dist
+          archive="dataq-${RELEASE_TAG}-x86_64-pc-windows-msvc.zip"
           checksum="dataq-${RELEASE_TAG}-x86_64-pc-windows-msvc.sha256"
 
           for attempt in 1 2 3 4 5; do
-            rm -f "dist/${checksum}"
+            rm -f "dist/${archive}" "dist/${checksum}"
             if gh release download "${RELEASE_TAG}" \
               --repo "${SOURCE_REPO}" \
+              --pattern "${archive}" \
               --pattern "${checksum}" \
-              --dir dist; then
+              --dir dist &&
+               [[ -f "dist/${archive}" && -f "dist/${checksum}" ]]; then
               break
             fi
             if [[ "${attempt}" == "5" ]]; then
-              echo "failed to download Windows checksum ${checksum} for ${RELEASE_TAG}" >&2
+              echo "failed to download Windows release assets ${archive} and ${checksum} for ${RELEASE_TAG}" >&2
               exit 1
             fi
             sleep 10
@@ -113,26 +119,38 @@ jobs:
         run: |
           set -euo pipefail
           archive="dataq-${RELEASE_TAG}-x86_64-pc-windows-msvc.zip"
+          archive_file="dist/${archive}"
           checksum_file="dist/dataq-${RELEASE_TAG}-x86_64-pc-windows-msvc.sha256"
 
+          if [[ ! -f "${archive_file}" ]]; then
+            echo "Windows release archive is missing: ${archive_file}" >&2
+            exit 1
+          fi
           if [[ ! -f "${checksum_file}" ]]; then
             echo "Windows checksum file is missing: ${checksum_file}" >&2
             exit 1
           fi
 
-          mapfile -t checksum_lines < <(sed 's/\r$//' "${checksum_file}")
-          if [[ "${#checksum_lines[@]}" -ne 1 ]]; then
+          checksum_line_count="$(awk '{ sub(/\r$/, ""); count += 1 } END { print count + 0 }' "${checksum_file}")"
+          if [[ "${checksum_line_count}" -ne 1 ]]; then
             echo "Windows checksum must contain exactly one logical line: ${checksum_file}" >&2
             exit 1
           fi
 
-          read -r windows_sha checksum_archive trailing <<<"${checksum_lines[0]}"
+          checksum_line="$(sed -n '1{s/\r$//;p;}' "${checksum_file}")"
+          read -r windows_sha checksum_archive trailing <<<"${checksum_line}"
           if [[ -n "${trailing:-}" || "${checksum_archive:-}" != "${archive}" ]]; then
             echo "Windows checksum must name exactly ${archive}" >&2
             exit 1
           fi
           if ! [[ "${windows_sha:-}" =~ ^[0-9a-f]{64}$ ]]; then
             echo "Windows checksum must be 64 lowercase hexadecimal characters" >&2
+            exit 1
+          fi
+
+          computed_sha="$(sha256sum -- "${archive_file}" | awk '{print $1}')"
+          if [[ "${computed_sha}" != "${windows_sha}" ]]; then
+            echo "Windows archive checksum mismatch for ${archive}: expected ${windows_sha}, computed ${computed_sha}" >&2
             exit 1
           fi
           echo "WINDOWS_SHA=${windows_sha}" >> "$GITHUB_ENV"

@@ -72,10 +72,19 @@ if [[ -z "${tag}" || -z "${repo}" || -z "${windows_sha}" || -z "${output}" ]]; t
   usage_error "missing required arguments"
 fi
 
-semver_core='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
-semver_suffix='(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?'
-if ! [[ "${tag}" =~ ^v${semver_core}${semver_suffix}$ ]]; then
+semver_tag_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z]+([.-][0-9A-Za-z]+)*))?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+if ! [[ "${tag}" =~ ${semver_tag_regex} ]]; then
   usage_error "invalid release tag (expected v<major>.<minor>.<patch> with optional prerelease/build metadata): ${tag}"
+fi
+
+prerelease="${BASH_REMATCH[5]:-}"
+if [[ -n "${prerelease}" ]]; then
+  IFS='.' read -r -a prerelease_identifiers <<<"${prerelease}"
+  for identifier in "${prerelease_identifiers[@]}"; do
+    if [[ "${identifier}" =~ ^[0-9]+$ && "${identifier}" != "0" && "${identifier}" == 0* ]]; then
+      usage_error "invalid release tag (numeric prerelease identifiers must not contain leading zeroes): ${tag}"
+    fi
+  done
 fi
 
 if ! [[ "${repo}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
