@@ -1,0 +1,207 @@
+name: Publish Scoop Bucket
+
+on:
+  workflow_run:
+    workflows:
+      - Release
+    types:
+      - completed
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-package-repository-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish-bucket:
+    name: Update Scoop manifest
+    if: |
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v')) ||
+      github.event_name == 'release' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPO: ${{ github.repository }}
+      SCOOP_BUCKET_REPO_CONFIG: ${{ vars.SCOOP_BUCKET_REPO }}
+      HOMEBREW_TAP_REPO_CONFIG: ${{ vars.HOMEBREW_TAP_REPO }}
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag and bucket repository
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
+          MANUAL_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            release_tag="${WORKFLOW_RUN_TAG}"
+          elif [[ "${EVENT_NAME}" == "release" ]]; then
+            release_tag="${RELEASE_EVENT_TAG}"
+          else
+            release_tag="${MANUAL_TAG}"
+          fi
+          if [[ -z "${release_tag}" ]]; then
+            echo "release tag could not be resolved" >&2
+            exit 1
+          fi
+          semver_tag_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          if ! [[ "${release_tag}" =~ ${semver_tag_regex} ]]; then
+            echo "invalid release tag: ${release_tag}" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=${release_tag}" >> "$GITHUB_ENV"
+
+          if [[ -n "${SCOOP_BUCKET_REPO_CONFIG}" ]]; then
+            bucket_repo="${SCOOP_BUCKET_REPO_CONFIG}"
+          elif [[ -n "${HOMEBREW_TAP_REPO_CONFIG}" ]]; then
+            bucket_repo="${HOMEBREW_TAP_REPO_CONFIG}"
+          else
+            bucket_repo="${GITHUB_REPOSITORY_OWNER}/stray-tools"
+          fi
+          if ! [[ "${bucket_repo}" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+             [[ "${bucket_repo}" == *..* ]] ||
+             [[ "${bucket_repo}" == */*. ]]; then
+            echo "invalid bucket repository (expected safe owner/repo): ${bucket_repo}" >&2
+            exit 1
+          fi
+          echo "BUCKET_REPO=${bucket_repo}" >> "$GITHUB_ENV"
+
+      - name: Download Windows checksum asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          checksum="dataq-${RELEASE_TAG}-x86_64-pc-windows-msvc.sha256"
+
+          for attempt in 1 2 3 4 5; do
+            rm -f "dist/${checksum}"
+            if gh release download "${RELEASE_TAG}" \
+              --repo "${SOURCE_REPO}" \
+              --pattern "${checksum}" \
+              --dir dist; then
+              break
+            fi
+            if [[ "${attempt}" == "5" ]]; then
+              echo "failed to download Windows checksum ${checksum} for ${RELEASE_TAG}" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Validate Windows checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="dataq-${RELEASE_TAG}-x86_64-pc-windows-msvc.zip"
+          checksum_file="dist/dataq-${RELEASE_TAG}-x86_64-pc-windows-msvc.sha256"
+
+          if [[ ! -f "${checksum_file}" ]]; then
+            echo "Windows checksum file is missing: ${checksum_file}" >&2
+            exit 1
+          fi
+
+          mapfile -t checksum_lines < <(sed 's/\r$//' "${checksum_file}")
+          if [[ "${#checksum_lines[@]}" -ne 1 ]]; then
+            echo "Windows checksum must contain exactly one logical line: ${checksum_file}" >&2
+            exit 1
+          fi
+
+          read -r windows_sha checksum_archive trailing <<<"${checksum_lines[0]}"
+          if [[ -n "${trailing:-}" || "${checksum_archive:-}" != "${archive}" ]]; then
+            echo "Windows checksum must name exactly ${archive}" >&2
+            exit 1
+          fi
+          if ! [[ "${windows_sha:-}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Windows checksum must be 64 lowercase hexadecimal characters" >&2
+            exit 1
+          fi
+          echo "WINDOWS_SHA=${windows_sha}" >> "$GITHUB_ENV"
+
+      - name: Test and generate Scoop manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./scripts/test-generate-scoop-manifest.sh
+          ./scripts/generate-scoop-manifest.sh \
+            --tag "${RELEASE_TAG}" \
+            --repo "${SOURCE_REPO}" \
+            --windows-sha "${WINDOWS_SHA}" \
+            --output dist/dataq.json
+          ./scripts/generate-scoop-manifest.sh \
+            --tag "${RELEASE_TAG}" \
+            --repo "${SOURCE_REPO}" \
+            --windows-sha "${WINDOWS_SHA}" \
+            --output dist/dataq.second.json
+
+          cmp dist/dataq.json dist/dataq.second.json
+          jq -e \
+            --arg version "${RELEASE_TAG#v}" \
+            --arg sha "${WINDOWS_SHA}" \
+            '.version == $version and
+             .architecture["64bit"].hash == $sha and
+             .bin == "dataq.exe" and
+             (.autoupdate.architecture["64bit"].url | contains("$version"))' \
+            dist/dataq.json >/dev/null
+
+      - name: Push manifest to bucket repository
+        shell: bash
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${SCOOP_BUCKET_TOKEN:-}" ]]; then
+            bucket_token="${SCOOP_BUCKET_TOKEN}"
+          elif [[ -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            bucket_token="${HOMEBREW_TAP_TOKEN}"
+          else
+            echo "SCOOP_BUCKET_TOKEN or fallback HOMEBREW_TAP_TOKEN is required" >&2
+            exit 1
+          fi
+
+          export GH_TOKEN="${bucket_token}"
+          gh auth setup-git
+          gh repo clone "${BUCKET_REPO}" bucket
+          mkdir -p bucket/bucket
+          cp dist/dataq.json bucket/bucket/dataq.json
+
+          cd bucket
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- bucket/dataq.json
+
+          if git diff --cached --quiet; then
+            echo "Scoop manifest is already up to date"
+            exit 0
+          fi
+
+          changed_paths="$(git diff --cached --name-only)"
+          if [[ "${changed_paths}" != "bucket/dataq.json" ]]; then
+            echo "refusing to publish unexpected paths: ${changed_paths}" >&2
+            exit 1
+          fi
+
+          git commit -m "dataq ${RELEASE_TAG}"
+          git push origin HEAD
